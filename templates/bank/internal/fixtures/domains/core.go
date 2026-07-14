@@ -177,7 +177,7 @@ func WriteStatic(ctx context.Context, db *sql.DB, data StaticData) error {
 		if s[4] != "" {
 			parent = s[4]
 		}
-		if _, err := db.ExecContext(ctx, "INSERT INTO chart_of_acct(subject_code,subject_name,dc_attr,level,parent_subject,status) VALUES($1,$2,$3,$4,$5,'active')", s[0], s[1], s[2], s[3], s[4], parent); err != nil {
+		if _, err := db.ExecContext(ctx, "INSERT INTO chart_of_acct(subject_code,subject_name,dc_attr,level,parent_subject,status) VALUES($1,$2,$3,$4,$5,'active')", s[0], s[1], s[2], s[3], parent); err != nil {
 			return err
 		}
 	}
