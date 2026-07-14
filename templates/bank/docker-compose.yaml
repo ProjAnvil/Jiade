@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: bank-postgres
+    environment:
+      POSTGRES_USER: bank
+      POSTGRES_PASSWORD: bank
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bank"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  core-banking:
+    build: .
+    container_name: bank-core-banking
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: bank
+      DB_PASSWORD: bank
+      DB_NAME: core_db
+      API_PORT: "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
