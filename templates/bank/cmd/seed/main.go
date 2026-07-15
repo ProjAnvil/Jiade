@@ -12,11 +12,11 @@ import (
 
 	"bank/internal/fixtures"
 	"bank/internal/fixtures/domains"
+	"bank/internal/platform/fdw"
 	"bank/internal/platform/migrate"
 	"bank/internal/platform/pg"
 )
 
-// 所有业务库与其迁移 SQL（顺序无关，建库建表幂等）。
 var allDBs = []struct{ name, sql string }{
 	{"core_db", "db/migrations/core_db.sql"},
 	{"cust_db", "db/migrations/cust_db.sql"},
@@ -27,42 +27,45 @@ func main() {
 	scale := flag.String("scale", "dev", "规模：dev|full")
 	reset := flag.Bool("reset", false, "重建库与表（幂等）")
 	flag.Parse()
-
 	cfg := fixtures.DefaultConfig(fixtures.Scale(*scale))
 	log.Printf("[seed] scale=%s biz_date=%s~%s seed=%d reset=%v",
 		*scale, cfg.StartBizDate, cfg.EndBizDate, cfg.Seed, *reset)
+	if err := runSeed(context.Background(), cfg, *reset); err != nil {
+		log.Fatalf("[seed] 失败: %v", err)
+	}
+	log.Println("[seed] 完成 ✅（3 库 + core + customer + payment + FDW）")
+}
 
-	ctx := context.Background()
-
-	log.Println("[seed] 1/6 建 3 库")
+func runSeed(ctx context.Context, cfg fixtures.Config, reset bool) error {
 	names := make([]string, len(allDBs))
 	for i, d := range allDBs {
 		names[i] = d.name
 	}
-	if err := ensureDBs(ctx, *reset, names); err != nil {
-		log.Fatalf("建库失败: %v（请先 make up 启动 postgres）", err)
+	log.Println("[seed] 1/6 建 3 库")
+	if err := ensureDBs(ctx, reset, names); err != nil {
+		return fmt.Errorf("建库: %w（请先 make up）", err)
 	}
-
 	log.Println("[seed] 2/6 建 3 库表")
 	for _, d := range allDBs {
 		db, err := pg.Open(d.name)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		ddl, err := os.ReadFile(d.sql)
 		if err != nil {
-			log.Fatalf("读 %s 失败: %v（请在工程根目录运行）", d.sql, err)
+			return fmt.Errorf("读 %s: %w（在工程根目录运行）", d.sql, err)
 		}
 		if err := migrate.Run(ctx, db, string(ddl)); err != nil {
-			log.Fatalf("建表 %s 失败: %v", d.name, err)
+			db.Close()
+			return fmt.Errorf("建表 %s: %w", d.name, err)
 		}
 		db.Close()
 	}
 
-	log.Println("[seed] 3/6 core 生成 + 灌数据")
+	log.Println("[seed] 3/6 core")
 	coreDB, err := pg.Open("core_db")
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer coreDB.Close()
 	demand, fixed := domains.GenAccountRows(cfg)
@@ -70,30 +73,80 @@ func main() {
 	for i, d := range demand {
 		demandNos[i] = d.AccountNo
 	}
-	balances := domains.GenBalanceRows(cfg, demandNos)
-	txns := domains.GenTxnRows(cfg, demandNos)
 	if err := domains.WriteStatic(ctx, coreDB, domains.GenStaticData(cfg)); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err := domains.WriteAccounts(ctx, coreDB, demand, fixed); err != nil {
-		log.Fatal(err)
+		return err
 	}
-	if err := domains.WriteBalances(ctx, coreDB, balances); err != nil {
-		log.Fatal(err)
+	if err := domains.WriteBalances(ctx, coreDB, domains.GenBalanceRows(cfg, demandNos)); err != nil {
+		return err
 	}
-	if err := domains.WriteTxns(ctx, coreDB, txns); err != nil {
-		log.Fatal(err)
+	if err := domains.WriteTxns(ctx, coreDB, domains.GenTxnRows(cfg, demandNos)); err != nil {
+		return err
 	}
-	log.Printf("[seed] core: 活期 %d 定期 %d 余额 %d 流水 %d",
-		len(demand), len(fixed), len(balances), len(txns))
 
-	log.Println("[seed] 4/6 customer 域（占位，Task 12 接入）")
-	log.Println("[seed] 5/6 payment 域（占位，Task 12 接入）")
-	log.Println("[seed] 6/6 setup_fdw（占位，Task 12 接入）")
-	log.Println("[seed] 完成 ✅（core；customer/payment/fdw 待 Task 12 接入）")
+	log.Println("[seed] 4/6 customer")
+	// cust_id/account_no 编号规则与 core 一致 → 确定性关联
+	nCustomers := cfg.TargetCounts().DemandAccounts / 2
+	if nCustomers < 1 {
+		nCustomers = 1
+	}
+	customers := domains.GenCustomers(cfg, nCustomers)
+	// cust_account_rel：每个 core 活期账户一条户主关系
+	pairs := make([][2]string, len(demand))
+	for i, d := range demand {
+		pairs[i] = [2]string{d.CustID, d.AccountNo}
+	}
+	rels := domains.GenAccountRels(pairs)
+	custDB, err := pg.Open("cust_db")
+	if err != nil {
+		return err
+	}
+	if err := domains.WriteCustomers(ctx, custDB, customers); err != nil {
+		custDB.Close()
+		return err
+	}
+	if err := domains.WriteAccountRels(ctx, custDB, rels); err != nil {
+		custDB.Close()
+		return err
+	}
+	custDB.Close()
+
+	log.Println("[seed] 5/6 payment")
+	tc := cfg.TargetCounts()
+	nMerchants := 50 // dev 缩影
+	if tc.DemandAccounts > 4000 {
+		nMerchants = 200 // full
+	}
+	merchants := domains.GenMerchants(cfg, nMerchants)
+	merchantIDs := make([]string, len(merchants))
+	for i, m := range merchants {
+		merchantIDs[i] = m.MerchantID
+	}
+	// 缩影量级：转账/消费各 dev 级一批（不做切日滚存）
+	nTransfer := tc.DemandAccounts / 2
+	nConsumption := tc.DemandAccounts
+	transfers := domains.GenTransfers(cfg, demandNos, nTransfer)
+	consumptions := domains.GenConsumptions(cfg, demandNos, merchantIDs, nConsumption)
+	payDB, err := pg.Open("pay_db")
+	if err != nil {
+		return err
+	}
+	if err := domains.WritePayments(ctx, payDB, merchants, transfers, consumptions); err != nil {
+		payDB.Close()
+		return err
+	}
+	payDB.Close()
+
+	log.Println("[seed] 6/6 setup_fdw")
+	if err := fdw.SetupFDW(ctx); err != nil {
+		return fmt.Errorf("setup_fdw: %w", err)
+	}
+	return nil
 }
 
-// ensureDBs 确保 names 中的库都存在；reset 时先 DROP 再 CREATE。连不上时短暂重试。
+// ensureDBs（同 Task 2，保留不动）。
 func ensureDBs(ctx context.Context, reset bool, names []string) error {
 	var admin *sql.DB
 	var err error
@@ -111,7 +164,6 @@ func ensureDBs(ctx context.Context, reset bool, names []string) error {
 		return fmt.Errorf("连 postgres 管理库: %w", err)
 	}
 	defer admin.Close()
-
 	for _, db := range names {
 		var exists bool
 		if err := admin.QueryRowContext(ctx,
