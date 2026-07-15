@@ -16,6 +16,13 @@ import (
 	"bank/internal/platform/pg"
 )
 
+// 所有业务库与其迁移 SQL（顺序无关，建库建表幂等）。
+var allDBs = []struct{ name, sql string }{
+	{"core_db", "db/migrations/core_db.sql"},
+	{"cust_db", "db/migrations/cust_db.sql"},
+	{"pay_db", "db/migrations/pay_db.sql"},
+}
+
 func main() {
 	scale := flag.String("scale", "dev", "规模：dev|full")
 	reset := flag.Bool("reset", false, "重建库与表（幂等）")
@@ -27,26 +34,37 @@ func main() {
 
 	ctx := context.Background()
 
-	log.Println("[seed] 1/4 建库")
-	if err := ensureDB(ctx, *reset); err != nil {
+	log.Println("[seed] 1/6 建 3 库")
+	names := make([]string, len(allDBs))
+	for i, d := range allDBs {
+		names[i] = d.name
+	}
+	if err := ensureDBs(ctx, *reset, names); err != nil {
 		log.Fatalf("建库失败: %v（请先 make up 启动 postgres）", err)
 	}
 
-	log.Println("[seed] 2/4 建表")
-	db, err := pg.Open("core_db")
+	log.Println("[seed] 2/6 建 3 库表")
+	for _, d := range allDBs {
+		db, err := pg.Open(d.name)
+		if err != nil {
+			log.Fatal(err)
+		}
+		ddl, err := os.ReadFile(d.sql)
+		if err != nil {
+			log.Fatalf("读 %s 失败: %v（请在工程根目录运行）", d.sql, err)
+		}
+		if err := migrate.Run(ctx, db, string(ddl)); err != nil {
+			log.Fatalf("建表 %s 失败: %v", d.name, err)
+		}
+		db.Close()
+	}
+
+	log.Println("[seed] 3/6 core 生成 + 灌数据")
+	coreDB, err := pg.Open("core_db")
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
-	ddl, err := os.ReadFile("db/migrations/core_db.sql")
-	if err != nil {
-		log.Fatalf("读 core_db.sql 失败: %v（请在工程根目录运行）", err)
-	}
-	if err := migrate.Run(ctx, db, string(ddl)); err != nil {
-		log.Fatalf("建表失败: %v", err)
-	}
-
-	log.Println("[seed] 3/4 生成 + 灌数据")
+	defer coreDB.Close()
 	demand, fixed := domains.GenAccountRows(cfg)
 	demandNos := make([]string, len(demand))
 	for i, d := range demand {
@@ -54,26 +72,29 @@ func main() {
 	}
 	balances := domains.GenBalanceRows(cfg, demandNos)
 	txns := domains.GenTxnRows(cfg, demandNos)
-
-	if err := domains.WriteStatic(ctx, db, domains.GenStaticData(cfg)); err != nil {
+	if err := domains.WriteStatic(ctx, coreDB, domains.GenStaticData(cfg)); err != nil {
 		log.Fatal(err)
 	}
-	if err := domains.WriteAccounts(ctx, db, demand, fixed); err != nil {
+	if err := domains.WriteAccounts(ctx, coreDB, demand, fixed); err != nil {
 		log.Fatal(err)
 	}
-	if err := domains.WriteBalances(ctx, db, balances); err != nil {
+	if err := domains.WriteBalances(ctx, coreDB, balances); err != nil {
 		log.Fatal(err)
 	}
-	if err := domains.WriteTxns(ctx, db, txns); err != nil {
+	if err := domains.WriteTxns(ctx, coreDB, txns); err != nil {
 		log.Fatal(err)
 	}
-
-	log.Printf("[seed] 4/4 完成 ✅ 活期 %d 定期 %d 余额 %d 流水 %d",
+	log.Printf("[seed] core: 活期 %d 定期 %d 余额 %d 流水 %d",
 		len(demand), len(fixed), len(balances), len(txns))
+
+	log.Println("[seed] 4/6 customer 域（占位，Task 12 接入）")
+	log.Println("[seed] 5/6 payment 域（占位，Task 12 接入）")
+	log.Println("[seed] 6/6 setup_fdw（占位，Task 12 接入）")
+	log.Println("[seed] 完成 ✅（core；customer/payment/fdw 待 Task 12 接入）")
 }
 
-// ensureDB 确保 core_db 存在；reset 时先 DROP 再 CREATE。连不上时短暂重试。
-func ensureDB(ctx context.Context, reset bool) error {
+// ensureDBs 确保 names 中的库都存在；reset 时先 DROP 再 CREATE。连不上时短暂重试。
+func ensureDBs(ctx context.Context, reset bool, names []string) error {
 	var admin *sql.DB
 	var err error
 	for i := 0; i < 5; i++ {
@@ -91,21 +112,23 @@ func ensureDB(ctx context.Context, reset bool) error {
 	}
 	defer admin.Close()
 
-	var exists bool
-	if err := admin.QueryRowContext(ctx,
-		"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname='core_db')").Scan(&exists); err != nil {
-		return err
-	}
-	if exists && reset {
-		admin.ExecContext(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='core_db' AND pid<>pg_backend_pid()")
-		if _, err := admin.ExecContext(ctx, "DROP DATABASE core_db"); err != nil {
+	for _, db := range names {
+		var exists bool
+		if err := admin.QueryRowContext(ctx,
+			"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)", db).Scan(&exists); err != nil {
 			return err
 		}
-		exists = false
-	}
-	if !exists {
-		if _, err := admin.ExecContext(ctx, "CREATE DATABASE core_db"); err != nil {
-			return err
+		if exists && reset {
+			admin.ExecContext(ctx, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()", db)
+			if _, err := admin.ExecContext(ctx, fmt.Sprintf(`DROP DATABASE "%s"`, db)); err != nil {
+				return err
+			}
+			exists = false
+		}
+		if !exists {
+			if _, err := admin.ExecContext(ctx, fmt.Sprintf(`CREATE DATABASE "%s"`, db)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
