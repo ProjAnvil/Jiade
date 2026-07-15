@@ -96,23 +96,42 @@ func (r *LedgerRepo) GetGL(ctx context.Context, bizDate string) ([]domain.GLBala
 	return out, rows.Err()
 }
 
-// EnsureBalanceRow 锁定账户最新 biz_date 的余额行（FOR UPDATE），若当天 biz_date 无行则从最新行
+// EnsureBalanceRow 锁定账户当天 biz_date 的余额行（FOR UPDATE），若当天无行则从最新历史行
 // 继承 balance/available/frozen 到当天（解决跨日继承：ApplyBalanceDeltas 只累加不继承）。
 // 返回当天可用余额基准（= 继承后的当天余额）。调用方须在同一事务内随后调用 ApplyBalanceDeltas。
+//
+// 并发安全：跨日继承的「建当天行」是 INSERT ... ON CONFLICT DO NOTHING —— 首个事务建行成功，
+// 并发事务的建行被 ON CONFLICT 吞掉（不报 duplicate-key）。建行后再对「当天行」FOR UPDATE，
+// 使并发转账在当天行上串行（与 ApplyBalanceDeltas 的 ON CONFLICT 累加形成一致的临界区）。
+// 这是 B-3 验收「并发 A→B/B→A 不死锁且余额正确」的关键修复：原实现仅锁历史行，
+// 两个事务的 FOR UPDATE 都看到 latestDate<bizDate，各自 INSERT 导致 unique 冲突。
 func (r *LedgerRepo) EnsureBalanceRow(ctx context.Context, q pg.DBTX, accountNo, bizDate, subjectCode string) (domain.Balance, error) {
+	// 1. 若当天行不存在，从最新历史行继承建行（ON CONFLICT 吞掉并发建行的 duplicate-key）。
+	if _, err := q.ExecContext(ctx, `
+		INSERT INTO account_balance (account_no,biz_date,balance,available_balance,frozen_amount,subject_code)
+		SELECT $1, $2, balance, available_balance, frozen_amount, COALESCE(NULLIF($3,''), subject_code)
+		FROM account_balance WHERE account_no=$1
+		ORDER BY biz_date DESC LIMIT 1
+		ON CONFLICT (account_no,biz_date) DO NOTHING`,
+		accountNo, bizDate, subjectCode); err != nil {
+		return domain.Balance{}, fmt.Errorf("repo: 继承余额到 %s 失败: %w", bizDate, err)
+	}
+
+	// 2. 锁定当天行并读取权威基准余额。并发转账在此串行（同一当天行）。
 	var (
-		b                              domain.Balance
-		latestDate                     string
-		balStr, availStr, frozenStr    string
+		b                           domain.Balance
+		balStr, availStr, frozenStr string
 	)
 	err := q.QueryRowContext(ctx, `
-		SELECT biz_date::text, balance::text, available_balance::text, frozen_amount::text
-		FROM account_balance WHERE account_no=$1 ORDER BY biz_date DESC LIMIT 1 FOR UPDATE`, accountNo).
-		Scan(&latestDate, &balStr, &availStr, &frozenStr)
+		SELECT balance::text, available_balance::text, frozen_amount::text
+		FROM account_balance WHERE account_no=$1 AND biz_date=$2 FOR UPDATE`,
+		accountNo, bizDate).
+		Scan(&balStr, &availStr, &frozenStr)
 	if err != nil {
-		return domain.Balance{}, fmt.Errorf("repo: 锁余额失败 %s: %w", accountNo, err)
+		return domain.Balance{}, fmt.Errorf("repo: 锁当天余额失败 %s %s: %w", accountNo, bizDate, err)
 	}
 	b.AccountNo = accountNo
+	b.BizDate = bizDate
 	b.SubjectCode = subjectCode
 	if b.Balance, err = domain.ParseCents(balStr); err != nil {
 		return domain.Balance{}, err
@@ -123,18 +142,6 @@ func (r *LedgerRepo) EnsureBalanceRow(ctx context.Context, q pg.DBTX, accountNo,
 	if b.FrozenAmount, err = domain.ParseCents(frozenStr); err != nil {
 		return domain.Balance{}, err
 	}
-	if latestDate == bizDate {
-		b.BizDate = bizDate
-		return b, nil // 当天行已存在
-	}
-	// 继承最新余额到当天（新建当天行）
-	if _, err = q.ExecContext(ctx, `INSERT INTO account_balance
-		(account_no,biz_date,balance,available_balance,frozen_amount,subject_code)
-		VALUES ($1,$2,$3,$4,$5,$6)`,
-		accountNo, bizDate, balStr, availStr, frozenStr, subjectCode); err != nil {
-		return domain.Balance{}, fmt.Errorf("repo: 继承余额到 %s 失败: %w", bizDate, err)
-	}
-	b.BizDate = bizDate
 	return b, nil
 }
 

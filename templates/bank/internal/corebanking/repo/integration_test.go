@@ -9,6 +9,7 @@ import (
 
 	"bank/internal/corebanking/domain"
 	"bank/internal/corebanking/repo"
+	"bank/internal/corebanking/service"
 	"bank/internal/platform/pg"
 )
 
@@ -95,9 +96,9 @@ func TestLedgerRepo_EnsureBalanceRow_InheritsAcrossDate(t *testing.T) {
 		AccountNo: "IT-D3", CustID: "C", Ccy: "CNY", Status: domain.AccountStatusActive,
 		OpenBizDate: "2026-07-15", SubjectCode: "2011",
 	})
-	// 建一个历史日余额行（基线 500.00）
+	// 建一个历史日余额行（基线 500.00 元；列为 numeric(18,2)，以「元」存值）
 	db.ExecContext(ctx, `INSERT INTO account_balance (account_no,biz_date,balance,available_balance,subject_code)
-		VALUES ('IT-D3','2026-07-15',50000,50000,'2011')`)
+		VALUES ('IT-D3','2026-07-15',500.00,500.00,'2011')`)
 
 	// 当天（2026-07-16）无行 → EnsureBalanceRow 应继承并返回 500.00
 	pg.RunInTx(ctx, db, func(q pg.DBTX) error {
@@ -121,5 +122,48 @@ func TestLedgerRepo_EnsureBalanceRow_InheritsAcrossDate(t *testing.T) {
 	}
 	if b.Balance != domain.NewMoneyFromCents(40000) {
 		t.Errorf("继承+累加后余额=%s, want 400.00", b.Balance)
+	}
+}
+
+func TestRecord_Concurrent_NoDeadlock(t *testing.T) {
+	db := setupDB(t)
+	defer db.Close()
+	ctx := context.Background()
+	ar := repo.NewAccountRepo(db)
+	lr := repo.NewLedgerRepo(db)
+	svc := service.NewTxnService(db, ar, service.NewLedgerService(lr), lr)
+
+	for _, no := range []string{"CD-A", "CD-B"} {
+		db.ExecContext(ctx, "DELETE FROM acct_txn WHERE account_no=$1", no)
+		db.ExecContext(ctx, "DELETE FROM account_balance WHERE account_no=$1", no)
+		db.ExecContext(ctx, "DELETE FROM demand_account WHERE account_no=$1", no)
+		ar.InsertDemand(ctx, domain.DemandAccount{
+			AccountNo: no, CustID: "C", Ccy: "CNY", Status: domain.AccountStatusActive,
+			OpenBizDate: "2026-07-15", SubjectCode: "2011",
+		})
+		// 列为 numeric(18,2) 以「元」存值；10000.00 元 = 1000000 分（断言以分为单位）。
+		db.ExecContext(ctx, `INSERT INTO account_balance (account_no,biz_date,balance,available_balance,subject_code)
+			VALUES ($1,'2026-07-15',10000.00,10000.00,'2011')`, no) // 各 10000.00 元
+	}
+
+	errs := make(chan error, 2)
+	// T1: A→B；T2: B→A —— 若无 lock ordering 会 AB-BA 死锁
+	go func() { _, e := svc.Record(ctx, service.RecordInput{Action: domain.ActionTransfer, FromAccount: "CD-A", ToAccount: "CD-B", Amount: domain.NewMoneyFromCents(10000), Ccy: "CNY"}); errs <- e }()
+	go func() { _, e := svc.Record(ctx, service.RecordInput{Action: domain.ActionTransfer, FromAccount: "CD-B", ToAccount: "CD-A", Amount: domain.NewMoneyFromCents(5000), Ccy: "CNY"}); errs <- e }()
+
+	for i := 0; i < 2; i++ {
+		if e := <-errs; e != nil {
+			t.Fatalf("并发转账失败: %v", e)
+		}
+	}
+	// 两笔都成功：A 余额 10000-100+50=9950.00；B 余额 10000+100-50=10050.00
+	tr := repo.NewTxnRepo(db)
+	ba, _ := tr.GetLatestBalance(ctx, "CD-A")
+	bb, _ := tr.GetLatestBalance(ctx, "CD-B")
+	if ba.Balance != domain.NewMoneyFromCents(995000) {
+		t.Errorf("A 余额=%s, want 9950.00", ba.Balance)
+	}
+	if bb.Balance != domain.NewMoneyFromCents(1005000) {
+		t.Errorf("B 余额=%s, want 10050.00", bb.Balance)
 	}
 }
