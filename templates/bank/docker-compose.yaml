@@ -18,6 +18,7 @@ services:
   core-banking:
     build: .
     container_name: bank-core-banking
+    restart: unless-stopped
     environment:
       DB_HOST: postgres
       DB_PORT: "5432"
