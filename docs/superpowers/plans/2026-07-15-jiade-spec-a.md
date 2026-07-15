@@ -22,6 +22,7 @@
 - **子进程 stderr 透传**：`up`/`seed` 不吞子进程 stderr，退出码透传（§10）。
 - **module path**：jiade module = `github.com/projanvil/jiade`；bank 模板 module = `bank`。
 - **Go 版本**：`go 1.22`（`math/rand/v2` 在 1.22 稳定，用于确定性 fixture）。
+- **embed 机制（执行中修正）**：原计划 `//go:embed all:templates` **无法**嵌入嵌套 module（`templates/bank/go.mod`——实证报 `contains no embeddable files`）。改用 `//go:embed templates.tar`（单文件，`go:generate` 从 `templates/bank` 打包）+ `init` 用 `archive/tar` 解压（逐字、零替换，符合 §5.1 纯 copy）。`templates.tar` 不入 git（`.gitignore`）；任何 jiade 的 `go build`/`go test` 前**必须** `go generate ./internal/template`（或 `tar -C templates -cf internal/template/templates.tar bank`）重新打包。bank 模板原地真实 `go.mod` 保留不变。
 
 ## Scope Check（关于单一计划）
 
@@ -3402,6 +3403,8 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 ### Task 14: internal/template — registry + manifest + 逐字 copy
 
+> ⚠️ **实施时已改 tar 方案**：原 `//go:embed all:templates`（embed.FS 目录）因 Go 不能嵌入嵌套 module 而改为 `//go:embed templates.tar`（go:generate 打包）+ `archive/tar` 解压。详细步骤与代码以 `.superpowers/sdd/task-14-brief.md` 为准（已更新为 tar 版）。下方原 embed.FS 代码保留作历史记录，**不再有效**。
+
 **Files:**
 - Create: `internal/template/manifest.go`
 - Create: `internal/template/registry.go`
@@ -4306,10 +4309,14 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 Create `Makefile`:
 ```makefile
-.PHONY: test bank-test e2e clean
+.PHONY: generate test bank-test e2e clean
+
+# 打包 templates/bank → templates.tar（go:embed 需要；改模板后重跑）
+generate:
+	go generate ./internal/template
 
 # jiade 自身（不含 templates/bank——它是独立 module）
-test:
+test: generate
 	go build ./...
 	go test ./...
 
@@ -4318,7 +4325,7 @@ bank-test:
 	cd templates/bank && go build ./... && go test ./...
 
 # 端到端冒烟（需 docker；验收 #5）
-e2e:
+e2e: generate
 	rm -rf /tmp/jiade-e2e
 	go run ./cmd/jiade init --template bank --dir /tmp/jiade-e2e --force
 	cd /tmp/jiade-e2e && docker compose up -d --build
@@ -4348,6 +4355,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+      - run: go generate ./internal/template
       - run: go build ./...
       - run: go test ./...
 
