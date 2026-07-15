@@ -1,4 +1,4 @@
-// Package main 是 core-banking 只读 API 服务入口。
+// Package main 是 core-banking API 服务入口（只读查询 + B-3 记账/冲正写接口）。
 package main
 
 import (
@@ -29,15 +29,15 @@ func main() {
 		log.Fatalf("连 %s 失败: %v（请先 make up 再 make seed）", dbName, err)
 	}
 
+	ledgerRepo := repo.NewLedgerRepo(db)
+	ledgerSvc := service.NewLedgerService(ledgerRepo)
+	txnRepo := repo.NewTxnRepo(db)
+	txnSvc := service.NewTxnService(db, repo.NewAccountRepo(db), ledgerSvc, ledgerRepo).WithReader(txnRepo)
+
 	handlers := &api.Handlers{
 		Accounts: repo.NewAccountRepo(db),
-		TxnSvc: service.NewTxnService(
-			db,
-			repo.NewAccountRepo(db),
-			service.NewLedgerService(repo.NewLedgerRepo(db)),
-			repo.NewLedgerRepo(db),
-		).WithReader(repo.NewTxnRepo(db)),
-		Ledger: repo.NewLedgerRepo(db),
+		TxnSvc:   txnSvc,
+		Ledger:   ledgerRepo,
 	}
 	port := getenv("API_PORT", "8080")
 	srv := &http.Server{Addr: ":" + port, Handler: api.NewRouter(handlers)}
