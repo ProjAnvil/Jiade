@@ -1,8 +1,8 @@
 package cli
 
 import (
-	"fmt"
-
+	"github.com/projanvil/jiade/internal/template"
+	"github.com/projanvil/jiade/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -11,7 +11,27 @@ func newListCmd(opts *Options) *cobra.Command {
 		Use:   "list",
 		Short: "列出可用模板",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("list: 尚未实现（见 Task 16）")
+			reg, err := template.New()
+			if err != nil {
+				return err
+			}
+			names, err := reg.Names()
+			if err != nil {
+				return err
+			}
+			u := ui.New(opts.Stdout, opts.Stderr)
+			if len(names) == 0 {
+				u.Warn("无可用模板")
+				return nil
+			}
+			for _, n := range names {
+				desc := ""
+				if m, err := reg.Manifest(n); err == nil {
+					desc = m.Description
+				}
+				u.Step("%s — %s", n, desc)
+			}
+			return nil
 		},
 	}
 }
