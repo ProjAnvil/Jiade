@@ -1,1 +1,2 @@
-templates.tar
+# templates.tar 是 //go:embed 的输入，须提交（go build 在缺失时报编译错）。
+# 由 `go generate ./internal/template` 从仓根 templates/bank 重新打包。
