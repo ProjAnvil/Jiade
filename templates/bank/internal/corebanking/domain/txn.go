@@ -14,6 +14,8 @@ type Txn struct {
 	RefTxnID    string
 	Channel     string
 	Summary     string
+	VoucherNo   string    // 凭证号：一笔记账的所有分录共用
+	TxnStatus   TxnStatus // normal / reversed
 }
 
 // Balance 分户账余额快照（对应 account_balance 表）。

@@ -87,6 +87,9 @@ CREATE TABLE IF NOT EXISTS acct_txn (
 );
 CREATE INDEX IF NOT EXISTS idx_acct_txn_bizdate ON acct_txn(biz_date);
 CREATE INDEX IF NOT EXISTS idx_acct_txn_acct ON acct_txn(account_no, biz_date);
+ALTER TABLE acct_txn ADD COLUMN IF NOT EXISTS voucher_no  TEXT NOT NULL DEFAULT '';
+ALTER TABLE acct_txn ADD COLUMN IF NOT EXISTS txn_status  TEXT NOT NULL DEFAULT 'normal';
+CREATE INDEX IF NOT EXISTS idx_acct_txn_voucher ON acct_txn(voucher_no);
 
 CREATE TABLE IF NOT EXISTS gl_balance (
     subject_code TEXT NOT NULL,
