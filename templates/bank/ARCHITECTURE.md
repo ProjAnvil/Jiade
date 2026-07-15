@@ -80,6 +80,7 @@ pay_db  ←──FDW── cust_db (cust_info)
 - **Spec A**：core-banking 单服务（活期/定存 + 复式记账 + 总账）。
 - **Spec B-1**：customer + payment 两服务纵切 + 多库 + FDW 联邦（本架构）。
 - **Spec B-2/B-3/B-4**（留后续）：多日切日引擎、写 HTTP 接口、剩余 4 服务（reward/risk/loan/wealth）。
+- **注**：pay_db 的 `channel_txn`/`fee_record`/`settlement_record` 表已建（schema 完整），fixture 数据留 B-2 多日引擎一起补（B-1 不阻塞：仅 merchant/transfer 参与 FDW 联邦与只读 API）。
 
 ## 金融不变量
 
