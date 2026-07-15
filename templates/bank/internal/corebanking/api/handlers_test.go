@@ -90,7 +90,8 @@ func TestGetAccount_NotFound(t *testing.T) {
 }
 
 func TestGetBalance(t *testing.T) {
-	h := &Handlers{TxnSvc: service.NewTxnService(fakeTxnStore{bal: &domain.Balance{
+	// 只读路径：写依赖 db/accounts/ledger/store 用 nil（Record 不触发），仅注入 read
+	h := &Handlers{TxnSvc: service.NewTxnService(nil, nil, nil, nil).WithReader(fakeTxnStore{bal: &domain.Balance{
 		AccountNo: "D1", BizDate: "2026-07-15", Balance: domain.NewMoneyFromCents(123456),
 		AvailableBalance: domain.NewMoneyFromCents(123456),
 	}})}

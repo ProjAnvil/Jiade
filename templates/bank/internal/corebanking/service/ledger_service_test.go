@@ -74,6 +74,10 @@ type recordingLedgerStore struct {
 	txns   []domain.Txn
 	deltas []domain.BalanceDelta
 	gl     *domain.GLBalance
+
+	summaryCalls       int
+	lastSummaryVoucher string
+	lastSummary        string
 }
 
 func (f *recordingLedgerStore) InsertTxns(_ context.Context, _ pg.DBTX, txns []domain.Txn) error {
@@ -107,5 +111,11 @@ func (f *recordingLedgerStore) GetTxnsByVoucher(context.Context, pg.DBTX, string
 }
 func (f *recordingLedgerStore) UpdateTxnStatus(context.Context, pg.DBTX, string, domain.TxnStatus) error {
 	f.calls++
+	return nil
+}
+func (f *recordingLedgerStore) SetTxnSummary(_ context.Context, _ pg.DBTX, voucherNo, summary string) error {
+	f.summaryCalls++
+	f.lastSummaryVoucher = voucherNo
+	f.lastSummary = summary
 	return nil
 }

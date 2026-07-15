@@ -20,6 +20,7 @@ type LedgerStore interface {
 	EnsureBalanceRow(ctx context.Context, q pg.DBTX, accountNo, bizDate, subjectCode string) (domain.Balance, error)
 	GetTxnsByVoucher(ctx context.Context, q pg.DBTX, voucherNo string) ([]domain.Txn, error)
 	UpdateTxnStatus(ctx context.Context, q pg.DBTX, voucherNo string, status domain.TxnStatus) error
+	SetTxnSummary(ctx context.Context, q pg.DBTX, voucherNo, summary string) error
 }
 
 // LedgerService 复式记账用例。

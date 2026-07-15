@@ -31,8 +31,13 @@ func main() {
 
 	handlers := &api.Handlers{
 		Accounts: repo.NewAccountRepo(db),
-		TxnSvc:   service.NewTxnService(repo.NewTxnRepo(db)),
-		Ledger:   repo.NewLedgerRepo(db),
+		TxnSvc: service.NewTxnService(
+			db,
+			repo.NewAccountRepo(db),
+			service.NewLedgerService(repo.NewLedgerRepo(db)),
+			repo.NewLedgerRepo(db),
+		).WithReader(repo.NewTxnRepo(db)),
+		Ledger: repo.NewLedgerRepo(db),
 	}
 	port := getenv("API_PORT", "8080")
 	srv := &http.Server{Addr: ":" + port, Handler: api.NewRouter(handlers)}

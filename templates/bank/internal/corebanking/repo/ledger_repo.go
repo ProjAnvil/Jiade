@@ -178,6 +178,16 @@ func (r *LedgerRepo) UpdateTxnStatus(ctx context.Context, q pg.DBTX, voucherNo s
 	return nil
 }
 
+// SetTxnSummary 把某凭证下所有流水的 summary 改为传入值（Record 在 Post 后调用，Post 不填 summary）。
+func (r *LedgerRepo) SetTxnSummary(ctx context.Context, q pg.DBTX, voucherNo, summary string) error {
+	_, err := q.ExecContext(ctx, `UPDATE acct_txn SET summary=$2 WHERE voucher_no=$1`,
+		voucherNo, summary)
+	if err != nil {
+		return fmt.Errorf("repo: 更新流水摘要: %w", err)
+	}
+	return nil
+}
+
 func nullable(s string) any {
 	if s == "" {
 		return nil
