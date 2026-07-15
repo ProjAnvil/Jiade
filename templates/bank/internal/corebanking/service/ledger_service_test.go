@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"bank/internal/corebanking/domain"
+	"bank/internal/platform/pg"
 )
 
 func TestValidateBalance_Balanced(t *testing.T) {
@@ -40,7 +41,7 @@ func TestPost_Unbalanced_RefusesAndDoesNotTouchStore(t *testing.T) {
 		{AccountNo: "D1", DCFlag: domain.DCDebit, Amount: 100},
 		{AccountNo: "D2", DCFlag: domain.DCCredit, Amount: 99},
 	}
-	err := svc.Post(context.Background(), entries, "2026-07-15", "CNY")
+	_, err := svc.Post(context.Background(), nil, entries, "2026-07-15", "CNY", "V1", "")
 	if !errors.Is(err, ErrUnbalanced) {
 		t.Fatalf("Post 不平应返回 ErrUnbalanced, got %v", err)
 	}
@@ -49,28 +50,25 @@ func TestPost_Unbalanced_RefusesAndDoesNotTouchStore(t *testing.T) {
 	}
 }
 
-func TestPost_Balanced_Persists(t *testing.T) {
+func TestPost_Balanced_PersistsAndReturnsTxns(t *testing.T) {
 	store := &recordingLedgerStore{}
 	svc := NewLedgerService(store)
 	entries := []domain.Entry{
 		{AccountNo: "D1", DCFlag: domain.DCDebit, Amount: 10000, SubjectCode: "1001"},
 		{AccountNo: "D2", DCFlag: domain.DCCredit, Amount: 10000, SubjectCode: "2011"},
 	}
-	if err := svc.Post(context.Background(), entries, "2026-07-15", "CNY"); err != nil {
+	txns, err := svc.Post(context.Background(), nil, entries, "2026-07-15", "CNY", "V1", "")
+	if err != nil {
 		t.Fatalf("Post 平账应成功: %v", err)
 	}
-	if len(store.txns) != 2 {
-		t.Errorf("应写 2 笔流水, got %d", len(store.txns))
+	if len(txns) != 2 || txns[0].VoucherNo != "V1" {
+		t.Errorf("应返回 2 条带 voucherNo 的流水, got %+v", txns)
 	}
-	if len(store.deltas) != 2 {
-		t.Errorf("应更新 2 个账户余额, got %d", len(store.deltas))
-	}
-	if store.gl == nil {
-		t.Error("应更新总账")
+	if len(store.txns) != 2 || len(store.deltas) != 2 || store.gl == nil {
+		t.Errorf("store 副作用不对: txns=%d deltas=%d gl=%v", len(store.txns), len(store.deltas), store.gl)
 	}
 }
 
-// recordingLedgerStore 记录调用，用于断言 Post 的副作用。
 type recordingLedgerStore struct {
 	calls  int
 	txns   []domain.Txn
@@ -78,18 +76,36 @@ type recordingLedgerStore struct {
 	gl     *domain.GLBalance
 }
 
-func (f *recordingLedgerStore) InsertTxns(_ context.Context, txns []domain.Txn) error {
+func (f *recordingLedgerStore) InsertTxns(_ context.Context, _ pg.DBTX, txns []domain.Txn) error {
 	f.calls++
+	// 模拟 repo 回填 TxnID
+	for i := range txns {
+		if txns[i].TxnID == "" {
+			txns[i].TxnID = "T-fake"
+		}
+	}
 	f.txns = append(f.txns, txns...)
 	return nil
 }
-func (f *recordingLedgerStore) ApplyBalanceDeltas(_ context.Context, _ string, deltas []domain.BalanceDelta) error {
+func (f *recordingLedgerStore) ApplyBalanceDeltas(_ context.Context, _ pg.DBTX, _ string, deltas []domain.BalanceDelta) error {
 	f.calls++
 	f.deltas = append(f.deltas, deltas...)
 	return nil
 }
-func (f *recordingLedgerStore) UpsertGL(_ context.Context, gl domain.GLBalance) error {
+func (f *recordingLedgerStore) UpsertGL(_ context.Context, _ pg.DBTX, gl domain.GLBalance) error {
 	f.calls++
 	f.gl = &gl
+	return nil
+}
+func (f *recordingLedgerStore) EnsureBalanceRow(context.Context, pg.DBTX, string, string, string) (domain.Balance, error) {
+	f.calls++
+	return domain.Balance{}, nil
+}
+func (f *recordingLedgerStore) GetTxnsByVoucher(context.Context, pg.DBTX, string) ([]domain.Txn, error) {
+	f.calls++
+	return nil, nil
+}
+func (f *recordingLedgerStore) UpdateTxnStatus(context.Context, pg.DBTX, string, domain.TxnStatus) error {
+	f.calls++
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"bank/internal/corebanking/domain"
+	"bank/internal/platform/pg"
 )
 
 // ErrUnbalanced 借贷不平——复式记账核心不变量被违反。
@@ -13,9 +14,12 @@ var ErrUnbalanced = fmt.Errorf("ledger: 借贷不平")
 
 // LedgerStore service 依赖的持久化接口（依赖倒置：repo 实现它）。
 type LedgerStore interface {
-	InsertTxns(ctx context.Context, txns []domain.Txn) error
-	ApplyBalanceDeltas(ctx context.Context, bizDate string, deltas []domain.BalanceDelta) error
-	UpsertGL(ctx context.Context, gl domain.GLBalance) error
+	InsertTxns(ctx context.Context, q pg.DBTX, txns []domain.Txn) error
+	ApplyBalanceDeltas(ctx context.Context, q pg.DBTX, bizDate string, deltas []domain.BalanceDelta) error
+	UpsertGL(ctx context.Context, q pg.DBTX, gl domain.GLBalance) error
+	EnsureBalanceRow(ctx context.Context, q pg.DBTX, accountNo, bizDate, subjectCode string) (domain.Balance, error)
+	GetTxnsByVoucher(ctx context.Context, q pg.DBTX, voucherNo string) ([]domain.Txn, error)
+	UpdateTxnStatus(ctx context.Context, q pg.DBTX, voucherNo string, status domain.TxnStatus) error
 }
 
 // LedgerService 复式记账用例。
@@ -46,23 +50,28 @@ func ValidateBalance(entries []domain.Entry) (debit, credit domain.Money, err er
 	return debit, credit, nil
 }
 
-// Post 过账：校验平衡 → 写流水 → 累加分户账余额 → 更新总账。
-// 不平则拒绝且绝不调用 store（验收 #7）。
-func (s *LedgerService) Post(ctx context.Context, entries []domain.Entry, bizDate, ccy string) error {
+// Post 过账：校验平衡 → 汇总分录 → 写流水 → 累加分户账余额 → 更新总账。
+// q 为事务（或连接池）执行器，调用方负责事务边界（见 txn_service）。
+// voucherNo 标记本笔凭证；refTxnID 非空表示本笔是冲正（关联原流水）。
+// 不平则拒绝且绝不调用 store（验收 #7）。返回生成的流水（含回填的 TxnID）。
+func (s *LedgerService) Post(ctx context.Context, q pg.DBTX, entries []domain.Entry, bizDate, ccy, voucherNo, refTxnID string) ([]domain.Txn, error) {
 	if _, _, err := ValidateBalance(entries); err != nil {
-		return err
+		return nil, err
 	}
-	txns, deltas, gl := summarize(entries, bizDate, ccy)
-	if err := s.store.InsertTxns(ctx, txns); err != nil {
-		return fmt.Errorf("ledger: 写流水失败: %w", err)
+	txns, deltas, gl := summarize(entries, bizDate, ccy, voucherNo, refTxnID)
+	if err := s.store.InsertTxns(ctx, q, txns); err != nil {
+		return nil, fmt.Errorf("ledger: 写流水失败: %w", err)
 	}
-	if err := s.store.ApplyBalanceDeltas(ctx, bizDate, deltas); err != nil {
-		return fmt.Errorf("ledger: 更新分户账失败: %w", err)
+	if err := s.store.ApplyBalanceDeltas(ctx, q, bizDate, deltas); err != nil {
+		return nil, fmt.Errorf("ledger: 更新分户账失败: %w", err)
 	}
-	return s.store.UpsertGL(ctx, gl)
+	if err := s.store.UpsertGL(ctx, q, gl); err != nil {
+		return nil, fmt.Errorf("ledger: 更新总账失败: %w", err)
+	}
+	return txns, nil
 }
 
-func summarize(entries []domain.Entry, bizDate, ccy string) ([]domain.Txn, []domain.BalanceDelta, domain.GLBalance) {
+func summarize(entries []domain.Entry, bizDate, ccy, voucherNo, refTxnID string) ([]domain.Txn, []domain.BalanceDelta, domain.GLBalance) {
 	txns := make([]domain.Txn, 0, len(entries))
 	byAcct := map[string]domain.Money{}
 	subjByAcct := map[string]string{}
@@ -71,6 +80,7 @@ func summarize(entries []domain.Entry, bizDate, ccy string) ([]domain.Txn, []dom
 		txns = append(txns, domain.Txn{
 			BizDate: bizDate, AccountNo: e.AccountNo, DCFlag: e.DCFlag,
 			Amount: e.Amount, Ccy: ccy, SubjectCode: e.SubjectCode,
+			VoucherNo: voucherNo, RefTxnID: refTxnID, TxnStatus: domain.TxnStatusNormal,
 		})
 		if e.DCFlag == domain.DCCredit {
 			byAcct[e.AccountNo] = byAcct[e.AccountNo].Add(e.Amount)
@@ -87,7 +97,7 @@ func summarize(entries []domain.Entry, bizDate, ccy string) ([]domain.Txn, []dom
 	}
 	gl := domain.GLBalance{BizDate: bizDate, DCBalance: glDC, CCBalance: glCC, Ccy: ccy}
 	if len(deltas) > 0 {
-		gl.SubjectCode = deltas[0].SubjectCode // Spec A 单科目过账简化
+		gl.SubjectCode = deltas[0].SubjectCode
 	}
 	return txns, deltas, gl
 }
