@@ -10,6 +10,8 @@ import (
 
 	"bank/internal/corebanking/domain"
 	"bank/internal/corebanking/service"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // AccountReader 账户只读查询（repo.AccountRepo 实现）。
@@ -163,6 +165,12 @@ func (h *Handlers) ReverseVoucher(w http.ResponseWriter, r *http.Request) {
 
 // statusFor 把 service 层错误映射到 HTTP 状态码。
 func statusFor(err error) int {
+	// Postgres 死锁（SQLSTATE 40P01）→ 409 Conflict（spec §8.3：客户端可安全重试）。
+	// 必须先于 switch 检查：pgconn.PgError 是底层驱动错误，不会被 service 的哨兵 errors.Is 命中。
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "40P01" {
+		return http.StatusConflict
+	}
 	switch {
 	case errors.Is(err, service.ErrAccountNotFound), errors.Is(err, service.ErrVoucherNotFound):
 		return http.StatusNotFound

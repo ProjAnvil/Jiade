@@ -154,6 +154,24 @@ func (r *LedgerRepo) GetTxnsByVoucher(ctx context.Context, q pg.DBTX, voucherNo 
 		return nil, fmt.Errorf("repo: 查凭证流水: %w", err)
 	}
 	defer rows.Close()
+	return scanTxnRows(rows, voucherNo)
+}
+
+// LockTxnsByVoucher 与 GetTxnsByVoucher 相同，但附加 FOR UPDATE —— 冲正专用，
+// 在事务内锁住本凭证所有流水行，串行化对同一凭证的并发冲正（见 service.Reverse）。
+func (r *LedgerRepo) LockTxnsByVoucher(ctx context.Context, q pg.DBTX, voucherNo string) ([]domain.Txn, error) {
+	rows, err := q.QueryContext(ctx, `SELECT txn_id,biz_date::text,txn_ts::text,account_no,dc_flag,amount::text,ccy,
+		subject_code,COALESCE(opp_account,''),COALESCE(ref_txn_id,''),COALESCE(channel,''),COALESCE(summary,''),txn_status
+		FROM acct_txn WHERE voucher_no=$1 ORDER BY txn_ts FOR UPDATE`, voucherNo)
+	if err != nil {
+		return nil, fmt.Errorf("repo: 锁凭证流水: %w", err)
+	}
+	defer rows.Close()
+	return scanTxnRows(rows, voucherNo)
+}
+
+// scanTxnRows 扫描 GetTxnsByVoucher/LockTxnsByVoucher 公用的行集合。
+func scanTxnRows(rows *sql.Rows, voucherNo string) ([]domain.Txn, error) {
 	var out []domain.Txn
 	for rows.Next() {
 		var t domain.Txn
@@ -162,6 +180,7 @@ func (r *LedgerRepo) GetTxnsByVoucher(ctx context.Context, q pg.DBTX, voucherNo 
 			&t.Ccy, &t.SubjectCode, &t.OppAccount, &t.RefTxnID, &t.Channel, &t.Summary, &status); err != nil {
 			return nil, fmt.Errorf("repo: 扫描凭证流水: %w", err)
 		}
+		var err error
 		if t.Amount, err = domain.ParseCents(amountStr); err != nil {
 			return nil, err
 		}
@@ -172,15 +191,37 @@ func (r *LedgerRepo) GetTxnsByVoucher(ctx context.Context, q pg.DBTX, voucherNo 
 	return out, rows.Err()
 }
 
+// HasReversal 查是否已存在以 refTxnID 为 ref_txn_id 的流水（红冲反向分录已落库的判据）。
+// 红冲通过 LockTxnsByVoucher 串行后，再用本方法判断「首笔冲正是否已 commit」。
+func (r *LedgerRepo) HasReversal(ctx context.Context, q pg.DBTX, refTxnID string) (bool, error) {
+	var exists bool
+	err := q.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM acct_txn WHERE ref_txn_id=$1)`, refTxnID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("repo: 查红冲存在性: %w", err)
+	}
+	return exists, nil
+}
+
 // UpdateTxnStatus 把某凭证下所有流水状态改为 status（蓝冲用）。
+//
+// 并发安全：WHERE 子句附加 txn_status='normal' 守卫 —— 把 normal→reversed 变成一条
+// 原子 UPDATE。两个并发蓝冲只有一个能改到行（RowsAffected>0），另一个 0 行 → 返回
+// sql.ErrNoRows（service 侧 errors.Is → ErrAlreadyReversed）。
+// 行锁（LockTxnsByVoucher）保证两个蓝冲串行进入此语句，第二者进入时已是 reversed。
 func (r *LedgerRepo) UpdateTxnStatus(ctx context.Context, q pg.DBTX, voucherNo string, status domain.TxnStatus) error {
-	res, err := q.ExecContext(ctx, `UPDATE acct_txn SET txn_status=$2 WHERE voucher_no=$1`,
+	res, err := q.ExecContext(ctx, `UPDATE acct_txn SET txn_status=$2 WHERE voucher_no=$1 AND txn_status='normal'`,
 		voucherNo, string(status))
 	if err != nil {
 		return fmt.Errorf("repo: 改流水状态: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("repo: 凭证 %s 无流水", voucherNo)
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		// 区分两种 0 行：凭证无流水 vs 已被并发冲正。后者是冲正竞态的判据；
+		// service 用 errors.Is(err, sql.ErrNoRows) 识别后转 ErrAlreadyReversed。
+		// 无流水（凭证不存在）会被前置的 LockTxnsByVoucher → len==0 → ErrVoucherNotFound 拦截，
+		// 所以走到这里一定是「本凭证有流水但都已是 reversed」。
+		return fmt.Errorf("repo: 凭证 %s 流水已非 normal（并发冲正或重复冲正）: %w", voucherNo, sql.ErrNoRows)
 	}
 	return nil
 }

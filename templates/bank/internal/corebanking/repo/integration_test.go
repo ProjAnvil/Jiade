@@ -5,6 +5,8 @@ package repo_test
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"sync"
 	"testing"
 
 	"bank/internal/corebanking/domain"
@@ -167,3 +169,177 @@ func TestRecord_Concurrent_NoDeadlock(t *testing.T) {
 		t.Errorf("B 余额=%s, want 10050.00", bb.Balance)
 	}
 }
+
+// TestReverse_Concurrent_DuplicateRejected 验证 B-3 final review Important #1 修复：
+// 两个并发蓝冲同一凭证，必须只有一个成功，另一个返回 ErrAlreadyReversed；
+// 且余额只回滚一次（不是两次——否则资金会被凭空创造）。
+//
+// 修复前：GetTxnsByVoucher 无 FOR UPDATE、UpdateTxnStatus 无 normal 守卫 →
+// 两个并发蓝冲都过「未 reversed」检查 → 双回滚 → 余额被多回滚一次 = 资金漏洞。
+func TestReverse_Concurrent_DuplicateRejected(t *testing.T) {
+	db := setupDB(t)
+	defer db.Close()
+	ctx := context.Background()
+	ar := repo.NewAccountRepo(db)
+	lr := repo.NewLedgerRepo(db)
+	svc := service.NewTxnService(db, ar, service.NewLedgerService(lr), lr)
+
+	const acct = "RV-A"
+	// 清理历史
+	db.ExecContext(ctx, "DELETE FROM acct_txn WHERE account_no=$1", acct)
+	db.ExecContext(ctx, "DELETE FROM account_balance WHERE account_no=$1", acct)
+	db.ExecContext(ctx, "DELETE FROM demand_account WHERE account_no=$1", acct)
+	if err := ar.InsertDemand(ctx, domain.DemandAccount{
+		AccountNo: acct, CustID: "C", Ccy: "CNY", Status: domain.AccountStatusActive,
+		OpenBizDate: "2026-07-15", SubjectCode: "2011",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 建一个历史日余额行（基线 0.00 元）—— EnsureBalanceRow 须有历史行才能继承到当天。
+	db.ExecContext(ctx, `INSERT INTO account_balance (account_no,biz_date,balance,available_balance,subject_code)
+		VALUES ($1,'2026-07-15',0.00,0.00,'2011')`, acct)
+
+	// 先存入 100.00（10000 分）得到一个可冲正的凭证
+	booking, err := svc.Record(ctx, service.RecordInput{
+		Action: domain.ActionDeposit, AccountNo: acct,
+		Amount: domain.NewMoneyFromCents(10000), Ccy: "CNY",
+	})
+	if err != nil {
+		t.Fatalf("setup Record 失败: %v", err)
+	}
+	voucher := booking.VoucherNo
+
+	// 读取冲正前余额（当天，应该 = 100.00 元）
+	tr := repo.NewTxnRepo(db)
+	balBefore, err := tr.GetLatestBalance(ctx, acct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("冲正前 %s 余额=%s（基线）", acct, balBefore.Balance)
+
+	// 并发两个蓝冲同一凭证
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			_, errs[idx] = svc.Reverse(ctx, voucher, domain.ReverseBlue)
+		}(i)
+	}
+	wg.Wait()
+
+	// 必须恰好一个成功、一个 ErrAlreadyReversed
+	ok, alreadyRev := 0, 0
+	for i := 0; i < 2; i++ {
+		if errs[i] == nil {
+			ok++
+		} else if errors.Is(errs[i], service.ErrAlreadyReversed) {
+			alreadyRev++
+		} else {
+			t.Errorf("goroutine %d 返回非预期错误: %v", i, errs[i])
+		}
+	}
+	if ok != 1 || alreadyRev != 1 {
+		t.Fatalf("应恰好 1 成功 / 1 ErrAlreadyReversed, got ok=%d alreadyRev=%d errs=%v", ok, alreadyRev, errs)
+	}
+
+	// 关键资金安全断言：余额只回滚一次（回到 0），而非回滚两次（变 -100.00 = -10000 分）。
+	balAfter, err := tr.GetLatestBalance(ctx, acct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 原存 100.00 → 蓝冲回滚一次应回到 0。若双回滚则为 -100.00。
+	if balAfter.Balance != domain.NewMoneyFromCents(0) {
+		t.Errorf("蓝冲后余额=%s, want 0（回滚一次）；若为负值说明双回滚=资金漏洞", balAfter.Balance)
+	}
+	t.Logf("冲正后 %s 余额=%s（应为 0）", acct, balAfter.Balance)
+}
+
+// TestReverse_BlueThenRed_SecondRejected 验证：先蓝冲成功后，再红冲同凭证应被拒绝。
+// 蓝冲把 txn_status 改为 reversed，红冲进入后 LockTxnsByVoucher 读到的行已是 reversed →
+// 走「any TxnStatus==reversed → ErrAlreadyReversed」分支。
+func TestReverse_BlueThenRed_SecondRejected(t *testing.T) {
+	db := setupDB(t)
+	defer db.Close()
+	ctx := context.Background()
+	ar := repo.NewAccountRepo(db)
+	lr := repo.NewLedgerRepo(db)
+	svc := service.NewTxnService(db, ar, service.NewLedgerService(lr), lr)
+
+	const acct = "RV-BR"
+	db.ExecContext(ctx, "DELETE FROM acct_txn WHERE account_no=$1", acct)
+	db.ExecContext(ctx, "DELETE FROM account_balance WHERE account_no=$1", acct)
+	db.ExecContext(ctx, "DELETE FROM demand_account WHERE account_no=$1", acct)
+	if err := ar.InsertDemand(ctx, domain.DemandAccount{
+		AccountNo: acct, CustID: "C", Ccy: "CNY", Status: domain.AccountStatusActive,
+		OpenBizDate: "2026-07-15", SubjectCode: "2011",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	db.ExecContext(ctx, `INSERT INTO account_balance (account_no,biz_date,balance,available_balance,subject_code)
+		VALUES ($1,'2026-07-15',0.00,0.00,'2011')`, acct)
+	booking, err := svc.Record(ctx, service.RecordInput{
+		Action: domain.ActionDeposit, AccountNo: acct,
+		Amount: domain.NewMoneyFromCents(5000), Ccy: "CNY",
+	})
+	if err != nil {
+		t.Fatalf("setup Record 失败: %v", err)
+	}
+	voucher := booking.VoucherNo
+
+	// 先蓝冲（应成功）
+	if _, err := svc.Reverse(ctx, voucher, domain.ReverseBlue); err != nil {
+		t.Fatalf("先蓝冲应成功: %v", err)
+	}
+	// 再红冲（凭证已 reversed，应拒绝）
+	if _, err := svc.Reverse(ctx, voucher, domain.ReverseRed); !errors.Is(err, service.ErrAlreadyReversed) {
+		t.Fatalf("蓝冲后红冲同凭证应 ErrAlreadyReversed, got %v", err)
+	}
+}
+
+// TestReverse_RedThenRed_SecondRejected 验证：先红冲成功后，再红冲同凭证应被拒绝。
+// 红冲不改 txn_status（spec §7.3），所以靠 HasReversal(ref_txn_id) 去重：
+// 首笔红冲 Post 的反向分录带 ref_txn_id 指向原流水；次笔 LockTxnsByVoucher 串行后
+// HasReversal=true → ErrAlreadyReversed。
+func TestReverse_RedThenRed_SecondRejected(t *testing.T) {
+	db := setupDB(t)
+	defer db.Close()
+	ctx := context.Background()
+	ar := repo.NewAccountRepo(db)
+	lr := repo.NewLedgerRepo(db)
+	svc := service.NewTxnService(db, ar, service.NewLedgerService(lr), lr)
+
+	const acct = "RV-RR"
+	db.ExecContext(ctx, "DELETE FROM acct_txn WHERE account_no=$1", acct)
+	db.ExecContext(ctx, "DELETE FROM account_balance WHERE account_no=$1", acct)
+	db.ExecContext(ctx, "DELETE FROM demand_account WHERE account_no=$1", acct)
+	if err := ar.InsertDemand(ctx, domain.DemandAccount{
+		AccountNo: acct, CustID: "C", Ccy: "CNY", Status: domain.AccountStatusActive,
+		OpenBizDate: "2026-07-15", SubjectCode: "2011",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	db.ExecContext(ctx, `INSERT INTO account_balance (account_no,biz_date,balance,available_balance,subject_code)
+		VALUES ($1,'2026-07-15',0.00,0.00,'2011')`, acct)
+	booking, err := svc.Record(ctx, service.RecordInput{
+		Action: domain.ActionDeposit, AccountNo: acct,
+		Amount: domain.NewMoneyFromCents(5000), Ccy: "CNY",
+	})
+	if err != nil {
+		t.Fatalf("setup Record 失败: %v", err)
+	}
+	voucher := booking.VoucherNo
+
+	// 先红冲（应成功）
+	if _, err := svc.Reverse(ctx, voucher, domain.ReverseRed); err != nil {
+		t.Fatalf("先红冲应成功: %v", err)
+	}
+	// 再红冲同凭证（HasReversal=true，应拒绝）
+	if _, err := svc.Reverse(ctx, voucher, domain.ReverseRed); !errors.Is(err, service.ErrAlreadyReversed) {
+		t.Fatalf("红冲后红冲同凭证应 ErrAlreadyReversed, got %v", err)
+	}
+}
+
+// 编译期断言：确保 *sql.DB 不需要的 var 被引用（避免 unused import）。
+var _ = pg.RunInTx

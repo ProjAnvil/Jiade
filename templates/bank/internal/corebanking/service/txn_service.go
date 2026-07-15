@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -161,6 +162,17 @@ type ReverseResult struct {
 
 // Reverse 冲正：blue=改状态+逆向delta回滚(不新增流水)；red=反向分录走Post(新增反向流水)。
 // 一凭证只能冲一次。冲正本身不可再冲正。
+//
+// 并发安全（final review Important #1 修复）：
+//   - 事务内先用 LockTxnsByVoucher（SELECT ... FOR UPDATE）锁本凭证所有流水行，串行化
+//     对同一凭证的并发冲正。两个并发 Reverse 在此排队，第二个拿到锁时第一个已 commit。
+//   - 蓝冲：再调 UpdateTxnStatus，其 WHERE 带 txn_status='normal' 守卫。首笔把 normal→reversed
+//     提交后，次笔 UPDATE 只剩 reversed 行可匹配 → RowsAffected=0 → sql.ErrNoRows →
+//     ErrAlreadyReversed。即使忽略锁，这条原子 UPDATE 也足以防止双回滚。
+//   - 红冲：不改 txn_status（spec §7.3 红冲原流水 txn_status 不变）。改用 HasReversal(ref_txn_id)
+//     判断首笔红冲反向分录是否已落库；首笔 Post 提交的 reverse entries 带 ref_txn_id，次笔拿到锁
+//     后 HasReversal=true → ErrAlreadyReversed。
+//
 // 生产路径 db 非 nil → pg.RunInTx 包裹；db==nil（单测）→ 直接以 q=nil 执行 fn。
 func (s *TxnService) Reverse(ctx context.Context, voucherNo string, mode domain.ReverseMode) (ReverseResult, error) {
 	bizDate := today()
@@ -171,14 +183,15 @@ func (s *TxnService) Reverse(ctx context.Context, voucherNo string, mode domain.
 		run = func(_ context.Context, _ *sql.DB, fn func(pg.DBTX) error) error { return fn(nil) }
 	}
 	err := run(ctx, s.db, func(q pg.DBTX) error {
-		origs, err := s.store.GetTxnsByVoucher(ctx, q, voucherNo)
+		// 锁本凭证所有流水行（FOR UPDATE），串行化并发冲正。
+		origs, err := s.store.LockTxnsByVoucher(ctx, q, voucherNo)
 		if err != nil {
 			return err
 		}
 		if len(origs) == 0 {
 			return ErrVoucherNotFound
 		}
-		// 防重复：原凭证任一流水已 reversed → 拒绝
+		// 防重复：原凭证任一流水已 reversed → 拒绝（此检查在行锁内，对并发蓝冲有效）。
 		for _, t := range origs {
 			if t.TxnStatus == domain.TxnStatusReversed {
 				return ErrAlreadyReversed
@@ -188,7 +201,12 @@ func (s *TxnService) Reverse(ctx context.Context, voucherNo string, mode domain.
 
 		switch mode {
 		case domain.ReverseBlue:
+			// 原子 normal→reversed 守卫：并发蓝冲只有一个改到行。
 			if err := s.store.UpdateTxnStatus(ctx, q, voucherNo, domain.TxnStatusReversed); err != nil {
+				// RowsAffected=0（所有行已 reversed）→ sql.ErrNoRows → 视作已冲正。
+				if errors.Is(err, sql.ErrNoRows) {
+					return ErrAlreadyReversed
+				}
 				return err
 			}
 			// 逆向 delta 回滚余额/总账（原 delta 的镜像：贷→借翻转符号）
@@ -202,10 +220,17 @@ func (s *TxnService) Reverse(ctx context.Context, voucherNo string, mode domain.
 			res = ReverseResult{VoucherNo: voucherNo, Mode: string(mode), Status: string(domain.TxnStatusReversed)}
 
 		case domain.ReverseRed:
+			// 红冲不改 txn_status（spec §7.3）；用 HasReversal 判首笔红冲反向分录是否已落库。
+			ref := origs[0].TxnID
+			hasRev, err := s.store.HasReversal(ctx, q, ref)
+			if err != nil {
+				return err
+			}
+			if hasRev {
+				return ErrAlreadyReversed
+			}
 			newVoucher := domain.NewVoucherNo(bizDate)
 			entries := reverseEntries(origs)
-			// ref 关联原凭证代表流水（第一条）
-			ref := origs[0].TxnID
 			txns, err := s.ledger.Post(ctx, q, entries, bizDate, ccy, newVoucher, ref)
 			if err != nil {
 				return err

@@ -74,8 +74,9 @@ type recordingLedgerStore struct {
 	txns        []domain.Txn
 	deltas      []domain.BalanceDelta
 	gl          *domain.GLBalance
-	voucherTxns []domain.Txn // GetTxnsByVoucher 返回
+	voucherTxns []domain.Txn // GetTxnsByVoucher / LockTxnsByVoucher 返回
 	statusLog   []string     // 记录 UpdateTxnStatus 调用
+	hasReversal bool         // HasReversal 返回值（默认 false）
 
 	summaryCalls       int
 	lastSummaryVoucher string
@@ -110,6 +111,14 @@ func (f *recordingLedgerStore) EnsureBalanceRow(context.Context, pg.DBTX, string
 func (f *recordingLedgerStore) GetTxnsByVoucher(_ context.Context, _ pg.DBTX, _ string) ([]domain.Txn, error) {
 	f.calls++
 	return f.voucherTxns, nil
+}
+func (f *recordingLedgerStore) LockTxnsByVoucher(_ context.Context, _ pg.DBTX, _ string) ([]domain.Txn, error) {
+	f.calls++
+	return f.voucherTxns, nil
+}
+func (f *recordingLedgerStore) HasReversal(_ context.Context, _ pg.DBTX, _ string) (bool, error) {
+	f.calls++
+	return f.hasReversal, nil
 }
 func (f *recordingLedgerStore) UpdateTxnStatus(_ context.Context, _ pg.DBTX, _ string, st domain.TxnStatus) error {
 	f.calls++

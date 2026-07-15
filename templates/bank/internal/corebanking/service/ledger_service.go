@@ -19,6 +19,10 @@ type LedgerStore interface {
 	UpsertGL(ctx context.Context, q pg.DBTX, gl domain.GLBalance) error
 	EnsureBalanceRow(ctx context.Context, q pg.DBTX, accountNo, bizDate, subjectCode string) (domain.Balance, error)
 	GetTxnsByVoucher(ctx context.Context, q pg.DBTX, voucherNo string) ([]domain.Txn, error)
+	// LockTxnsByVoucher 冲正专用：SELECT ... FOR UPDATE 锁本凭证流水行（串行化并发冲正）。
+	LockTxnsByVoucher(ctx context.Context, q pg.DBTX, voucherNo string) ([]domain.Txn, error)
+	// HasReversal 红冲去重：是否已有 ref_txn_id=$refTxnID 的反向分录。
+	HasReversal(ctx context.Context, q pg.DBTX, refTxnID string) (bool, error)
 	UpdateTxnStatus(ctx context.Context, q pg.DBTX, voucherNo string, status domain.TxnStatus) error
 	SetTxnSummary(ctx context.Context, q pg.DBTX, voucherNo, summary string) error
 }

@@ -163,6 +163,12 @@ func (recordingAPIStore) EnsureBalanceRow(_ context.Context, _ pg.DBTX, _, _, _ 
 func (recordingAPIStore) GetTxnsByVoucher(context.Context, pg.DBTX, string) ([]domain.Txn, error) {
 	return nil, nil
 }
+func (recordingAPIStore) LockTxnsByVoucher(context.Context, pg.DBTX, string) ([]domain.Txn, error) {
+	return nil, nil
+}
+func (recordingAPIStore) HasReversal(context.Context, pg.DBTX, string) (bool, error) {
+	return false, nil
+}
 func (recordingAPIStore) UpdateTxnStatus(context.Context, pg.DBTX, string, domain.TxnStatus) error {
 	return nil
 }
