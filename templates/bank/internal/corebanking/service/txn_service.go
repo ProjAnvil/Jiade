@@ -17,6 +17,8 @@ var (
 	ErrAccountNotActive    = fmt.Errorf("账户非 active 状态")
 	ErrInsufficientBalance = fmt.Errorf("余额不足")
 	ErrCcyMismatch         = fmt.Errorf("币种不一致")
+	ErrVoucherNotFound     = fmt.Errorf("凭证不存在")
+	ErrAlreadyReversed     = fmt.Errorf("凭证已冲正")
 )
 
 // AccountReader 记账用的账户只读查询（repo.AccountRepo 实现）。
@@ -146,6 +148,120 @@ func (s *TxnService) Record(ctx context.Context, in RecordInput) (domain.Booking
 		return domain.Booking{}, err
 	}
 	return booking, nil
+}
+
+// ReverseResult 冲正结果。
+type ReverseResult struct {
+	VoucherNo         string
+	Mode              string
+	Status            string // 蓝冲: reversed；红冲: 原 normal（不变）
+	ReversedVoucherNo string // 红冲产生的反向凭证号；蓝冲为空
+	Txns              []domain.Txn
+}
+
+// Reverse 冲正：blue=改状态+逆向delta回滚(不新增流水)；red=反向分录走Post(新增反向流水)。
+// 一凭证只能冲一次。冲正本身不可再冲正。
+// 生产路径 db 非 nil → pg.RunInTx 包裹；db==nil（单测）→ 直接以 q=nil 执行 fn。
+func (s *TxnService) Reverse(ctx context.Context, voucherNo string, mode domain.ReverseMode) (ReverseResult, error) {
+	bizDate := today()
+	var res ReverseResult
+
+	run := pg.RunInTx
+	if s.db == nil {
+		run = func(_ context.Context, _ *sql.DB, fn func(pg.DBTX) error) error { return fn(nil) }
+	}
+	err := run(ctx, s.db, func(q pg.DBTX) error {
+		origs, err := s.store.GetTxnsByVoucher(ctx, q, voucherNo)
+		if err != nil {
+			return err
+		}
+		if len(origs) == 0 {
+			return ErrVoucherNotFound
+		}
+		// 防重复：原凭证任一流水已 reversed → 拒绝
+		for _, t := range origs {
+			if t.TxnStatus == domain.TxnStatusReversed {
+				return ErrAlreadyReversed
+			}
+		}
+		ccy := origs[0].Ccy
+
+		switch mode {
+		case domain.ReverseBlue:
+			if err := s.store.UpdateTxnStatus(ctx, q, voucherNo, domain.TxnStatusReversed); err != nil {
+				return err
+			}
+			// 逆向 delta 回滚余额/总账（原 delta 的镜像：贷→借翻转符号）
+			deltas, gl := reverseRollback(origs, bizDate)
+			if err := s.store.ApplyBalanceDeltas(ctx, q, bizDate, deltas); err != nil {
+				return err
+			}
+			if err := s.store.UpsertGL(ctx, q, gl); err != nil {
+				return err
+			}
+			res = ReverseResult{VoucherNo: voucherNo, Mode: string(mode), Status: string(domain.TxnStatusReversed)}
+
+		case domain.ReverseRed:
+			newVoucher := domain.NewVoucherNo(bizDate)
+			entries := reverseEntries(origs)
+			// ref 关联原凭证代表流水（第一条）
+			ref := origs[0].TxnID
+			txns, err := s.ledger.Post(ctx, q, entries, bizDate, ccy, newVoucher, ref)
+			if err != nil {
+				return err
+			}
+			res = ReverseResult{VoucherNo: voucherNo, Mode: string(mode), Status: string(domain.TxnStatusNormal),
+				ReversedVoucherNo: newVoucher, Txns: txns}
+
+		default:
+			return fmt.Errorf("txn: 未知冲正模式 %q", mode)
+		}
+		return nil
+	})
+	if err != nil {
+		return ReverseResult{}, err
+	}
+	return res, nil
+}
+
+// reverseRollback 由原流水算逆向 BalanceDelta（原贷+→逆向-，原借-→逆向+）与镜像总账。
+// 注意 byAcct（净值）与 gl（发生额）符号语义不同：发生额回滚一律用 Sub。
+func reverseRollback(txns []domain.Txn, bizDate string) ([]domain.BalanceDelta, domain.GLBalance) {
+	byAcct := map[string]domain.Money{}
+	subj := map[string]string{}
+	glDC, glCC := domain.Money(0), domain.Money(0)
+	for _, t := range txns {
+		if t.DCFlag == domain.DCCredit {
+			byAcct[t.AccountNo] = byAcct[t.AccountNo].Sub(t.Amount) // 原贷+ → 逆向-
+			glCC = glCC.Sub(t.Amount)                                // 发生额回滚：减
+		} else {
+			byAcct[t.AccountNo] = byAcct[t.AccountNo].Add(t.Amount) // 原借- → 逆向+
+			glDC = glDC.Sub(t.Amount)                                // 发生额回滚：减（不是 Add！）
+		}
+		subj[t.AccountNo] = t.SubjectCode
+	}
+	deltas := make([]domain.BalanceDelta, 0, len(byAcct))
+	for acct, d := range byAcct {
+		deltas = append(deltas, domain.BalanceDelta{AccountNo: acct, Delta: d, SubjectCode: subj[acct]})
+	}
+	gl := domain.GLBalance{BizDate: bizDate, DCBalance: glDC, CCBalance: glCC, Ccy: txns[0].Ccy}
+	if len(deltas) > 0 {
+		gl.SubjectCode = deltas[0].SubjectCode
+	}
+	return deltas, gl
+}
+
+// reverseEntries 由原流水构造反向分录（dc_flag 翻转，金额不变）——红冲用，走 Post。
+func reverseEntries(txns []domain.Txn) []domain.Entry {
+	es := make([]domain.Entry, 0, len(txns))
+	for _, t := range txns {
+		flag := domain.DCCredit
+		if t.DCFlag == domain.DCCredit {
+			flag = domain.DCDebit
+		}
+		es = append(es, domain.Entry{AccountNo: t.AccountNo, DCFlag: flag, Amount: t.Amount, SubjectCode: t.SubjectCode})
+	}
+	return es
 }
 
 // lockedAccountList 返回按 account_no 升序排列的待锁账户列表（防 AB-BA 死锁）。

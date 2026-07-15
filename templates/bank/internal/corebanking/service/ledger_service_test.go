@@ -70,10 +70,12 @@ func TestPost_Balanced_PersistsAndReturnsTxns(t *testing.T) {
 }
 
 type recordingLedgerStore struct {
-	calls  int
-	txns   []domain.Txn
-	deltas []domain.BalanceDelta
-	gl     *domain.GLBalance
+	calls       int
+	txns        []domain.Txn
+	deltas      []domain.BalanceDelta
+	gl          *domain.GLBalance
+	voucherTxns []domain.Txn // GetTxnsByVoucher 返回
+	statusLog   []string     // 记录 UpdateTxnStatus 调用
 
 	summaryCalls       int
 	lastSummaryVoucher string
@@ -105,15 +107,17 @@ func (f *recordingLedgerStore) EnsureBalanceRow(context.Context, pg.DBTX, string
 	f.calls++
 	return domain.Balance{}, nil
 }
-func (f *recordingLedgerStore) GetTxnsByVoucher(context.Context, pg.DBTX, string) ([]domain.Txn, error) {
+func (f *recordingLedgerStore) GetTxnsByVoucher(_ context.Context, _ pg.DBTX, _ string) ([]domain.Txn, error) {
 	f.calls++
-	return nil, nil
+	return f.voucherTxns, nil
 }
-func (f *recordingLedgerStore) UpdateTxnStatus(context.Context, pg.DBTX, string, domain.TxnStatus) error {
+func (f *recordingLedgerStore) UpdateTxnStatus(_ context.Context, _ pg.DBTX, _ string, st domain.TxnStatus) error {
 	f.calls++
+	f.statusLog = append(f.statusLog, string(st))
 	return nil
 }
 func (f *recordingLedgerStore) SetTxnSummary(_ context.Context, _ pg.DBTX, voucherNo, summary string) error {
+	f.calls++
 	f.summaryCalls++
 	f.lastSummaryVoucher = voucherNo
 	f.lastSummary = summary
