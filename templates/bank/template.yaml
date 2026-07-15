@@ -1,13 +1,23 @@
 name: bank
-description: 简化版银行核心系统（core-banking 服务，Spec A 纵切）
-version: 0.1.0
+description: 简化版银行核心系统（core/customer/payment 服务，Spec B-1）
+version: 0.2.0
 databases:
   - name: core_db
     migrate: db/migrations/core_db.sql
+  - name: cust_db
+    migrate: db/migrations/cust_db.sql
+  - name: pay_db
+    migrate: db/migrations/pay_db.sql
 services:
   - name: core-banking
     port: 8080
     db: core_db
+  - name: customer
+    port: 8081
+    db: cust_db
+  - name: payment
+    port: 8082
+    db: pay_db
 seed:
   entrypoint: go run ./cmd/seed
   scales: [dev, full]

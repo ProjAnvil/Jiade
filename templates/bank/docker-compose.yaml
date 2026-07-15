@@ -19,18 +19,44 @@ services:
     build: .
     container_name: bank-core-banking
     restart: unless-stopped
-    environment:
+    environment: &svcenv
       DB_HOST: postgres
       DB_PORT: "5432"
       DB_USER: bank
       DB_PASSWORD: bank
       DB_NAME: core_db
       API_PORT: "8080"
-    ports:
-      - "8080:8080"
+    ports: ["8080:8080"]
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres: {condition: service_healthy}
+  customer:
+    build:
+      context: .
+      args:
+        CMD: customer
+    container_name: bank-customer
+    restart: unless-stopped
+    environment:
+      <<: *svcenv
+      DB_NAME: cust_db
+      API_PORT: "8081"
+    ports: ["8081:8081"]
+    depends_on:
+      postgres: {condition: service_healthy}
+  payment:
+    build:
+      context: .
+      args:
+        CMD: payment
+    container_name: bank-payment
+    restart: unless-stopped
+    environment:
+      <<: *svcenv
+      DB_NAME: pay_db
+      API_PORT: "8082"
+    ports: ["8082:8082"]
+    depends_on:
+      postgres: {condition: service_healthy}
 
 volumes:
   pgdata:

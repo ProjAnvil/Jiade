@@ -1,7 +1,9 @@
 .PHONY: up down seed test integration-test
 
 up:
-	docker compose up -d --build
+	docker compose up -d --build postgres
+	$(MAKE) seed
+	docker compose up -d --build core-banking customer payment
 
 down:
 	docker compose down
