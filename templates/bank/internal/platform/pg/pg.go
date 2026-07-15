@@ -12,10 +12,10 @@ import (
 // DSN 从环境变量构造连接串。dbName 指定连哪个库（postgres / core_db）。
 func DSN(dbName string) string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
-		getenv("DB_USER", "bank"),
-		getenv("DB_PASSWORD", "bank"),
-		getenv("DB_HOST", "localhost"),
-		getenv("DB_PORT", "5432"),
+		Getenv("DB_USER", "bank"),
+		Getenv("DB_PASSWORD", "bank"),
+		Getenv("DB_HOST", "localhost"),
+		Getenv("DB_PORT", "5432"),
 		dbName,
 	)
 }
@@ -29,7 +29,8 @@ func Open(dbName string) (*sql.DB, error) {
 	return db, nil
 }
 
-func getenv(k, def string) string {
+// Getenv 读环境变量，空则返回 def。
+func Getenv(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
 	}
