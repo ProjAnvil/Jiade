@@ -166,12 +166,19 @@ type ReverseResult struct {
 // 并发安全（final review Important #1 修复）：
 //   - 事务内先用 LockTxnsByVoucher（SELECT ... FOR UPDATE）锁本凭证所有流水行，串行化
 //     对同一凭证的并发冲正。两个并发 Reverse 在此排队，第二个拿到锁时第一个已 commit。
-//   - 蓝冲：再调 UpdateTxnStatus，其 WHERE 带 txn_status='normal' 守卫。首笔把 normal→reversed
+//   - 蓝冲：先 HasReversal 拦截"红后蓝"（红冲不改 txn_status，normal 守卫拦不住）；
+//     再 UpdateTxnStatus（WHERE 带 txn_status='normal' 守卫）拦"蓝蓝并发"。首笔把 normal→reversed
 //     提交后，次笔 UPDATE 只剩 reversed 行可匹配 → RowsAffected=0 → sql.ErrNoRows →
-//     ErrAlreadyReversed。即使忽略锁，这条原子 UPDATE 也足以防止双回滚。
+//     ErrAlreadyReversed。即使忽略锁，这两层守卫也足以防止双回滚。
 //   - 红冲：不改 txn_status（spec §7.3 红冲原流水 txn_status 不变）。改用 HasReversal(ref_txn_id)
 //     判断首笔红冲反向分录是否已落库；首笔 Post 提交的 reverse entries 带 ref_txn_id，次笔拿到锁
 //     后 HasReversal=true → ErrAlreadyReversed。
+//
+// 四种冲正顺序组合均有守卫（B-3 fix2 闭合"红后蓝"）：
+//   - 蓝蓝：UpdateTxnStatus normal 守卫拒绝次笔 ✓
+//   - 蓝红：`any TxnStatus==reversed` 检查拒绝 ✓
+//   - 红红：HasReversal 拒绝 ✓
+//   - 红蓝：蓝冲入口新增的 HasReversal 拒绝 ✓
 //
 // 生产路径 db 非 nil → pg.RunInTx 包裹；db==nil（单测）→ 直接以 q=nil 执行 fn。
 func (s *TxnService) Reverse(ctx context.Context, voucherNo string, mode domain.ReverseMode) (ReverseResult, error) {
@@ -201,6 +208,13 @@ func (s *TxnService) Reverse(ctx context.Context, voucherNo string, mode domain.
 
 		switch mode {
 		case domain.ReverseBlue:
+			// 红冲不改 txn_status（spec §7.3），normal 守卫拦不住"红后蓝"——用 HasReversal 兜底。
+			// 蓝蓝并发由下面的 UpdateTxnStatus normal 守卫兜底；红蓝/红红由 HasReversal 兜底。
+			if has, err := s.store.HasReversal(ctx, q, origs[0].TxnID); err != nil {
+				return err
+			} else if has {
+				return ErrAlreadyReversed
+			}
 			// 原子 normal→reversed 守卫：并发蓝冲只有一个改到行。
 			if err := s.store.UpdateTxnStatus(ctx, q, voucherNo, domain.TxnStatusReversed); err != nil {
 				// RowsAffected=0（所有行已 reversed）→ sql.ErrNoRows → 视作已冲正。
