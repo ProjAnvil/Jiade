@@ -50,13 +50,16 @@ func (r *CustomerRepo) ListCustomers(ctx context.Context, custType, kycStatus st
 		var cType, gender, birthday sql.NullString
 		if err := rows.Scan(&c.CustID, &cType, &c.Name, &c.CertType, &c.CertNo, &gender, &birthday,
 			&c.Nationality, &c.RiskLevel, &c.KYCStatus, &c.CreateBizDate); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("repo: 列客户 scan: %w", err)
 		}
 		c.CustType = domain.CustType(cType.String)
 		c.Gender, c.Birthday = gender.String, birthday.String
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("repo: 列客户: %w", err)
+	}
+	return out, nil
 }
 
 // GetCustAccounts 跨库联邦查询：cust_account_rel JOIN ext_core_db_demand_account（FDW）。
@@ -76,10 +79,13 @@ func (r *CustomerRepo) GetCustAccounts(ctx context.Context, custID string) ([]do
 		var a domain.CustAccount
 		var branch sql.NullString
 		if err := rows.Scan(&a.AccountNo, &a.Ccy, &a.Status, &a.OpenBizDate, &branch, &a.Role); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("repo: 联邦查客户账户 %s scan: %w", custID, err)
 		}
 		a.BranchCode = branch.String
 		out = append(out, a)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("repo: 联邦查客户账户 %s: %w", custID, err)
+	}
+	return out, nil
 }
