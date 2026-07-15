@@ -2,7 +2,10 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 
+	"github.com/projanvil/jiade/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -11,7 +14,25 @@ func newSeedCmd(opts *Options) *cobra.Command {
 		Use:   "seed",
 		Short: "运行目标工程的 fixture 生成器",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("seed: 尚未实现（见 Task 18）")
+			dir := opts.Dir
+			if dir == "" {
+				return fmt.Errorf("需要 --dir 指定目标工程目录")
+			}
+			scale, _ := cmd.Flags().GetString("scale")
+			reset, _ := cmd.Flags().GetBool("reset")
+			ui.New(opts.Stdout, opts.Stderr).Step("seed（%s, scale=%s reset=%v）", dir, scale, reset)
+
+			c := exec.Command("go", "run", "./cmd/seed", "--scale="+scale)
+			if reset {
+				c.Args = append(c.Args, "--reset")
+			}
+			c.Dir = dir
+			c.Stdout = os.Stdout
+			c.Stderr = opts.Stderr
+			if err := c.Run(); err != nil {
+				return fmt.Errorf("%w（请先 jiade up 启动 postgres）", err)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().String("scale", "dev", "规模：dev|full")

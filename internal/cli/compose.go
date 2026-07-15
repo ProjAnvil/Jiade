@@ -2,7 +2,12 @@ package cli
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"os/exec"
 
+	"github.com/projanvil/jiade/internal/docker"
+	"github.com/projanvil/jiade/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -11,7 +16,23 @@ func newUpCmd(opts *Options) *cobra.Command {
 		Use:   "up",
 		Short: "在目标目录内 docker compose up -d（前置探测 docker）",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("up: 尚未实现（见 Task 18）")
+			dir := opts.Dir
+			if dir == "" {
+				return fmt.Errorf("需要 --dir 指定目标工程目录")
+			}
+			build, _ := cmd.Flags().GetBool("build")
+			u := ui.New(opts.Stdout, opts.Stderr)
+
+			probe := docker.Probe(cmd.Context())
+			if !probe.OK() {
+				return fmt.Errorf("%s", probe.Hint())
+			}
+			u.Step("docker compose up（%s）", dir)
+			upArgs := []string{"up", "-d"}
+			if build {
+				upArgs = append(upArgs, "--build")
+			}
+			return runCompose(opts.Stderr, dir, upArgs...)
 		},
 	}
 	cmd.Flags().Bool("build", false, "compose up 时强制 --build")
@@ -23,7 +44,21 @@ func newDownCmd(opts *Options) *cobra.Command {
 		Use:   "down",
 		Short: "在目标目录内 docker compose down",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("down: 尚未实现（见 Task 18）")
+			dir := opts.Dir
+			if dir == "" {
+				return fmt.Errorf("需要 --dir 指定目标工程目录")
+			}
+			ui.New(opts.Stdout, opts.Stderr).Step("docker compose down（%s）", dir)
+			return runCompose(opts.Stderr, dir, "down")
 		},
 	}
+}
+
+// runCompose 在 dir 内执行 docker compose，stdout/stderr 透传，退出码透传。
+func runCompose(stderr io.Writer, dir string, args ...string) error {
+	c := exec.Command("docker", append([]string{"compose"}, args...)...)
+	c.Dir = dir
+	c.Stdout = os.Stdout
+	c.Stderr = stderr
+	return c.Run()
 }
