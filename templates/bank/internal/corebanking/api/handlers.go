@@ -117,6 +117,66 @@ func (h *Handlers) GetLedger(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ledger": out})
 }
 
+// PostTxn 记账：业务意图 → 复式过账。
+func (h *Handlers) PostTxn(w http.ResponseWriter, r *http.Request) {
+	var req postTxnReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, errMap(errors.New("请求体非法 JSON"))); return
+	}
+	if req.Action == "" {
+		writeJSON(w, http.StatusBadRequest, errMap(errors.New("缺少 action"))); return
+	}
+	if req.Amount == "" {
+		writeJSON(w, http.StatusBadRequest, errMap(errors.New("缺少 amount"))); return
+	}
+	amt, err := domain.ParseCents(req.Amount)
+	if err != nil || amt <= 0 {
+		writeJSON(w, http.StatusBadRequest, errMap(errors.New("amount 非法（须元.分且>0）"))); return
+	}
+	in := service.RecordInput{
+		Action: domain.Action(req.Action), Amount: amt, Ccy: req.Ccy, Summary: req.Summary,
+		AccountNo: req.AccountNo, FromAccount: req.FromAccount, ToAccount: req.ToAccount,
+	}
+	booking, err := h.TxnSvc.Record(r.Context(), in)
+	if err != nil {
+		writeJSON(w, statusFor(err), errMap(err)); return
+	}
+	writeJSON(w, http.StatusCreated, bookingToResp(booking))
+}
+
+// ReverseVoucher 冲正：?mode=blue|red（默认 blue）。
+func (h *Handlers) ReverseVoucher(w http.ResponseWriter, r *http.Request) {
+	voucherNo := chiURLParam(r, "voucher_no")
+	mode := domain.ReverseMode(r.URL.Query().Get("mode"))
+	if mode == "" {
+		mode = domain.ReverseBlue
+	}
+	if mode != domain.ReverseBlue && mode != domain.ReverseRed {
+		writeJSON(w, http.StatusBadRequest, errMap(errors.New("mode 须 blue 或 red"))); return
+	}
+	res, err := h.TxnSvc.Reverse(r.Context(), voucherNo, mode)
+	if err != nil {
+		writeJSON(w, statusFor(err), errMap(err)); return
+	}
+	writeJSON(w, http.StatusOK, reverseToResp(res))
+}
+
+// statusFor 把 service 层错误映射到 HTTP 状态码。
+func statusFor(err error) int {
+	switch {
+	case errors.Is(err, service.ErrAccountNotFound), errors.Is(err, service.ErrVoucherNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, service.ErrAccountNotActive), errors.Is(err, service.ErrAlreadyReversed):
+		return http.StatusConflict
+	case errors.Is(err, service.ErrInsufficientBalance):
+		return http.StatusUnprocessableEntity
+	case errors.Is(err, service.ErrCcyMismatch):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
 // --- DTO ---
 
 type accountResp struct {
@@ -154,6 +214,64 @@ type ledgerResp struct {
 	DC          string `json:"dc"`
 	CC          string `json:"cc"`
 	Ccy         string `json:"ccy"`
+}
+
+// --- B-3 write-path DTO ---
+
+type postTxnReq struct {
+	Action      string `json:"action"`
+	AccountNo   string `json:"account_no"`
+	FromAccount string `json:"from_account"`
+	ToAccount   string `json:"to_account"`
+	Amount      string `json:"amount"`
+	Ccy         string `json:"ccy"`
+	Summary     string `json:"summary"`
+}
+
+type txnLineResp struct {
+	TxnID       string `json:"txn_id"`
+	AccountNo   string `json:"account_no"`
+	DCFlag      string `json:"dc_flag"`
+	Amount      string `json:"amount"`
+	SubjectCode string `json:"subject_code"`
+	VoucherNo   string `json:"voucher_no,omitempty"`
+	RefTxnID    string `json:"ref_txn_id,omitempty"`
+}
+
+type recordResp struct {
+	VoucherNo string        `json:"voucher_no"`
+	BizDate   string        `json:"biz_date"`
+	Txns      []txnLineResp `json:"txns"`
+}
+
+type reverseResp struct {
+	VoucherNo         string        `json:"voucher_no"`
+	Mode              string        `json:"mode"`
+	Status            string        `json:"status,omitempty"`
+	ReversedVoucherNo string        `json:"reversed_voucher_no,omitempty"`
+	Txns              []txnLineResp `json:"txns,omitempty"`
+}
+
+func bookingToResp(b domain.Booking) recordResp {
+	out := recordResp{VoucherNo: b.VoucherNo, BizDate: b.BizDate, Txns: make([]txnLineResp, 0, len(b.Txns))}
+	for _, t := range b.Txns {
+		out.Txns = append(out.Txns, txnLineResp{
+			TxnID: t.TxnID, AccountNo: t.AccountNo, DCFlag: string(t.DCFlag),
+			Amount: t.Amount.String(), SubjectCode: t.SubjectCode, VoucherNo: t.VoucherNo,
+		})
+	}
+	return out
+}
+
+func reverseToResp(r service.ReverseResult) reverseResp {
+	out := reverseResp{VoucherNo: r.VoucherNo, Mode: r.Mode, Status: r.Status, ReversedVoucherNo: r.ReversedVoucherNo}
+	for _, t := range r.Txns {
+		out.Txns = append(out.Txns, txnLineResp{
+			TxnID: t.TxnID, AccountNo: t.AccountNo, DCFlag: string(t.DCFlag),
+			Amount: t.Amount.String(), SubjectCode: t.SubjectCode, VoucherNo: t.VoucherNo, RefTxnID: t.RefTxnID,
+		})
+	}
+	return out
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

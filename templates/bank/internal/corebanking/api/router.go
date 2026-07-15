@@ -17,6 +17,8 @@ func NewRouter(h *Handlers) http.Handler {
 		r.Get("/accounts/{account_no}/balance", h.GetBalance)
 		r.Get("/txns", h.ListTxns)
 		r.Get("/ledger", h.GetLedger)
+		r.Post("/txns", h.PostTxn)                                 // B-3 记账
+		r.Post("/vouchers/{voucher_no}/reverse", h.ReverseVoucher) // B-3 冲正
 	})
 	return r
 }
