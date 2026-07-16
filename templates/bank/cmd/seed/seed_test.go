@@ -74,4 +74,36 @@ func TestSeedRun_PopulatesAllDBs(t *testing.T) {
 	if _, err := cust.ExecContext(ctx, "SELECT account_no FROM ext_core_db_demand_account LIMIT 1"); err != nil {
 		t.Errorf("fdw 外部表不可查: %v", err)
 	}
+	// B-2: core 多日切日引擎
+	coreDB2, err := pg.Open("core_db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coreDB2.Close()
+	var bizDate string
+	if err := coreDB2.QueryRowContext(ctx, "SELECT param_value FROM sys_param WHERE param_key='biz_date'").Scan(&bizDate); err != nil {
+		t.Fatalf("查 sys_param.biz_date: %v", err)
+	}
+	if bizDate != "2026-07-13" {
+		t.Errorf("sys_param.biz_date=%q want 2026-07-13", bizDate)
+	}
+	var txnDays int
+	if err := coreDB2.QueryRowContext(ctx, "SELECT COUNT(DISTINCT biz_date) FROM acct_txn").Scan(&txnDays); err != nil {
+		t.Fatalf("查 acct_txn 天数: %v", err)
+	}
+	if txnDays < 400 {
+		t.Errorf("acct_txn 覆盖天数=%d, want ≥400", txnDays)
+	}
+	// 周末日均 < 工作日日均（cyclical ×0.60，聚合稳健）
+	var wkAvg, wdAvg float64
+	err = coreDB2.QueryRowContext(ctx, `SELECT
+		AVG(CASE WHEN EXTRACT(DOW FROM biz_date) IN (0,6) THEN c END),
+		AVG(CASE WHEN EXTRACT(DOW FROM biz_date) IN (1,2,3,4,5) THEN c END)
+		FROM (SELECT biz_date, COUNT(*) c FROM acct_txn GROUP BY biz_date) q`).Scan(&wkAvg, &wdAvg)
+	if err != nil {
+		t.Fatalf("查周末/工作日均值: %v", err)
+	}
+	if wkAvg >= wdAvg {
+		t.Errorf("周末日均(%.0f) 应 < 工作日日均(%.0f)", wkAvg, wdAvg)
+	}
 }

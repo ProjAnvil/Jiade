@@ -79,10 +79,7 @@ func runSeed(ctx context.Context, cfg fixtures.Config, reset bool) error {
 	if err := domains.WriteAccounts(ctx, coreDB, demand, fixed); err != nil {
 		return err
 	}
-	if err := domains.WriteBalances(ctx, coreDB, domains.GenBalanceRows(cfg, demandNos)); err != nil {
-		return err
-	}
-	if err := domains.WriteTxns(ctx, coreDB, domains.GenTxnRows(cfg, demandNos)); err != nil {
+	if err := domains.RunBizDate(ctx, coreDB, cfg, demandNos); err != nil {
 		return err
 	}
 

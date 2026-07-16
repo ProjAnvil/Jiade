@@ -97,52 +97,7 @@ func GenAccountRows(cfg fixtures.Config) ([]domain.DemandAccount, []domain.Fixed
 	return demand, fixed
 }
 
-// GenBalanceRows 为每个活期账户生成一条 EndBizDate 的基线余额快照。
-func GenBalanceRows(cfg fixtures.Config, demandNos []string) []domain.Balance {
-	rng := fixtures.NewRNG(cfg.Seed + 2)
-	rows := make([]domain.Balance, 0, len(demandNos))
-	for _, no := range demandNos {
-		bal := domain.NewMoneyFromCents(int64(rng.IntRange(1, 9999)) * 100)
-		rows = append(rows, domain.Balance{
-			AccountNo: no, BizDate: cfg.EndBizDate,
-			Balance: bal, AvailableBalance: bal, FrozenAmount: domain.NewMoneyFromCents(0),
-			SubjectCode: "2011",
-		})
-	}
-	return rows
-}
-
-// GenTxnRows 生成少量近期流水（最近 5 天，每日量级缩小）。
-// 完整多日切日引擎（bossy bizdate.py）属 Spec B。
-func GenTxnRows(cfg fixtures.Config, demandNos []string) []domain.Txn {
-	rng := fixtures.NewRNG(cfg.Seed + 3)
-	tc := cfg.TargetCounts()
-	days := recentDates(cfg.EndBizDate, 5)
-	perDay := tc.DailyTxnLo / 100 // 缩影：dev 500/100=5 笔/天
-	if perDay < 1 {
-		perDay = 1
-	}
-	dc := []string{string(domain.DCCredit), string(domain.DCCredit), string(domain.DCDebit)} // 贷多借少
-	var rows []domain.Txn
-	seq := 0
-	for _, d := range days {
-		for i := 0; i < perDay; i++ {
-			seq++
-			rows = append(rows, domain.Txn{
-				TxnID:     fmt.Sprintf("T%s-%06d", d, seq),
-				BizDate:   d,
-				AccountNo: demandNos[rng.IntRange(0, len(demandNos)-1)],
-				DCFlag:    domain.DCFlag(rng.Choice(dc)),
-				Amount:    domain.NewMoneyFromCents(int64(rng.IntRange(1, 999)) * 10),
-				Ccy:       "CNY", SubjectCode: "2011",
-				OppAccount: demandNos[rng.IntRange(0, len(demandNos)-1)],
-				Channel:    rng.Choice(fixtures.Channels),
-				Summary:    rng.Choice(fixtures.Summaries),
-			})
-		}
-	}
-	return rows
-}
+// GenBalanceRows / GenTxnRows 已由 Spec B-2 多日切日引擎（bizdate.go RunBizDate）取代，删除。
 
 // ---- 落库 writer（幂等：先 DELETE 后 INSERT）----
 
@@ -218,39 +173,7 @@ func WriteAccounts(ctx context.Context, db *sql.DB, demand []domain.DemandAccoun
 	return nil
 }
 
-// WriteBalances 写余额快照（先清后插）。
-func WriteBalances(ctx context.Context, db *sql.DB, rows []domain.Balance) error {
-	if _, err := db.ExecContext(ctx, "DELETE FROM account_balance"); err != nil {
-		return err
-	}
-	for _, b := range rows {
-		if _, err := db.ExecContext(ctx, `INSERT INTO account_balance
-			(account_no,biz_date,balance,available_balance,frozen_amount,subject_code)
-			VALUES ($1,$2,$3,$4,$5,$6)`,
-			b.AccountNo, b.BizDate, b.Balance.String(), b.AvailableBalance.String(),
-			b.FrozenAmount.String(), b.SubjectCode); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// WriteTxns 写流水（先清后插）。
-func WriteTxns(ctx context.Context, db *sql.DB, rows []domain.Txn) error {
-	if _, err := db.ExecContext(ctx, "DELETE FROM acct_txn"); err != nil {
-		return err
-	}
-	for _, t := range rows {
-		if _, err := db.ExecContext(ctx, `INSERT INTO acct_txn
-			(txn_id,biz_date,account_no,dc_flag,amount,ccy,subject_code,opp_account,channel,summary)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-			t.TxnID, t.BizDate, t.AccountNo, string(t.DCFlag), t.Amount.String(),
-			t.Ccy, t.SubjectCode, nullable(t.OppAccount), nullable(t.Channel), nullable(t.Summary)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+// WriteBalances / WriteTxns 已由 Spec B-2 多日切日引擎（bizdate.go bulkInsert*）取代，删除。
 
 // ---- helpers ----
 
@@ -260,18 +183,6 @@ func addMonths(dateStr string, months int) string {
 		return dateStr
 	}
 	return t.AddDate(0, months, 0).Format("2006-01-02")
-}
-
-func recentDates(endStr string, n int) []string {
-	t, err := time.Parse("2006-01-02", endStr)
-	if err != nil {
-		return []string{endStr}
-	}
-	out := make([]string, 0, n)
-	for i := n - 1; i >= 0; i-- {
-		out = append(out, t.AddDate(0, 0, -i).Format("2006-01-02"))
-	}
-	return out
 }
 
 func nullable(s string) any {
