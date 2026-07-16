@@ -13,6 +13,8 @@ import (
 	"bank/internal/corebanking/domain"
 	"bank/internal/corebanking/service"
 	"bank/internal/platform/pg"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type fakeAccounts struct {
@@ -197,5 +199,16 @@ func TestPostTxn_AccountNotFound_404(t *testing.T) {
 		`{"action":"deposit","account_no":"NOPE","amount":"1.00","ccy":"CNY"}`)
 	if code != 404 {
 		t.Errorf("账户不存在应 404, got %d", code)
+	}
+}
+
+// TestStatusFor_Deadlock_409 固定 spec §8.3：Postgres 死锁 SQLSTATE 40P01 → 409 Conflict。
+func TestStatusFor_Deadlock_409(t *testing.T) {
+	if got := statusFor(&pgconn.PgError{Code: "40P01"}); got != http.StatusConflict {
+		t.Errorf("40P01 死锁应映射 409, got %d", got)
+	}
+	// 其他 SQLSTATE 不应误判为死锁 409
+	if got := statusFor(&pgconn.PgError{Code: "23505"}); got == http.StatusConflict {
+		t.Errorf("非 40P01 不应 409, got %d", got)
 	}
 }
