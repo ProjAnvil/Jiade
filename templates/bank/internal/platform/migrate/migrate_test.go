@@ -42,3 +42,22 @@ func TestSplitStatements_CustPaySchemas(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitStatements_RewardRiskSchemas(t *testing.T) {
+	for _, name := range []string{"reward_db.sql", "risk_db.sql"} {
+		// 3 级回到 templates/bank/（go test 的 CWD 是包目录 internal/platform/migrate/）。
+		sql, err := os.ReadFile("../../../db/migrations/" + name)
+		if err != nil {
+			t.Fatalf("读 %s 失败: %v", name, err)
+		}
+		stmts := SplitStatements(string(sql))
+		if len(stmts) == 0 {
+			t.Errorf("%s 切分后无语句", name)
+		}
+		for _, s := range stmts {
+			if !strings.Contains(s, "CREATE") {
+				t.Errorf("%s 含非 DDL 语句: %q", name, s)
+			}
+		}
+	}
+}
