@@ -218,3 +218,20 @@ func TestReverse_NotFound(t *testing.T) {
 		t.Fatalf("凭证不存在应 ErrVoucherNotFound, got %v", err)
 	}
 }
+
+func TestRecord_BizDateFromSysParam(t *testing.T) {
+	store := &recordingLedgerStore{}
+	svc := NewTxnService(nil, fakeAccountsRdr{byNo: map[string]domain.DemandAccount{
+		"D1": {AccountNo: "D1", SubjectCode: "2011", Ccy: "CNY", Status: domain.AccountStatusActive},
+	}}, NewLedgerService(store), store)
+	booking, err := svc.Record(context.Background(), RecordInput{
+		Action: domain.ActionDeposit, AccountNo: "D1", Amount: domain.NewMoneyFromCents(100), Ccy: "CNY",
+	})
+	if err != nil {
+		t.Fatalf("deposit 应成功: %v", err)
+	}
+	// biz_date 取自 fake store 的 GetBizDate（返回 2026-07-13），非 time.Now()
+	if booking.BizDate != "2026-07-13" {
+		t.Errorf("biz_date 应取自 sys_param, got %q want 2026-07-13", booking.BizDate)
+	}
+}

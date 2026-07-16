@@ -132,3 +132,7 @@ func (f *recordingLedgerStore) SetTxnSummary(_ context.Context, _ pg.DBTX, vouch
 	f.lastSummary = summary
 	return nil
 }
+func (f *recordingLedgerStore) GetBizDate(context.Context) (string, error) {
+	f.calls++
+	return "2026-07-13", nil
+}

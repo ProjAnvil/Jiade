@@ -196,6 +196,7 @@ func (*recordingAPIStore) UpdateTxnStatus(context.Context, pg.DBTX, string, doma
 	return nil
 }
 func (*recordingAPIStore) SetTxnSummary(context.Context, pg.DBTX, string, string) error { return nil }
+func (*recordingAPIStore) GetBizDate(context.Context) (string, error) { return "2026-07-13", nil }
 
 func TestPostTxn_Deposit_201(t *testing.T) {
 	h := &Handlers{TxnSvc: newRecordSvc()}

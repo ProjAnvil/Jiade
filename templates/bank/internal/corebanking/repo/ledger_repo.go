@@ -236,6 +236,16 @@ func (r *LedgerRepo) SetTxnSummary(ctx context.Context, q pg.DBTX, voucherNo, su
 	return nil
 }
 
+// GetBizDate 读 sys_param.biz_date（B-2 衔接：记账 biz_date 取自 sys_param 而非 time.Now）。
+func (r *LedgerRepo) GetBizDate(ctx context.Context) (string, error) {
+	var v string
+	err := r.db.QueryRowContext(ctx, "SELECT param_value FROM sys_param WHERE param_key='biz_date'").Scan(&v)
+	if err != nil {
+		return "", fmt.Errorf("repo: 读 sys_param.biz_date: %w", err)
+	}
+	return v, nil
+}
+
 func nullable(s string) any {
 	if s == "" {
 		return nil
