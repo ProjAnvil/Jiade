@@ -136,6 +136,24 @@ func newRecordSvc() *service.TxnService {
 	}}, service.NewLedgerService(store), store)
 }
 
+// newRecordSvcWithVoucher 同 newRecordSvc，但 store 预置一组原凭证流水（蓝冲/红冲 reversal 用）。
+func newRecordSvcWithVoucher(voucherNo string) (*service.TxnService, *recordingAPIStore) {
+	store := &recordingAPIStore{voucherTxns: balancedVoucherTxns(voucherNo)}
+	svc := service.NewTxnService(nil, apiAccountsRdr{m: map[string]domain.DemandAccount{
+		"D1": {AccountNo: "D1", SubjectCode: "2011", Ccy: "CNY", Status: domain.AccountStatusActive},
+	}}, service.NewLedgerService(store), store)
+	return svc, store
+}
+
+// balancedVoucherTxns 构造一对平衡的原流水（一借一贷，同金额同 voucher），供冲正回滚。
+func balancedVoucherTxns(voucherNo string) []domain.Txn {
+	amt := domain.NewMoneyFromCents(10000)
+	return []domain.Txn{
+		{TxnID: "T1", AccountNo: "D1", DCFlag: domain.DCDebit, Amount: amt, SubjectCode: "1001", VoucherNo: voucherNo, Ccy: "CNY"},
+		{TxnID: "T2", AccountNo: "D2", DCFlag: domain.DCCredit, Amount: amt, SubjectCode: "2011", VoucherNo: voucherNo, Ccy: "CNY"},
+	}
+}
+
 // apiAccountsRdr 记账用的账户只读 fake（实现 service.AccountReader）。
 type apiAccountsRdr struct{ m map[string]domain.DemandAccount }
 
@@ -147,34 +165,37 @@ func (a apiAccountsRdr) GetDemand(_ context.Context, no string) (domain.DemandAc
 }
 
 // recordingAPIStore 最小 LedgerStore fake：InsertTxns 回填假 ID，EnsureBalanceRow 给大余额（防透支）。
-type recordingAPIStore struct{}
+// voucherTxns 供 LockTxnsByVoucher/GetTxnsByVoucher 返回原凭证流水（冲正 handler 测试用）。
+type recordingAPIStore struct {
+	voucherTxns []domain.Txn // LockTxnsByVoucher / GetTxnsByVoucher 返回
+}
 
-func (recordingAPIStore) InsertTxns(_ context.Context, _ pg.DBTX, txns []domain.Txn) error {
+func (s *recordingAPIStore) InsertTxns(_ context.Context, _ pg.DBTX, txns []domain.Txn) error {
 	for i := range txns {
 		txns[i].TxnID = "T-api"
 	}
 	return nil
 }
-func (recordingAPIStore) ApplyBalanceDeltas(context.Context, pg.DBTX, string, []domain.BalanceDelta) error {
+func (*recordingAPIStore) ApplyBalanceDeltas(context.Context, pg.DBTX, string, []domain.BalanceDelta) error {
 	return nil
 }
-func (recordingAPIStore) UpsertGL(context.Context, pg.DBTX, domain.GLBalance) error { return nil }
-func (recordingAPIStore) EnsureBalanceRow(_ context.Context, _ pg.DBTX, _, _, _ string) (domain.Balance, error) {
+func (*recordingAPIStore) UpsertGL(context.Context, pg.DBTX, domain.GLBalance) error { return nil }
+func (*recordingAPIStore) EnsureBalanceRow(_ context.Context, _ pg.DBTX, _, _, _ string) (domain.Balance, error) {
 	return domain.Balance{AvailableBalance: domain.NewMoneyFromCents(999999)}, nil
 }
-func (recordingAPIStore) GetTxnsByVoucher(context.Context, pg.DBTX, string) ([]domain.Txn, error) {
-	return nil, nil
+func (s *recordingAPIStore) GetTxnsByVoucher(context.Context, pg.DBTX, string) ([]domain.Txn, error) {
+	return s.voucherTxns, nil
 }
-func (recordingAPIStore) LockTxnsByVoucher(context.Context, pg.DBTX, string) ([]domain.Txn, error) {
-	return nil, nil
+func (s *recordingAPIStore) LockTxnsByVoucher(context.Context, pg.DBTX, string) ([]domain.Txn, error) {
+	return s.voucherTxns, nil
 }
-func (recordingAPIStore) HasReversal(context.Context, pg.DBTX, string) (bool, error) {
+func (*recordingAPIStore) HasReversal(context.Context, pg.DBTX, string) (bool, error) {
 	return false, nil
 }
-func (recordingAPIStore) UpdateTxnStatus(context.Context, pg.DBTX, string, domain.TxnStatus) error {
+func (*recordingAPIStore) UpdateTxnStatus(context.Context, pg.DBTX, string, domain.TxnStatus) error {
 	return nil
 }
-func (recordingAPIStore) SetTxnSummary(context.Context, pg.DBTX, string, string) error { return nil }
+func (*recordingAPIStore) SetTxnSummary(context.Context, pg.DBTX, string, string) error { return nil }
 
 func TestPostTxn_Deposit_201(t *testing.T) {
 	h := &Handlers{TxnSvc: newRecordSvc()}
@@ -199,6 +220,30 @@ func TestPostTxn_AccountNotFound_404(t *testing.T) {
 		`{"action":"deposit","account_no":"NOPE","amount":"1.00","ccy":"CNY"}`)
 	if code != 404 {
 		t.Errorf("账户不存在应 404, got %d", code)
+	}
+}
+
+// --- B-3 reverse handler tests ---
+
+// TestReverseVoucher_InvalidMode_400 冲正非法 mode（green）应在 handler 层 400，不触达 service。
+func TestReverseVoucher_InvalidMode_400(t *testing.T) {
+	h := &Handlers{TxnSvc: newRecordSvc()}
+	code, body := postJSON(t, NewRouter(h), "/api/v1/vouchers/V1/reverse?mode=green", "")
+	if code != 400 || !strings.Contains(body, "mode") {
+		t.Errorf("非法 mode 应 400 且提示 mode, code=%d body=%s", code, body)
+	}
+}
+
+// TestReverseVoucher_BlueDefault_200 不传 mode 默认蓝冲，返回 200 + mode=blue + status=reversed。
+func TestReverseVoucher_BlueDefault_200(t *testing.T) {
+	svc, _ := newRecordSvcWithVoucher("V1")
+	h := &Handlers{TxnSvc: svc}
+	code, body := postJSON(t, NewRouter(h), "/api/v1/vouchers/V1/reverse", "")
+	if code != 200 {
+		t.Fatalf("蓝冲应 200, got %d body=%s", code, body)
+	}
+	if !strings.Contains(body, `"mode":"blue"`) || !strings.Contains(body, `"status":"reversed"`) {
+		t.Errorf("蓝冲响应应含 mode=blue + status=reversed, body=%s", body)
 	}
 }
 

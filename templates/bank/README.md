@@ -32,6 +32,21 @@ curl -sf localhost:8080/api/v1/accounts/D0000000001
 curl -sf localhost:8080/api/v1/accounts/D0000000001/balance
 ```
 
+core-banking 记账/冲正写接口（Spec B-3；复式过账强制 sum(借)==sum(贷)，`LedgerService.Post` 已内部化，客户端只见业务意图）：
+
+```bash
+# 记账：存入 100 元（deposit / withdraw / transfer）
+curl -sf -X POST localhost:8080/api/v1/txns \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"deposit","account_no":"D0000000001","amount":"100.00","ccy":"CNY"}'
+# → 201 {"voucher_no":"V...","biz_date":"...","txns":[{借/贷两条分录}]}
+
+# 冲正：蓝冲（默认，改状态+回滚余额，不新增流水）
+curl -sf -X POST 'localhost:8080/api/v1/vouchers/V.../reverse?mode=blue'
+# → 200 {"voucher_no":"V...","mode":"blue","status":"reversed"}
+# mode=red 走反向分录（新增反向流水，返回 reversed_voucher_no）
+```
+
 **跨库 FDW JOIN 端点**（Spec B-1 核心：单条 SQL 跨 2~3 库，非应用层拼接）：
 
 ```bash
@@ -51,4 +66,4 @@ curl -sf localhost:8082/api/v1/payments/transfers/PT000000000001/parties
 ## 金融不变量
 
 - 金额用 int64 分表示，禁 float。
-- 复式记账只在 core：过账强制 sum(借)==sum(贷)，不平回滚。customer/payment 无总账。
+- 复式记账只在 core：过账强制 sum(借)==sum(贷)，不平回滚——既护 seed 也护 B-3 运行时记账/冲正。customer/payment 无总账。
