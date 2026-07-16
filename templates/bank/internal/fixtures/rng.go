@@ -29,6 +29,9 @@ func (g *RNG) Choice(list []string) string {
 	return list[g.r.IntN(len(list))]
 }
 
+// Float64 返回 [0.0,1.0) 的确定性随机浮点（仅用于非金额生成，如 risk_score / factor 缩放）。
+func (g *RNG) Float64() float64 { return g.r.Float64() }
+
 // 手写小词库（对齐 bossy zh_CN 语义，零外部依赖）。
 var (
 	Surnames   = []string{"王", "李", "张", "刘", "陈", "杨", "黄", "赵", "吴", "周"}
@@ -46,6 +49,15 @@ var (
 	TransferSummaries = []string{"转账", "汇款", "还款"}
 	CounterBanks      = []string{"本行", "他行"}
 	Devices           = []string{"PC", "APP", "ATM", "柜台"}
+
+	// B-4a 新增词库
+	MemberLevelCodes = []string{"L1", "L2", "L3", "L4", "L5"}
+	CampaignTypes    = []string{"满减", "返现", "积分翻倍", "新客"}
+	PointSources     = []string{"消费", "活动", "签到", "赎回"}
+	PointDirections  = []string{"earn", "earn", "earn", "redeem"} // 3/4 earn
+	RiskActions      = []string{"拦截", "放行", "人工"}
+	RiskReasons      = []string{"欺诈", "洗钱嫌疑", "投诉涉诉"}
+	EntityTypes      = []string{"客户"}
 )
 
 // RandomDate 返回 [start,end]（YYYY-MM-DD）区间内的一个确定性随机日期。

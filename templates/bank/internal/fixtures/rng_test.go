@@ -29,3 +29,23 @@ func TestChoice(t *testing.T) {
 	}
 	t.Errorf("Choice 返回 %q 不在词库", got)
 }
+
+func TestRNG_Float64Deterministic(t *testing.T) {
+	a := NewRNG(99).Float64()
+	b := NewRNG(99).Float64()
+	if a != b {
+		t.Errorf("Float64 不确定: %v != %v", a, b)
+	}
+	if a < 0 || a >= 1 {
+		t.Errorf("Float64 越界: %v", a)
+	}
+}
+
+func TestScaleFactor(t *testing.T) {
+	if ScaleFactor(ScaleDev) != 0.25 {
+		t.Error("dev 应 0.25")
+	}
+	if ScaleFactor(ScaleFull) != 1.0 {
+		t.Error("full 应 1.0")
+	}
+}
