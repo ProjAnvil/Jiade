@@ -2,6 +2,8 @@
 package domains
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,6 +11,7 @@ import (
 
 	"bank/internal/corebanking/domain"
 	"bank/internal/fixtures"
+	"bank/internal/platform/pg"
 )
 
 // bossy 节假日（公历固定，移植自 distribution.py HOLIDAYS）。
@@ -115,8 +118,116 @@ func bizDateRange(start, end string) ([]time.Time, error) {
 	return out, nil
 }
 
-// 占位：避免 strconv 未用 import 报错（Task 3 的 placeholders 会用到 strconv）。
-var _ = strconv.Itoa
+// ---- 写入循环（批量 + 逐日幂等 + 切 sys_param）----
+
+const bizDateBatchSize = 1000
+
+// RunBizDate 从 StartBizDate 推进到 EndBizDate：每日 GenDay → 逐日 tx 内 DELETE 当日 + 批量 INSERT；
+// 末尾 UPSERT sys_param.biz_date（=EndBizDate）/prev_biz_date（=次末日）。
+func RunBizDate(ctx context.Context, db *sql.DB, cfg fixtures.Config, demandNos []string) error {
+	if len(demandNos) == 0 {
+		return fmt.Errorf("bizdate: 无账户")
+	}
+	days, err := bizDateRange(cfg.StartBizDate, cfg.EndBizDate)
+	if err != nil {
+		return fmt.Errorf("bizdate: %w", err)
+	}
+	st := newDayState(cfg, demandNos)
+	for _, d := range days {
+		dayTxns, dayBalances := GenDay(cfg, d, demandNos, st)
+		dateStr := d.Format("2006-01-02")
+		if err := pg.RunInTx(ctx, db, func(q pg.DBTX) error {
+			if _, err := q.ExecContext(ctx, "DELETE FROM acct_txn WHERE biz_date=$1", dateStr); err != nil {
+				return fmt.Errorf("删当日流水 %s: %w", dateStr, err)
+			}
+			if err := bulkInsertTxns(ctx, q, dayTxns); err != nil {
+				return err
+			}
+			if _, err := q.ExecContext(ctx, "DELETE FROM account_balance WHERE biz_date=$1", dateStr); err != nil {
+				return fmt.Errorf("删当日余额 %s: %w", dateStr, err)
+			}
+			if err := bulkInsertBalances(ctx, q, dayBalances); err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("bizdate: 写 %s 失败: %w", dateStr, err)
+		}
+	}
+	end := days[len(days)-1].Format("2006-01-02")
+	prev := days[len(days)-1].AddDate(0, 0, -1).Format("2006-01-02")
+	if _, err := db.ExecContext(ctx, `INSERT INTO sys_param(param_key,param_value) VALUES ('biz_date',$1),('prev_biz_date',$2)
+		ON CONFLICT (param_key) DO UPDATE SET param_value=EXCLUDED.param_value`, end, prev); err != nil {
+		return fmt.Errorf("bizdate: 切 sys_param: %w", err)
+	}
+	return nil
+}
+
+// placeholders 生成 nRows×nCols 的 $N 占位符串：($1,$2),($3,$4),...
+func placeholders(nRows, nCols int) string {
+	var b strings.Builder
+	idx := 1
+	for r := 0; r < nRows; r++ {
+		if r > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte('(')
+		for c := 0; c < nCols; c++ {
+			if c > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString("$")
+			b.WriteString(strconv.Itoa(idx))
+			idx++
+		}
+		b.WriteByte(')')
+	}
+	return b.String()
+}
+
+// bulkInsertTxns 批量插 acct_txn（11 列；voucher_no/txn_status 走 DEFAULT ''/'normal'）。
+func bulkInsertTxns(ctx context.Context, q pg.DBTX, rows []domain.Txn) error {
+	const cols = 11
+	const stmt = "INSERT INTO acct_txn(txn_id,biz_date,account_no,dc_flag,amount,ccy,subject_code,opp_account,ref_txn_id,channel,summary) VALUES "
+	for start := 0; start < len(rows); start += bizDateBatchSize {
+		end := start + bizDateBatchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		chunk := rows[start:end]
+		args := make([]any, 0, len(chunk)*cols)
+		for _, t := range chunk {
+			args = append(args, t.TxnID, t.BizDate, t.AccountNo, string(t.DCFlag), t.Amount.String(),
+				t.Ccy, t.SubjectCode, nullable(t.OppAccount), nullable(t.RefTxnID), nullable(t.Channel), nullable(t.Summary))
+		}
+		if _, err := q.ExecContext(ctx, stmt+placeholders(len(chunk), cols), args...); err != nil {
+			return fmt.Errorf("bizdate: 批量插流水: %w", err)
+		}
+	}
+	return nil
+}
+
+// bulkInsertBalances 批量插 account_balance（6 列）。
+func bulkInsertBalances(ctx context.Context, q pg.DBTX, rows []domain.Balance) error {
+	const cols = 6
+	const stmt = "INSERT INTO account_balance(account_no,biz_date,balance,available_balance,frozen_amount,subject_code) VALUES "
+	for start := 0; start < len(rows); start += bizDateBatchSize {
+		end := start + bizDateBatchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		chunk := rows[start:end]
+		args := make([]any, 0, len(chunk)*cols)
+		for _, b := range chunk {
+			args = append(args, b.AccountNo, b.BizDate, b.Balance.String(), b.AvailableBalance.String(),
+				b.FrozenAmount.String(), b.SubjectCode)
+		}
+		if _, err := q.ExecContext(ctx, stmt+placeholders(len(chunk), cols), args...); err != nil {
+			return fmt.Errorf("bizdate: 批量插余额: %w", err)
+		}
+	}
+	return nil
+}
 
 // ---- 引擎内核（纯函数，无 DB）----
 
