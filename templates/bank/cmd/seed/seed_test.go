@@ -21,10 +21,10 @@ func TestEnsureDBs_CreatesAllThree(t *testing.T) {
 	if err := admin.Ping(); err != nil {
 		t.Skipf("postgres 未就绪，跳过（先 make up）: %v", err)
 	}
-	if err := ensureDBs(ctx, true, []string{"core_db", "cust_db", "pay_db"}); err != nil {
+	if err := ensureDBs(ctx, true, []string{"core_db", "cust_db", "pay_db", "reward_db", "risk_db"}); err != nil {
 		t.Fatalf("ensureDBs 失败: %v", err)
 	}
-	for _, name := range []string{"core_db", "cust_db", "pay_db"} {
+	for _, name := range []string{"core_db", "cust_db", "pay_db", "reward_db", "risk_db"} {
 		var exists bool
 		if err := admin.QueryRowContext(ctx,
 			"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)", name).Scan(&exists); err != nil {
@@ -53,6 +53,8 @@ func TestSeedRun_PopulatesAllDBs(t *testing.T) {
 	for _, c := range []struct{ db, table string }{
 		{"cust_db", "cust_info"}, {"cust_db", "cust_account_rel"},
 		{"pay_db", "merchant"}, {"pay_db", "transfer_txn"}, {"pay_db", "consumption_txn"},
+		{"reward_db", "points_acct"}, {"reward_db", "points_txn"}, {"reward_db", "coupon"},
+		{"risk_db", "risk_rule"}, {"risk_db", "risk_event"}, {"risk_db", "blacklist"},
 	} {
 		db, err := pg.Open(c.db)
 		if err != nil {
@@ -106,4 +108,29 @@ func TestSeedRun_PopulatesAllDBs(t *testing.T) {
 	if wkAvg >= wdAvg {
 		t.Errorf("周末日均(%.0f) 应 < 工作日日均(%.0f)", wkAvg, wdAvg)
 	}
+	// B-4a: reward/risk 逐日三因子——周末日均 < 工作日日均
+	rewardDB, err := pg.Open("reward_db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rwWk, rwWd float64
+	if err := rewardDB.QueryRowContext(ctx, `SELECT
+		AVG(CASE WHEN EXTRACT(DOW FROM biz_date) IN (0,6) THEN c END),
+		AVG(CASE WHEN EXTRACT(DOW FROM biz_date) IN (1,2,3,4,5) THEN c END)
+		FROM (SELECT biz_date, COUNT(*) c FROM points_txn GROUP BY biz_date) q`).Scan(&rwWk, &rwWd); err != nil {
+		t.Fatalf("查 reward 周末/工作日均值: %v", err)
+	}
+	if rwWk == 0 || rwWk >= rwWd {
+		t.Errorf("reward 周末日均(%.0f) 应 < 工作日(%.0f)", rwWk, rwWd)
+	}
+	rewardDB.Close()
+	// reward/risk 联邦外部表可查
+	riskDB, err := pg.Open("risk_db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := riskDB.ExecContext(ctx, "SELECT cust_id FROM ext_cust_db_cust_info LIMIT 1"); err != nil {
+		t.Errorf("risk_db 联邦表 ext_cust_db_cust_info 不可查: %v", err)
+	}
+	riskDB.Close()
 }
