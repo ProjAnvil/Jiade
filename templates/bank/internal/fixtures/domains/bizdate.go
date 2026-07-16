@@ -86,6 +86,11 @@ func parseDate(s string) time.Time {
 	return t
 }
 
+// parseDate2 解析 YYYY-MM-DD（返回 error，供 addDays 等需错误反馈处使用）。
+func parseDate2(s string) (time.Time, error) {
+	return time.Parse("2006-01-02", s)
+}
+
 // dayOrdinal d 自 base 起的天数（含 0）。
 func dayOrdinal(d, base time.Time) int64 {
 	return int64(d.Sub(base).Hours() / 24)
