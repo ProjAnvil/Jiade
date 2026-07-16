@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"log"
 	"os"
 	"path/filepath"
@@ -36,10 +37,10 @@ func TestEnsureDBs_CreatesAllThree(t *testing.T) {
 	if err := admin.Ping(); err != nil {
 		t.Skipf("postgres 未就绪，跳过（先 make up）: %v", err)
 	}
-	if err := ensureDBs(ctx, true, []string{"core_db", "cust_db", "pay_db", "reward_db", "risk_db"}); err != nil {
+	if err := ensureDBs(ctx, true, []string{"core_db", "cust_db", "pay_db", "reward_db", "risk_db", "loan_db", "wealth_db"}); err != nil {
 		t.Fatalf("ensureDBs 失败: %v", err)
 	}
-	for _, name := range []string{"core_db", "cust_db", "pay_db", "reward_db", "risk_db"} {
+	for _, name := range []string{"core_db", "cust_db", "pay_db", "reward_db", "risk_db", "loan_db", "wealth_db"} {
 		var exists bool
 		if err := admin.QueryRowContext(ctx,
 			"SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)", name).Scan(&exists); err != nil {
@@ -70,6 +71,10 @@ func TestSeedRun_PopulatesAllDBs(t *testing.T) {
 		{"pay_db", "merchant"}, {"pay_db", "transfer_txn"}, {"pay_db", "consumption_txn"},
 		{"reward_db", "points_acct"}, {"reward_db", "points_txn"}, {"reward_db", "coupon"},
 		{"risk_db", "risk_rule"}, {"risk_db", "risk_event"}, {"risk_db", "blacklist"},
+		{"loan_db", "loan_product"}, {"loan_db", "loan_account"}, {"loan_db", "loan_repay"},
+		{"loan_db", "loan_balance"}, {"loan_db", "loan_overdue"},
+		{"wealth_db", "wealth_product"}, {"wealth_db", "wealth_nav"}, {"wealth_db", "wealth_holding"},
+		{"wealth_db", "wealth_order"}, {"wealth_db", "wealth_income"},
 	} {
 		db, err := pg.Open(c.db)
 		if err != nil {
@@ -148,4 +153,73 @@ func TestSeedRun_PopulatesAllDBs(t *testing.T) {
 		t.Errorf("risk_db 联邦表 ext_cust_db_cust_info 不可查: %v", err)
 	}
 	riskDB.Close()
+	// B-4b: loan 逐日滚存——loan_balance 末日有快照；逾期五级分类可滑且档位合法；联邦可 JOIN
+	loanDB, err := pg.Open("loan_db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var eodBal int
+	if err := loanDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM loan_balance WHERE biz_date='2026-07-13'").Scan(&eodBal); err != nil {
+		t.Fatalf("查 loan_balance 末日: %v", err)
+	}
+	if eodBal == 0 {
+		t.Error("loan_balance 末日(2026-07-13)无快照行")
+	}
+	var classN, badClass int
+	if err := loanDB.QueryRowContext(ctx, "SELECT COUNT(DISTINCT overdue_class) FROM loan_overdue").Scan(&classN); err != nil {
+		t.Fatalf("查 overdue_class: %v", err)
+	}
+	if classN < 2 {
+		t.Errorf("逾期五级分类应随天数滑落至少 2 档, got %d", classN)
+	}
+	if err := loanDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM loan_overdue WHERE overdue_class NOT IN ('正常','关注','次级','可疑','损失')").Scan(&badClass); err != nil {
+		t.Fatalf("查非法档位: %v", err)
+	}
+	if badClass > 0 {
+		t.Errorf("loan_overdue 含非法五级分类 %d 行", badClass)
+	}
+	var loanCustName sql.NullString
+	if err := loanDB.QueryRowContext(ctx, `SELECT ci.name FROM loan_account la
+		JOIN ext_cust_db_cust_info ci ON la.cust_id=ci.cust_id LIMIT 1`).Scan(&loanCustName); err != nil {
+		t.Errorf("loan_db 联邦 JOIN 不可查: %v", err)
+	}
+	loanDB.Close()
+	// B-4b: wealth——nav 每产品每日有行；订单周末<工作日；income 覆盖全部持仓；联邦可 JOIN
+	wealthDB, err := pg.Open("wealth_db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var navProds, navDays int
+	if err := wealthDB.QueryRowContext(ctx, "SELECT COUNT(DISTINCT product_code), COUNT(DISTINCT biz_date) FROM wealth_nav").Scan(&navProds, &navDays); err != nil {
+		t.Fatalf("查 wealth_nav: %v", err)
+	}
+	if navProds != 6 || navDays < 400 {
+		t.Errorf("wealth_nav 产品数=%d(应6) 天数=%d(应≥400)", navProds, navDays)
+	}
+	var wpWk, wpWd float64
+	if err := wealthDB.QueryRowContext(ctx, `SELECT
+		AVG(CASE WHEN EXTRACT(DOW FROM biz_date) IN (0,6) THEN c END),
+		AVG(CASE WHEN EXTRACT(DOW FROM biz_date) IN (1,2,3,4,5) THEN c END)
+		FROM (SELECT biz_date, COUNT(*) c FROM wealth_order GROUP BY biz_date) q`).Scan(&wpWk, &wpWd); err != nil {
+		t.Fatalf("查 wealth 周末/工作日均值: %v", err)
+	}
+	if wpWk == 0 || wpWk >= wpWd {
+		t.Errorf("wealth 周末日均订单(%.0f) 应 < 工作日(%.0f)", wpWk, wpWd)
+	}
+	var incomeHoldings, incomeDays, holdingN int
+	if err := wealthDB.QueryRowContext(ctx, "SELECT COUNT(DISTINCT holding_id), COUNT(DISTINCT biz_date) FROM wealth_income").Scan(&incomeHoldings, &incomeDays); err != nil {
+		t.Fatalf("查 wealth_income: %v", err)
+	}
+	if err := wealthDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM wealth_holding").Scan(&holdingN); err != nil {
+		t.Fatalf("查 wealth_holding: %v", err)
+	}
+	if incomeHoldings != holdingN || incomeDays < 400 {
+		t.Errorf("wealth_income 覆盖持仓 %d/%d 天数 %d(应≥400)", incomeHoldings, holdingN, incomeDays)
+	}
+	var wealthCustName sql.NullString
+	if err := wealthDB.QueryRowContext(ctx, `SELECT ci.name FROM wealth_holding h
+		JOIN ext_cust_db_cust_info ci ON h.cust_id=ci.cust_id LIMIT 1`).Scan(&wealthCustName); err != nil {
+		t.Errorf("wealth_db 联邦 JOIN 不可查: %v", err)
+	}
+	wealthDB.Close()
 }
