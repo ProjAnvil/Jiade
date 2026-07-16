@@ -4,11 +4,26 @@ package main
 
 import (
 	"context"
+	"log"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"bank/internal/fixtures"
 	"bank/internal/platform/pg"
 )
+
+func TestMain(m *testing.M) {
+	// runSeed 用相对模块根的路径读 db/migrations/*.sql；go test 把 CWD 设为包目录 cmd/seed/，
+	// 切到模块根（templates/bank/）使集成测试可直接 `go test -tags=integration ./cmd/seed/` 运行。
+	_, file, _, _ := runtime.Caller(0)
+	moduleRoot := filepath.Join(filepath.Dir(file), "..", "..")
+	if err := os.Chdir(moduleRoot); err != nil {
+		log.Fatalf("seed_test chdir %s: %v", moduleRoot, err)
+	}
+	os.Exit(m.Run())
+}
 
 func TestEnsureDBs_CreatesAllThree(t *testing.T) {
 	ctx := context.Background()
