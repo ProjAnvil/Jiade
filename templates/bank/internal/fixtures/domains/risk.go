@@ -107,14 +107,15 @@ func RunRisk(ctx context.Context, db *sql.DB, cfg fixtures.Config, custIDs, acco
 		compact := dateCompact(d)
 		events := make([]domain.RiskEvent, 0, n)
 		for i := 0; i < n; i++ {
+			ruleID := pickStr(rng, ruleIDs) // 同一 rule id 复用于 RuleID 与 Summary，避免文案/规则错配
 			events = append(events, domain.RiskEvent{
 				EventID: fmt.Sprintf("RS-EV-%s-%05d", compact, i), BizDate: dateStr,
 				CustID: pickStr(rng, custIDs), AccountNo: pickStr(rng, accountNos),
-				RuleID: pickStr(rng, ruleIDs),
+				RuleID: ruleID,
 				RiskScore: fmt.Sprintf("%.2f", 0.3+rng.Float64()*0.65),
 				ActionTaken: rng.Choice(fixtures.RiskActions),
 				TxnRef:  fmt.Sprintf("RS-TX-%s-%05d", compact, i),
-				Summary: "触发规则 " + pickStr(rng, ruleIDs),
+				Summary: "触发规则 " + ruleID,
 			})
 		}
 		if err := pg.RunInTx(ctx, db, func(q pg.DBTX) error {

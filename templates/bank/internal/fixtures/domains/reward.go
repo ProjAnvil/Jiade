@@ -150,7 +150,7 @@ func RunReward(ctx context.Context, db *sql.DB, cfg fixtures.Config, accts []dom
 					CampaignID: rng.Choice(campaignIDs),
 					FaceValue:  domain.NewMoneyFromCents(int64(couponFaceCents[rng.IntRange(0, len(couponFaceCents)-1)])),
 					MinSpend:   domain.NewMoneyFromCents(int64(couponMinCents[rng.IntRange(0, len(couponMinCents)-1)])),
-					Status:     "issued", IssueBizDate: dateStr, ExpireDate: dateStr,
+					Status:     "issued", IssueBizDate: dateStr, ExpireDate: dateStr, // 与 bossy 一致：同日发放即同日过期（短期券），非 bug
 				})
 			}
 		}

@@ -38,7 +38,10 @@ func (r *RiskRepo) ListEvents(ctx context.Context, from, to, ruleID, action stri
 		}
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("repo: 列风控事件: %w", err)
+	}
+	return out, nil
 }
 
 // GetEvent 跨库联邦：risk_event JOIN ext_cust_db_cust_info → 事件详情 + 客户姓名/类型。
@@ -77,7 +80,10 @@ func (r *RiskRepo) ListRules(ctx context.Context) ([]domain.RiskRule, error) {
 		rule.ConditionJSON, rule.Threshold = cond.String, threshold.String
 		out = append(out, rule)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("repo: 列风控规则: %w", err)
+	}
+	return out, nil
 }
 
 // ListBlacklists 按客户筛选（空则不限），分页。
@@ -102,7 +108,10 @@ func (r *RiskRepo) ListBlacklists(ctx context.Context, custID string, offset, li
 		b.CustID, b.Reason = cust.String, reason.String
 		out = append(out, b)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("repo: 列黑名单: %w", err)
+	}
+	return out, nil
 }
 
 // scanEvent 扫描单行 risk_event（scan 函数由 QueryRow 或 Rows 注入）。

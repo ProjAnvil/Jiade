@@ -17,7 +17,7 @@ type Mapping struct {
 	Tables []string
 }
 
-// Mappings 覆盖 core/cust/pay 三库联邦（移植 bossy fdw.py + B-1 扩展 cust_db←core_db）。
+// Mappings 覆盖 core/cust/pay/reward/risk 五库联邦（移植 bossy fdw.py + B-1 扩展 cust_db←core_db）。
 var Mappings = []Mapping{
 	{Host: "core_db", Remote: "cust_db", Tables: []string{"cust_info", "cust_account_rel"}},
 	{Host: "cust_db", Remote: "core_db", Tables: []string{"demand_account"}}, // B-1 新增

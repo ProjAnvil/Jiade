@@ -51,7 +51,10 @@ func (r *RewardRepo) ListPointsAccts(ctx context.Context, memberLevel string, of
 		a.MemberLevel = level.String
 		out = append(out, a)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("repo: 列积分账户: %w", err)
+	}
+	return out, nil
 }
 
 // ListCoupons 查客户优惠券（status 空则不限），分页。
@@ -98,14 +101,17 @@ func scanCoupons(rows *sql.Rows) ([]domain.Coupon, error) {
 		c.CampaignID, c.IssueBizDate, c.ExpireDate = camp.String, issue.String, exp.String
 		fv, err := domain.ParseCents(face.String)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("repo: 解析优惠券金额: %w", err)
 		}
 		ms, err := domain.ParseCents(minS.String)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("repo: 解析优惠券金额: %w", err)
 		}
 		c.FaceValue, c.MinSpend = fv, ms
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("repo: 列优惠券: %w", err)
+	}
+	return out, nil
 }
