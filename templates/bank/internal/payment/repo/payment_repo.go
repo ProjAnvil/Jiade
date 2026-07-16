@@ -23,7 +23,8 @@ func (r *PaymentRepo) ListTransfers(ctx context.Context, accountNo, from, to str
 	}
 	q := `SELECT txn_id,biz_date,out_account,in_account,amount,ccy,fee,channel,counter_bank,status,summary
 		FROM transfer_txn WHERE ($1='' OR out_account=$1 OR in_account=$1)
-		AND ($2='' OR biz_date>=$2) AND ($3='' OR biz_date<=$3)
+		AND (NULLIF($2,'') IS NULL OR biz_date >= NULLIF($2,'')::date)
+		AND (NULLIF($3,'') IS NULL OR biz_date <= NULLIF($3,'')::date)
 		ORDER BY biz_date DESC, txn_id LIMIT $4 OFFSET $5`
 	rows, err := r.db.QueryContext(ctx, q, accountNo, from, to, limit, offset)
 	if err != nil {

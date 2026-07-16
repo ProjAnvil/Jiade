@@ -57,6 +57,34 @@ services:
     ports: ["8082:8082"]
     depends_on:
       postgres: {condition: service_healthy}
+  reward:
+    build:
+      context: .
+      args:
+        CMD: reward
+    container_name: bank-reward
+    restart: unless-stopped
+    environment:
+      <<: *svcenv
+      DB_NAME: reward_db
+      API_PORT: "8083"
+    ports: ["8083:8083"]
+    depends_on:
+      postgres: {condition: service_healthy}
+  risk:
+    build:
+      context: .
+      args:
+        CMD: risk
+    container_name: bank-risk
+    restart: unless-stopped
+    environment:
+      <<: *svcenv
+      DB_NAME: risk_db
+      API_PORT: "8084"
+    ports: ["8084:8084"]
+    depends_on:
+      postgres: {condition: service_healthy}
 
 volumes:
   pgdata:

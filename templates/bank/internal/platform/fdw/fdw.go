@@ -17,12 +17,14 @@ type Mapping struct {
 	Tables []string
 }
 
-// Mappings 覆盖 core/cust/pay 三库联邦（移植 bossy fdw.py + B-1 扩展 cust_db←core_db）。
+// Mappings 覆盖 core/cust/pay/reward/risk 五库联邦（移植 bossy fdw.py + B-1 扩展 cust_db←core_db）。
 var Mappings = []Mapping{
 	{Host: "core_db", Remote: "cust_db", Tables: []string{"cust_info", "cust_account_rel"}},
 	{Host: "cust_db", Remote: "core_db", Tables: []string{"demand_account"}}, // B-1 新增
 	{Host: "pay_db", Remote: "core_db", Tables: []string{"demand_account"}},
 	{Host: "pay_db", Remote: "cust_db", Tables: []string{"cust_info"}},
+	{Host: "reward_db", Remote: "cust_db", Tables: []string{"cust_info"}}, // bossy 已有
+	{Host: "risk_db", Remote: "cust_db", Tables: []string{"cust_info"}},   // B-4a 新增（bossy 无）
 }
 
 // SetupFDW 在各 host 库幂等建立 extension/server/user_mapping/foreign_table。

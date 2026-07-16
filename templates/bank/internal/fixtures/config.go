@@ -44,3 +44,12 @@ func (c Config) TargetCounts() Counts {
 	}
 	return targetCounts[ScaleDev]
 }
+
+// ScaleFactor 返回规模缩放（full=1.0, dev=0.25），移植 bossy scale_factor。
+// reward/risk/loan/wealth 的每日量 = base × ScaleFactor × factor。
+func ScaleFactor(s Scale) float64 {
+	if s == ScaleFull {
+		return 1.0
+	}
+	return 0.25
+}
