@@ -1,9 +1,12 @@
 package domains
 
 import (
+	"fmt"
+	"reflect"
+	"strings"
 	"testing"
-	"time"
 
+	"bank/internal/corebanking/domain"
 	"bank/internal/fixtures"
 )
 
@@ -93,4 +96,87 @@ func TestDateHelpers(t *testing.T) {
 	}
 }
 
-func init() { _ = time.Now } // 保持 time import（如需要）
+func init() {} // 占位（保留 package-level init 钩子，无副作用）
+
+func TestGenDay_Deterministic(t *testing.T) {
+	cfg := fixtures.DefaultConfig(fixtures.ScaleDev)
+	nos := []string{"D0000000001", "D0000000002", "D0000000003"}
+	date := parseDate("2025-07-15")
+	st1, st2 := newDayState(cfg, nos), newDayState(cfg, nos)
+	t1, b1 := GenDay(cfg, date, nos, st1)
+	t2, b2 := GenDay(cfg, date, nos, st2)
+	if !reflect.DeepEqual(t1, t2) || !reflect.DeepEqual(b1, b2) {
+		t.Fatal("同输入两次 GenDay 不一致")
+	}
+	if len(t1) == 0 {
+		t.Error("应生成流水")
+	}
+}
+
+func TestGenDay_TxnIDUniqueAndFormatted(t *testing.T) {
+	cfg := fixtures.DefaultConfig(fixtures.ScaleDev)
+	nos := []string{"D0000000001", "D0000000002"}
+	txns, _ := GenDay(cfg, parseDate("2025-07-15"), nos, newDayState(cfg, nos))
+	seen := map[string]bool{}
+	for _, tx := range txns {
+		if tx.TxnID == "" || !strings.HasPrefix(tx.TxnID, "T20250715-") {
+			t.Errorf("txn_id 格式错: %q", tx.TxnID)
+		}
+		if seen[tx.TxnID] {
+			t.Errorf("txn_id 重复: %q", tx.TxnID)
+		}
+		seen[tx.TxnID] = true
+	}
+}
+
+func TestGenDay_DcWeighting(t *testing.T) {
+	// 多账户 + 多日累计，贷:借 应近似 2:1（容差大）
+	cfg := fixtures.DefaultConfig(fixtures.ScaleDev)
+	nos := make([]string, 50)
+	for i := range nos {
+		nos[i] = fmt.Sprintf("D%010d", i+1)
+	}
+	st := newDayState(cfg, nos)
+	credit, debit := 0, 0
+	for _, d := range []string{"2025-07-10", "2025-07-11", "2025-07-12"} {
+		txns, _ := GenDay(cfg, parseDate(d), nos, st)
+		for _, tx := range txns {
+			if tx.DCFlag == domain.DCCredit {
+				credit++
+			} else {
+				debit++
+			}
+		}
+	}
+	if debit == 0 || credit/debit < 1 || credit/debit > 3 {
+		t.Errorf("贷:借 = %d:%d，期望近似 2:1", credit, debit)
+	}
+}
+
+func TestDayState_RollForward(t *testing.T) {
+	// 脚本化：贷加、借 clamp 0
+	cfg := fixtures.DefaultConfig(fixtures.ScaleDev)
+	nos := []string{"D1"}
+	st := &DayState{Bal: map[string]domain.Money{"D1": domain.NewMoneyFromCents(50000)}} // 500.00
+	// 手动模拟：GenDay 内部对 st.Bal 的推进规则
+	st.Bal["D1"] = st.Bal["D1"].Add(domain.NewMoneyFromCents(30000)) // +300 → 800
+	if got := st.Bal["D1"].Cents(); got != 80000 {
+		t.Fatalf("贷后余额错: %d", got)
+	}
+	b := st.Bal["D1"].Sub(domain.NewMoneyFromCents(200000)) // -2000 → 负
+	if b < 0 {
+		b = domain.NewMoneyFromCents(0)
+	}
+	st.Bal["D1"] = b
+	if got := st.Bal["D1"].Cents(); got != 0 {
+		t.Fatalf("借 clamp 0 错: %d", got)
+	}
+	// GenDay 余额快照覆盖全部账户
+	_, bals := GenDay(cfg, parseDate("2025-07-15"), nos, newDayState(cfg, nos))
+	if len(bals) != 1 || bals[0].AccountNo != "D1" {
+		t.Errorf("快照应覆盖全部账户, got %+v", bals)
+	}
+	if bals[0].AvailableBalance != bals[0].Balance || bals[0].FrozenAmount.Cents() != 0 {
+		t.Errorf("available/frozen 语义错: %+v", bals[0])
+	}
+}

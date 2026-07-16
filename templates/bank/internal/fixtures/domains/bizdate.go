@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"bank/internal/corebanking/domain"
 	"bank/internal/fixtures"
 )
 
@@ -116,3 +117,74 @@ func bizDateRange(start, end string) ([]time.Time, error) {
 
 // 占位：避免 strconv 未用 import 报错（Task 3 的 placeholders 会用到 strconv）。
 var _ = strconv.Itoa
+
+// ---- 引擎内核（纯函数，无 DB）----
+
+// DayState 账户余额的内存滚存态（对齐 bossy DailyState）。
+type DayState struct{ Bal map[string]domain.Money }
+
+// newDayState 初始化每账户余额（rng seed+2，回收 Spec A 已删 GenBalanceRows 的偏移）。
+func newDayState(cfg fixtures.Config, demandNos []string) *DayState {
+	rng := fixtures.NewRNG(cfg.Seed + 2)
+	st := &DayState{Bal: make(map[string]domain.Money, len(demandNos))}
+	for _, no := range demandNos {
+		st.Bal[no] = domain.NewMoneyFromCents(int64(rng.IntRange(1, 99999)) * 10000)
+	}
+	return st
+}
+
+// GenDay 生成当日流水 + 当日全账户余额快照，推进 st。纯函数。
+// 每日独立内容 rng（seed+200+ordinal）；流水贷多借少→余额温和增长；txn_id 确定。
+func GenDay(cfg fixtures.Config, date time.Time, demandNos []string, st *DayState) (dayTxns []domain.Txn, dayBalances []domain.Balance) {
+	if len(demandNos) == 0 {
+		return nil, nil
+	}
+	n := volumeForDay(cfg, date)
+	rng := fixtures.NewRNG(cfg.Seed + 200 + dayOrdinal(date, parseDate(cfg.StartBizDate)))
+	dateStr := date.Format("2006-01-02")
+	compact := dateCompact(date)
+
+	dayTxns = make([]domain.Txn, 0, n)
+	for i := 0; i < n; i++ {
+		acct := demandNos[rng.IntRange(0, len(demandNos)-1)]
+		amt := domain.NewMoneyFromCents(int64(rng.IntRange(1, 9999)) * 1000)
+		credit := rng.IntRange(0, 2) < 2 // 0/1=贷(2/3)，2=借(1/3)
+		var dc domain.DCFlag
+		if credit {
+			dc = domain.DCCredit
+			st.Bal[acct] = st.Bal[acct].Add(amt)
+		} else {
+			dc = domain.DCDebit
+			b := st.Bal[acct].Sub(amt)
+			if b < 0 {
+				b = domain.NewMoneyFromCents(0) // clamp 0（对齐 bossy max(0,...)）
+			}
+			st.Bal[acct] = b
+		}
+		dayTxns = append(dayTxns, domain.Txn{
+			TxnID:       fmt.Sprintf("T%s-%05d", compact, i),
+			BizDate:     dateStr,
+			AccountNo:   acct,
+			DCFlag:      dc,
+			Amount:      amt,
+			Ccy:         "CNY",
+			SubjectCode: "2011",
+			OppAccount:  demandNos[rng.IntRange(0, len(demandNos)-1)],
+			Channel:     rng.Choice(fixtures.Channels),
+			Summary:     rng.Choice(fixtures.Summaries),
+			VoucherNo:   "",
+			TxnStatus:   domain.TxnStatusNormal,
+		})
+	}
+
+	dayBalances = make([]domain.Balance, 0, len(demandNos))
+	for _, no := range demandNos { // 按 demandNos 顺序快照（确定性，不 range map）
+		bal := st.Bal[no]
+		dayBalances = append(dayBalances, domain.Balance{
+			AccountNo: no, BizDate: dateStr,
+			Balance: bal, AvailableBalance: bal,
+			FrozenAmount: domain.NewMoneyFromCents(0), SubjectCode: "2011",
+		})
+	}
+	return dayTxns, dayBalances
+}
