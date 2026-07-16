@@ -25,6 +25,8 @@ type LedgerStore interface {
 	HasReversal(ctx context.Context, q pg.DBTX, refTxnID string) (bool, error)
 	UpdateTxnStatus(ctx context.Context, q pg.DBTX, voucherNo string, status domain.TxnStatus) error
 	SetTxnSummary(ctx context.Context, q pg.DBTX, voucherNo, summary string) error
+	// GetBizDate 读 sys_param.biz_date（B-2：记账 biz_date 来源）。
+	GetBizDate(ctx context.Context) (string, error)
 }
 
 // LedgerService 复式记账用例。

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"time"
 
 	"bank/internal/corebanking/domain"
 	"bank/internal/platform/pg"
@@ -63,7 +62,13 @@ type RecordInput struct {
 // 返回 domain.Booking（voucherNo + 复式流水）。
 // 生产路径 db 非 nil → pg.RunInTx 包裹；db==nil（仅单元测试用 fake store）→ 直接以 q=nil 执行 fn。
 func (s *TxnService) Record(ctx context.Context, in RecordInput) (domain.Booking, error) {
-	bizDate := today()
+	bizDate, err := s.store.GetBizDate(ctx)
+	if err != nil {
+		return domain.Booking{}, fmt.Errorf("txn: 读 biz_date: %w", err)
+	}
+	if bizDate == "" {
+		return domain.Booking{}, fmt.Errorf("txn: sys_param.biz_date 未设置，请先 seed")
+	}
 	voucherNo := domain.NewVoucherNo(bizDate)
 	var booking domain.Booking
 
@@ -72,7 +77,7 @@ func (s *TxnService) Record(ctx context.Context, in RecordInput) (domain.Booking
 		// 单测路径：fake store 忽略 q，直接执行 fn（事务原子性由集成测试覆盖）
 		run = func(_ context.Context, _ *sql.DB, fn func(pg.DBTX) error) error { return fn(nil) }
 	}
-	err := run(ctx, s.db, func(q pg.DBTX) error {
+	err = run(ctx, s.db, func(q pg.DBTX) error {
 		// 解析主账户（单一获取，避免冗余二次查询）
 		primaryNo := in.AccountNo
 		if in.Action == domain.ActionTransfer {
@@ -182,14 +187,20 @@ type ReverseResult struct {
 //
 // 生产路径 db 非 nil → pg.RunInTx 包裹；db==nil（单测）→ 直接以 q=nil 执行 fn。
 func (s *TxnService) Reverse(ctx context.Context, voucherNo string, mode domain.ReverseMode) (ReverseResult, error) {
-	bizDate := today()
+	bizDate, err := s.store.GetBizDate(ctx)
+	if err != nil {
+		return ReverseResult{}, fmt.Errorf("txn: 读 biz_date: %w", err)
+	}
+	if bizDate == "" {
+		return ReverseResult{}, fmt.Errorf("txn: sys_param.biz_date 未设置，请先 seed")
+	}
 	var res ReverseResult
 
 	run := pg.RunInTx
 	if s.db == nil {
 		run = func(_ context.Context, _ *sql.DB, fn func(pg.DBTX) error) error { return fn(nil) }
 	}
-	err := run(ctx, s.db, func(q pg.DBTX) error {
+	err = run(ctx, s.db, func(q pg.DBTX) error {
 		// 锁本凭证所有流水行（FOR UPDATE），串行化并发冲正。
 		origs, err := s.store.LockTxnsByVoucher(ctx, q, voucherNo)
 		if err != nil {
@@ -315,8 +326,6 @@ func lockedAccountList(in RecordInput) []string {
 	sort.Strings(list)
 	return list
 }
-
-func today() string { return time.Now().Format("2006-01-02") }
 
 // --- 只读（保留 Spec A 原有能力，供 api handler 复用）---
 
