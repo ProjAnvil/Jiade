@@ -22,7 +22,8 @@ func (r *RiskRepo) ListEvents(ctx context.Context, from, to, ruleID, action stri
 	}
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT event_id,biz_date,cust_id,account_no,rule_id,risk_score,action_taken,txn_ref,summary
-		FROM risk_event WHERE ($1='' OR biz_date>=$1) AND ($2='' OR biz_date<=$2)
+		FROM risk_event WHERE (NULLIF($1,'') IS NULL OR biz_date >= NULLIF($1,'')::date)
+		AND (NULLIF($2,'') IS NULL OR biz_date <= NULLIF($2,'')::date)
 		AND ($3='' OR rule_id=$3) AND ($4='' OR action_taken=$4)
 		ORDER BY biz_date DESC, event_id LIMIT $5 OFFSET $6`, from, to, ruleID, action, limit, offset)
 	if err != nil {
