@@ -36,9 +36,9 @@ func GenLoanStatic(cfg fixtures.Config, custIDs []string) LoanStatic {
 	accounts := make([]domain.LoanAccount, 0, nLoans)
 	disbs := make([]domain.LoanDisbursement, 0, nLoans)
 	for i := 0; i < nLoans; i++ {
-		cid := pickStr(rng, custIDs) // 抽签顺序对齐 bossy：cust → product → principal → rate → term → start → guarantee/branch → to_account
+		cid := pickStr(rng, custIDs) // 抽签顺序固定：cust → product → principal → rate → term → start → guarantee/branch → to_account
 		p := fixtures.LoanProducts[rng.IntRange(0, len(fixtures.LoanProducts)-1)]
-		// bossy 公式：IntRange(0,99999)×(maxAmtYuan/100000) 元，clamp 到 [10000, maxAmtYuan]（纯整数）
+		// 公式：IntRange(0,99999)×(maxAmtYuan/100000) 元，clamp 到 [10000, maxAmtYuan]（纯整数）
 		principalYuan := rng.IntRange(0, 99999) * (p.MaxAmountYuan / 100000)
 		principalYuan = maxInt(10000, minInt(principalYuan, p.MaxAmountYuan))
 		principal := domain.NewMoneyFromCents(int64(principalYuan) * 100)
@@ -107,7 +107,7 @@ type loanState struct {
 }
 
 // RunLoan 按 bizDate 推进：月初还款计划 + 逾期五级分类滑落 + 每日全量余额快照。
-// rng seed+41 单次（无逐日随机，忠实 bossy）；每业务日一个 pg.RunInTx。全量重放确定。
+// rng seed+41 单次（无逐日随机）；每业务日一个 pg.RunInTx。全量重放确定。
 func RunLoan(ctx context.Context, db *sql.DB, cfg fixtures.Config, accounts []domain.LoanAccount) error {
 	if len(accounts) == 0 {
 		return fmt.Errorf("loan: 无借据")
@@ -126,7 +126,7 @@ func RunLoan(ctx context.Context, db *sql.DB, cfg fixtures.Config, accounts []do
 			rateFloat:        rateF,
 		}
 	}
-	// 逾期选择：~8%（bossy random_int(1,12)==1），overdue_start ∈ [start, max(start, end-2月)]
+	// 逾期选择：~8%（random_int(1,12)==1 口径），overdue_start ∈ [start, max(start, end-2月)]
 	for _, a := range accounts {
 		if rng.IntRange(1, 12) == 1 {
 			state[a.LoanNo].overdueStart = fixtures.RandomDate(rng, cfg.StartBizDate, maxDateStr(cfg.StartBizDate, addMonths(cfg.EndBizDate, -2)))
@@ -292,7 +292,7 @@ func bulkInsertLoanOverdues(ctx context.Context, q pg.DBTX, rows []domain.LoanOv
 	return nil
 }
 
-// overdueClass 按逾期天数划五级分类（移植 bossy _overdue_class）。
+// overdueClass 按逾期天数划五级分类。
 func overdueClass(days int) string {
 	cls := "正常"
 	for _, oc := range fixtures.OverdueClasses {

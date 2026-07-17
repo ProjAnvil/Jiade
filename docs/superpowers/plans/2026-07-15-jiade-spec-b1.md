@@ -21,7 +21,7 @@
 - **DB 连接**统一 `pg.Open(dbName)`，env `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD`（bank/bank）。
 - **FDW server host 统一 `localhost`**（pg 进程视角连自己），port 5432，user/pass bank/bank。
 - **确定性**：fixture 用 `fixtures.NewRNG(cfg.Seed+offset)`，各域 offset 独立（core 已用 +1/+2/+3；customer +10/+11；payment +20/+21）。
-- **本地 5432 可能被占**：集成/e2e 测试若 5432 冲突，临时 `docker stop bossy-postgres` 或用 `DB_PORT=5433` + 临时 postgres 容器（CI 无此问题）。
+- **本地 5432 可能被占**：集成/e2e 测试若 5432 冲突，用 `DB_PORT=5433` + 临时 postgres 容器（CI 无此问题）。
 
 ---
 
@@ -36,7 +36,7 @@
 - Consumes: `migrate.SplitStatements`（Spec A 已有）
 - Produces: 两个 schema 文件，被 Task 2 建表、Task 3 的 FDW `IMPORT FOREIGN SCHEMA` 引用源表
 
-- [ ] **Step 1: 创建 cust_db.sql**（移植 bossy `schema/cust_db.sql`，5 表，纯 `CREATE TABLE IF NOT EXISTS`，无嵌套分号）
+- [ ] **Step 1: 创建 cust_db.sql**（5 表，纯 `CREATE TABLE IF NOT EXISTS`，无嵌套分号）
 
 `templates/bank/db/migrations/cust_db.sql`:
 ```sql
@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS cust_account_rel (
 CREATE INDEX IF NOT EXISTS idx_cust_account_rel_cust ON cust_account_rel(cust_id);
 ```
 
-- [ ] **Step 2: 创建 pay_db.sql**（移植 bossy `schema/pay_db.sql`，6 表）
+- [ ] **Step 2: 创建 pay_db.sql**（6 表）
 
 `templates/bank/db/migrations/pay_db.sql`:
 ```sql
@@ -528,7 +528,7 @@ type Mapping struct {
 	Tables []string
 }
 
-// Mappings 覆盖 core/cust/pay 三库联邦（移植 bossy fdw.py + B-1 扩展 cust_db←core_db）。
+// Mappings 覆盖 core/cust/pay 三库联邦（B-1 扩展 cust_db←core_db）。
 var Mappings = []Mapping{
 	{Host: "core_db", Remote: "cust_db", Tables: []string{"cust_info", "cust_account_rel"}},
 	{Host: "cust_db", Remote: "core_db", Tables: []string{"demand_account"}}, // B-1 新增
@@ -3066,7 +3066,7 @@ curl -sf localhost:8082/api/v1/payments/transfers/PT000000000001/parties
 ```
 Expected: 三 healthz 200；联邦端点 200 且返回跨库数据（accounts 有账户行、parties 有客户姓名）。
 
-若本地 5432 被占，临时 `docker stop bossy-postgres` 或用 `DB_PORT=5433` + 临时容器（CI 无此问题）。
+若本地 5432 被占，用 `DB_PORT=5433` + 临时容器（CI 无此问题）。
 
 - [ ] **Step 5: jiade 仓自验证（验收 #1）**
 

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在 bank 模板里纵切 reward + risk 两个只读服务（reward_db 6 表 / risk_db 3 表，忠实移植 bossy schema），用 B-2 的 distribution 三因子做 points_txn / risk_event 的逐日生成，每服务 1 个跨库 FDW JOIN 端点，使 `jiade init → up → seed` 后可 curl 五服务 healthz + 两个新联邦端点。
+**Goal:** 在 bank 模板里纵切 reward + risk 两个只读服务（reward_db 6 表 / risk_db 3 表，schema 忠实还原），用 B-2 的 distribution 三因子做 points_txn / risk_event 的逐日生成，每服务 1 个跨库 FDW JOIN 端点，使 `jiade init → up → seed` 后可 curl 五服务 healthz + 两个新联邦端点。
 
 **Architecture:** 单 postgres 实例 5 库（core/cust/pay/reward/risk），每域一个独立 Go 进程（`cmd/<域>` + `internal/<域>/{domain,repo,service,api}` 四层，镜像 customer/payment）。静态表一次性生成；事件表逐日循环（复用 `domains` 包内 `bizdate.go` 的 `trendFactor/seasonalFactor/cyclicalFactor/bizDateRange/placeholders`，每日独立 rng + `pg.RunInTx` 内 DELETE 当日 + 批量 INSERT）。FDW `Mappings` 加 reward_db/risk_db ← cust_db.cust_info。
 
@@ -17,10 +17,10 @@
 - **bank 命令在 `templates/bank/` 下跑**。
 - **金额 int64 分，禁 float**：reward coupon 金额走自带 `domain.Money`（复制 payment），repo 分↔NUMERIC。risk 无金额（`risk_score`/`threshold` 作 NUMERIC 文本直存；`Float64()` 仅在生成期算 risk_score 字符串，不进 domain/金额）。
 - **依赖方向向内** `api → service → repo → domain`；各域 `domain` 互不依赖；`repo` 不 import `service`。`fixtures/domains` 可 import 各 `domain`。
-- **确定性**：每日独立 rng（`seed+偏移+ordinal`）+ 确定 ID（`RW-/RS-<dateCompact>-<seq>`，**非** uuid4——bossy 用 uuid4 非确定，Jiade 改确定性 ID 是有意偏离，保 Spec A 确定性原则）。rng 偏移：reward `+30`(静态)/`+31`(逐日)，risk `+32`(静态)/`+33`(逐日)。
+- **确定性**：每日独立 rng（`seed+偏移+ordinal`）+ 确定 ID（`RW-/RS-<dateCompact>-<seq>`，**非** uuid4——原实现用 uuid4 非确定，这里改确定性 ID 是有意偏离，保 Spec A 确定性原则）。rng 偏移：reward `+30`(静态)/`+31`(逐日)，risk `+32`(静态)/`+33`(逐日)。
 - **FDW server host 统一 `localhost`**（pg 连自己实例的其他库），port 5432，user/pass bank/bank。
 - **Dockerfile 已参数化** `ARG CMD` → `go build ./cmd/${CMD}`：加 reward/risk 只需建 `cmd/reward`、`cmd/risk` 目录 + compose `args: CMD`，**不改 Dockerfile**。
-- **本地 5432 可能被占**：集成/e2e 若冲突，临时 `docker stop bossy-postgres` 或 `DB_PORT=5433`（CI 无此问题）。
+- **本地 5432 可能被占**：集成/e2e 若冲突，用 `DB_PORT=5433` + 临时容器（CI 无此问题）。
 - **删除需确认**：本计划无删除既有代码操作（仅新增 + 末尾追加）。
 
 ## File Structure
@@ -72,7 +72,7 @@ Track R 与 Track K **文件不相交**（仅共享 `domains` 包的不同文件
 **Interfaces:**
 - Produces: 两个 schema 文件，被 Task 2 建表、Task 5/9 的 FDW `IMPORT FOREIGN SCHEMA cust_info` 的对端（cust_db 已存在）。
 
-- [ ] **Step 1: 创建 reward_db.sql**（移植 bossy `schema/reward_db.sql`，6 表，纯 `CREATE TABLE IF NOT EXISTS`）
+- [ ] **Step 1: 创建 reward_db.sql**（6 表，纯 `CREATE TABLE IF NOT EXISTS`）
 
 `templates/bank/db/migrations/reward_db.sql`:
 ```sql
@@ -137,7 +137,7 @@ CREATE TABLE IF NOT EXISTS member_level (
 );
 ```
 
-- [ ] **Step 2: 创建 risk_db.sql**（移植 bossy `schema/risk_db.sql`，3 表）
+- [ ] **Step 2: 创建 risk_db.sql**（3 表）
 
 `templates/bank/db/migrations/risk_db.sql`:
 ```sql
@@ -251,7 +251,7 @@ func (g *RNG) Float64() float64 { return g.r.Float64() }
 
 在 `config.go` 末尾追加：
 ```go
-// ScaleFactor 返回规模缩放（full=1.0, dev=0.25），移植 bossy scale_factor。
+// ScaleFactor 返回规模缩放（full=1.0, dev=0.25）。
 // reward/risk/loan/wealth 的每日量 = base × ScaleFactor × factor。
 func ScaleFactor(s Scale) float64 {
 	if s == ScaleFull {
@@ -265,8 +265,8 @@ func ScaleFactor(s Scale) float64 {
 
 把 `fdw.go` 的 `Mappings`（约 21-26 行）末尾的 `}` 前追加两行：
 ```go
-	{Host: "reward_db", Remote: "cust_db", Tables: []string{"cust_info"}}, // bossy 已有
-	{Host: "risk_db", Remote: "cust_db", Tables: []string{"cust_info"}},   // B-4a 新增（bossy 无）
+	{Host: "reward_db", Remote: "cust_db", Tables: []string{"cust_info"}}, // 原型已有
+	{Host: "risk_db", Remote: "cust_db", Tables: []string{"cust_info"}},   // B-4a 新增
 ```
 （即 `Mappings` 变为 6 条：core←cust、cust←core、pay←core、pay←cust、reward←cust、risk←cust。）
 
@@ -605,7 +605,7 @@ import (
 	"bank/internal/reward/domain"
 )
 
-// reward 会员等级（移植 bossy reward.py LEVELS）。
+// reward 会员等级。
 var rewardLevels = []struct {
 	Code, Name string
 	Threshold  int
@@ -696,7 +696,7 @@ func WriteRewardStatic(ctx context.Context, db *sql.DB, s RewardStatic) error {
 }
 
 // RunReward 按 bizDate 推进生成 points_txn + coupon（逐日三因子 + 每日独立 rng seed+31+ordinal）。
-// balances 内存滚存自静态 points_acct 初始余额（redeem 不超余额，对齐 bossy）。逐日不回写 points_acct。
+// balances 内存滚存自静态 points_acct 初始余额（redeem 不超余额）。逐日不回写 points_acct。
 func RunReward(ctx context.Context, db *sql.DB, cfg fixtures.Config, accts []domain.PointsAcct, campaignIDs []string) error {
 	if len(accts) == 0 {
 		return fmt.Errorf("reward: 无积分账户")
@@ -1684,7 +1684,7 @@ import (
 	"bank/internal/risk/domain"
 )
 
-// risk 规则（移植 bossy risk.py RULES）。field/op/threshold 编进 condition_json。
+// risk 规则。field/op/threshold 编进 condition_json。
 var riskRules = []struct {
 	ID, Name, Field string
 	Threshold       int
@@ -2714,4 +2714,4 @@ git commit -m "feat(bank): B-4a template.yaml + compose 加 reward/risk（:8083/
 - **Spec coverage**：spec §5 schema → T1；§6.2 ScaleFactor / §6 rng / §7 FDW Mappings → T2；§8.2 reward Money + §reward 模型 → T3；§6.3 reward 静态+逐日 → T4；§7.2 reward 联邦端点 + §9 reward API → T5/T6；§8.3 risk 无 Money + risk 模型 → T7；§6.4 risk 静态+逐日 → T8；§7.2 risk 联邦 + §9 risk API → T9/T10；§10 seed 编排 → T11；§11 模板契约 + 重打包 → T12。验收 #1-#7 → T1-T12 + 集成断言。`coupon_usage` 有表无数据无端点（spec §5.3，正确无任务）。
 - **Placeholder scan**：无 TBD/TODO；每步含完整代码或确切命令；rng 偏移（reward +30/+31、risk +32/+33）、端口（8083/8084）、FDW 映射均固化。
 - **Type consistency**：`GenRewardStatic(cfg,custIDs) RewardStatic` 跨 T4/T11 一致；`RunReward(ctx,db,cfg,accts,campaignIDs)` 跨 T4/T11 一致；`GenRiskStatic(cfg,custIDs) RiskStatic` + `RunRisk(ctx,db,cfg,custIDs,accountNos)` 跨 T8/T11 一致；reward/risk Store 接口与 repo/fake 实现一一对应；`RiskEventDetail` 内嵌 `RiskEvent` 在 T7 定义、T9/T10 使用一致；`pickStr`/`maxInt`/`minInt` 在 `domains` 包内定义（reward.go），risk.go 同包复用（无重定义）。
-- **deviation 已注明**：rng 偏移按 Jiade 已用值重分配（不照抄 bossy +20/+21，避 payment 碰撞）；ID 用确定 `RW-/RS-<date>-<seq>` 非 uuid4（bossy uuid4 非确定，Jiade 保确定性原则）；risk_score 经 `Float64()` 生成 2 位小数字符串（不进 domain/金额）。
+- **deviation 已注明**：rng 偏移按 Jiade 已用值重分配（不沿用原型的 +20/+21，避 payment 碰撞）；ID 用确定 `RW-/RS-<date>-<seq>` 非 uuid4（原型 uuid4 非确定，Jiade 保确定性原则）；risk_score 经 `Float64()` 生成 2 位小数字符串（不进 domain/金额）。

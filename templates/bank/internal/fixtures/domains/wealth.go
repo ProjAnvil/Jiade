@@ -18,7 +18,7 @@ type WealthStatic struct {
 	Holdings []domain.WealthHolding
 }
 
-// GenWealthStatic 生成理财产品 + 初始持仓（每客户 0-3 个，bossy 公式）。
+// GenWealthStatic 生成理财产品 + 初始持仓（每客户 0-3 个）。
 func GenWealthStatic(cfg fixtures.Config, custIDs []string, demandAccounts []string) WealthStatic {
 	rng := fixtures.NewRNG(cfg.Seed + 50)
 	products := make([]domain.WealthProduct, len(fixtures.WealthProducts))
@@ -38,7 +38,7 @@ func GenWealthStatic(cfg fixtures.Config, custIDs []string, demandAccounts []str
 		n := rng.IntRange(0, 3)
 		for j := 0; j < n; j++ {
 			p := fixtures.WealthProducts[rng.IntRange(0, len(fixtures.WealthProducts)-1)]
-			nav0 := 1 + rng.Float64()*0.25 // 4dp；spec §6.4（bossy 为 1+uniform(-0.05,0.2)，Jiade 有意对齐为 [1,1.25)）
+			nav0 := 1 + rng.Float64()*0.25 // 4dp；spec §6.4（原实现为 1+uniform(-0.05,0.2)，这里有意对齐为 [1,1.25)）
 			amountYuan := maxInt(p.MinAmountYuan, rng.IntRange(0, 99999)*100)
 			amount := domain.NewMoneyFromCents(int64(amountYuan) * 100)
 			holdings = append(holdings, domain.WealthHolding{
@@ -99,9 +99,9 @@ func RunWealth(ctx context.Context, db *sql.DB, cfg fixtures.Config, products []
 	for _, p := range products {
 		ret, _ := strconv.ParseFloat(p.ExpectedReturn, 64)
 		prodRet[p.ProductCode] = ret
-		navState[p.ProductCode] = 1 + ret/365 // bossy：每日按预期年化微涨
+		navState[p.ProductCode] = 1 + ret/365 // 每日按预期年化微涨
 	}
-	// 持仓成本快照（供 income；订单不改持仓，对齐 bossy）
+	// 持仓成本快照（供 income；订单不改持仓）
 	type holdingCost struct {
 		costCents int64
 		prodCode  string
@@ -139,7 +139,7 @@ func RunWealth(ctx context.Context, db *sql.DB, cfg fixtures.Config, products []
 				BizDate: dateStr, CustID: pickStr(rng, custIDs), ProductCode: p.ProductCode,
 				AccountNo: pickStr(rng, demandAccounts), OrderType: rng.Choice(fixtures.OrderTypes),
 				Amount: domain.NewMoneyFromCents(int64(amountYuan) * 100),
-				Share:  fmt.Sprintf("%.4f", float64(rng.IntRange(0, 999))), // bossy quirk：share 独立随机，不由 amount/nav 推导
+				Share:  fmt.Sprintf("%.4f", float64(rng.IntRange(0, 999))), // 有意保留的怪癖：share 独立随机，不由 amount/nav 推导
 				Nav:    fmt.Sprintf("%.6f", navState[p.ProductCode]),
 				Status: "done",
 			})

@@ -10,7 +10,7 @@ import (
 	"bank/internal/fixtures"
 )
 
-// ---- 静态主数据（确定性，移植自 bossy core.py）----
+// ---- 静态主数据（确定性）----
 
 // StaticData 5 张主数据表的行集合。
 type StaticData struct {

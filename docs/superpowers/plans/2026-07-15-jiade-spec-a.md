@@ -62,7 +62,7 @@ Spec A 含两个子系统：jiade CLI 与 bank 模板。它们能各自产出可
 | `templates/bank/.env.example` | DB/端口配置 |
 | `templates/bank/Makefile` | up/down/seed/test（不装 jiade 也能跑） |
 | `templates/bank/README.md` / `ARCHITECTURE.md` | 工程说明 |
-| `templates/bank/db/migrations/core_db.sql` | 移植自 bossy 的 core_db.sql（10 表） |
+| `templates/bank/db/migrations/core_db.sql` | 核心账务库 DDL（10 表） |
 | `templates/bank/cmd/core-banking/main.go` | API 服务入口 |
 | `templates/bank/cmd/seed/main.go` | fixture 生成器入口 |
 | `templates/bank/internal/platform/pg/pg.go` | 连接池 + DSN |
@@ -370,7 +370,7 @@ go mod tidy
 ```
 Expected: `templates/bank/go.mod` 含 `module bank`、`go 1.22`；`go.sum` 生成。
 
-- [ ] **Step 2: 写 core_db.sql（移植自 bossy core_db.sql）**
+- [ ] **Step 2: 写 core_db.sql（10 表）**
 
 Create `templates/bank/db/migrations/core_db.sql`:
 ```sql
@@ -2667,7 +2667,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 
 **Interfaces:**
 - Produces: `fixtures.Scale`（`ScaleDev="dev"`/`ScaleFull="full"`）；`fixtures.Counts`；`fixtures.Config{StartBizDate,EndBizDate,Scale,Seed}`；`fixtures.DefaultConfig(scale) Config`；`Config.TargetCounts() Counts`；`fixtures.NewRNG(seed int64) *RNG`（确定性）；`RNG.IntRange(lo,hi int) int`（含两端）；`RNG.Choice([]string) string`；词库 `fixtures.Surnames/GivenNames/Branches/Channels/Summaries`。
-- 目标量级对齐 bossy（DEV≈FULL 的 1/4）：DEV {DemandAccounts:2000, FixedAccounts:500, DailyTxnLo:500, DailyTxnHi:1250}；FULL {DemandAccounts:8000, FixedAccounts:2000, DailyTxnLo:2000, DailyTxnHi:5000}。
+- 目标量级（DEV≈FULL 的 1/4）：DEV {DemandAccounts:2000, FixedAccounts:500, DailyTxnLo:500, DailyTxnHi:1250}；FULL {DemandAccounts:8000, FixedAccounts:2000, DailyTxnLo:2000, DailyTxnHi:5000}。
 - 确定性来源：`math/rand/v2` + `rand.NewPCG(seed,seed)`（Go 1.22）。同 `Seed` → 同序列。
 
 - [ ] **Step 1: 写 config + 测试**
@@ -2694,7 +2694,7 @@ type Counts struct {
 	DailyTxnHi     int
 }
 
-// DEV 约为 FULL 的 1/4（对齐 bossy TARGET_COUNTS）。
+// DEV 约为 FULL 的 1/4。
 var targetCounts = map[Scale]Counts{
 	ScaleDev:  {Customers: 1250, DemandAccounts: 2000, FixedAccounts: 500, DailyTxnLo: 500, DailyTxnHi: 1250},
 	ScaleFull: {Customers: 5000, DemandAccounts: 8000, FixedAccounts: 2000, DailyTxnLo: 2000, DailyTxnHi: 5000},
@@ -2708,7 +2708,7 @@ type Config struct {
 	Seed         int64
 }
 
-// DefaultConfig 按规模给默认（对齐 bossy：start 2025-06-01, end 2026-07-13, seed 42）。
+// DefaultConfig 按规模给默认（start 2025-06-01, end 2026-07-13, seed 42）。
 func DefaultConfig(scale Scale) Config {
 	return Config{StartBizDate: "2025-06-01", EndBizDate: "2026-07-13", Scale: scale, Seed: 42}
 }
@@ -2775,7 +2775,7 @@ func (g *RNG) Choice(list []string) string {
 	return list[g.r.IntN(len(list))]
 }
 
-// 手写小词库（对齐 bossy zh_CN 语义，零外部依赖）。
+// 手写小词库（zh_CN 语义，零外部依赖）。
 var (
 	Surnames   = []string{"王", "李", "张", "刘", "陈", "杨", "黄", "赵", "吴", "周"}
 	GivenNames = []string{"伟", "芳", "娜", "秀英", "敏", "静", "磊", "强", "洋", "艳"}
@@ -2855,7 +2855,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
   - `domains.GenBalanceRows(cfg, demandNos []string) []domain.Balance`
   - `domains.GenTxnRows(cfg, demandNos []string) []domain.Txn`
 - Produces（落库 writer，由 cmd/seed 调用）：`domains.WriteStatic/WriteAccounts/WriteBalances/WriteTxns`（幂等：先 DELETE 后 INSERT）。
-- 纵切简化（相对 bossy）：core-banking **自包含**——`cust_id` 自生成（`C0000001`…），不依赖 `cust_db`/customers；基线 balance = 每个活期账户一条 `EndBizDate` 快照；少量近期流水（最近 5 天，每日量级缩小）——完整多日切日引擎（bossy `bizdate.py`）属 Spec B。
+- 纵切简化：core-banking **自包含**——`cust_id` 自生成（`C0000001`…），不依赖 `cust_db`/customers；基线 balance = 每个活期账户一条 `EndBizDate` 快照；少量近期流水（最近 5 天，每日量级缩小）——完整多日切日引擎属 Spec B。
 - 确定性：所有随机用 `NewRNG(seed+offset)`，`account_no`/`txn_id` 用序号（非随机 uuid），同 `Config` 两次 `Gen*` 输出 `reflect.DeepEqual` 相等。
 
 - [ ] **Step 1: 写生成器 + writer**
@@ -2875,7 +2875,7 @@ import (
 	"bank/internal/fixtures"
 )
 
-// ---- 静态主数据（确定性，移植自 bossy core.py）----
+// ---- 静态主数据（确定性）----
 
 // StaticData 5 张主数据表的行集合。
 type StaticData struct {
@@ -2977,7 +2977,7 @@ func GenBalanceRows(cfg fixtures.Config, demandNos []string) []domain.Balance {
 }
 
 // GenTxnRows 生成少量近期流水（最近 5 天，每日量级缩小）。
-// 完整多日切日引擎（bossy bizdate.py）属 Spec B。
+// 完整多日切日引擎属 Spec B。
 func GenTxnRows(cfg fixtures.Config, demandNos []string) []domain.Txn {
 	rng := fixtures.NewRNG(cfg.Seed + 3)
 	tc := cfg.TargetCounts()

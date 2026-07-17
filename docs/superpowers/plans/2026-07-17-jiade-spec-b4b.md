@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在 bank 模板里纵切 loan + wealth 两个只读服务（loan_db 6 表 / wealth_db 5 表，DDL 忠实移植 bossy），落地「逐日滚存」形态（loan_balance/wealth_nav 全量快照，路径依赖）+ wealth 三因子订单事件流，每服务 1 个跨库 FDW JOIN 端点，使 `jiade init → up → seed` 后可 curl 七服务 healthz + 两个新联邦端点。
+**Goal:** 在 bank 模板里纵切 loan + wealth 两个只读服务（loan_db 6 表 / wealth_db 5 表，DDL 忠实还原），落地「逐日滚存」形态（loan_balance/wealth_nav 全量快照，路径依赖）+ wealth 三因子订单事件流，每服务 1 个跨库 FDW JOIN 端点，使 `jiade init → up → seed` 后可 curl 七服务 healthz + 两个新联邦端点。
 
 **Architecture:** 单 postgres 实例 7 库（core/cust/pay/reward/risk/loan/wealth），每域一个独立 Go 进程（`cmd/<域>` + `internal/<域>/{domain,service,repo,api}` 四层，逐字镜像 reward/risk）。loan：静态一次性生成（rng `seed+40`）+ 单次滚存循环（rng `seed+41`，无逐日随机；月初还款计划 + 逾期五级分类滑落 + 每日全量余额快照）。wealth：静态（rng `seed+50`，产品+持仓）+ 逐日循环（rng `seed+51+ordinal`；NAV 游走滚存 + 三因子订单 + 每日利息）。FDW `Mappings` 加 loan_db/wealth_db ← cust_db.cust_info。
 
@@ -19,12 +19,12 @@
 - **金额 int64 分，禁 float**：loan/wealth 金额走各自 domain 的 `Money`（从 `templates/bank/internal/reward/domain/money.go` 逐字复制），repo 分↔NUMERIC 转换。`rate`/`min_rate`/`max_rate`/`nav`/`accum_nav`/`share`/`expected_return` 是**非货币小数**，按 NUMERIC 文本直存（domain 字段 `string`）。interest/nav 计算的中间 float 是比率运算、结果 round 落 Money/6dp 文本，可接受（spec §6.5）。
 - **复式记账只在 core**：loan/wealth 无总账，无写接口。
 - **依赖方向向内** `api → service → repo → domain`；各域 `domain` 互不依赖；`repo` 不 import `service`。`fixtures/domains` 可 import 各 `domain`。
-- **确定性**：同 Seed+Scale → 同样的行。确定 ID（`LN/LN-DB/LN-RP/LN-OD/WP-HD/WP-OD/WP-IC` 前缀+序号/日期，**非** uuid4——bossy 用 uuid4 非确定，Jiade 改确定 ID 是有意偏离）。rng 偏移：loan `+40`(静态)/`+41`(滚存，单次)，wealth `+50`(静态)/`+51`(逐日 +ordinal)。已占用偏移：+2/+30/+31/+32/+33/+100/+200，不得复用。
+- **确定性**：同 Seed+Scale → 同样的行。确定 ID（`LN/LN-DB/LN-RP/LN-OD/WP-HD/WP-OD/WP-IC` 前缀+序号/日期，**非** uuid4——原实现用 uuid4 非确定，这里改确定 ID 是有意偏离）。rng 偏移：loan `+40`(静态)/`+41`(滚存，单次)，wealth `+50`(静态)/`+51`(逐日 +ordinal)。已占用偏移：+2/+30/+31/+32/+33/+100/+200，不得复用。
 - **DATE/NUMERIC 扫描**：pgx stdlib 下 DATE 列可直接 scan 进 `string`（risk repo 已验证，无需 `::text`）；NUMERIC 金额 scan 进 `sql.NullString` 再 `domain.ParseCents`；NUMERIC 非金额 scan 进 `sql.NullString` 取 `.String`。
 - **日期过滤 SQL**：一律 `NULLIF($1,'')::date`（`date>=text` 会 PREPARE 失败）；分页 `limit<=0`→50。
 - **FDW server host 统一 `localhost`**，port 5432，user/pass bank/bank；外部表命名 `ext_{remote}_{tbl}`。
 - **Dockerfile 已参数化** `ARG CMD` → `go build ./cmd/${CMD}`：加 loan/wealth 只需建 `cmd/loan`、`cmd/wealth` 目录 + compose `args: CMD`，**不改 Dockerfile**。
-- **本地 5432 被 bossy-postgres 占用**：单元测试不需要 pg；集成/e2e 用临时 `docker run -p 5433:5432` + `DB_PORT=5433`（Task 12 给出确切命令）。**别碰 bossy-postgres 的数据**（只许 stop/start 容器，且仅 e2e 需要）；seed `--reset` 只 DROP bank 的 7 个库。
+- **本地 5432 可能被本地既有 postgres 容器占用**：单元测试不需要 pg；集成/e2e 用临时 `docker run -p 5433:5432` + `DB_PORT=5433`（Task 12 给出确切命令）。**别碰既有容器的数据**（只许 stop/start 容器，且仅 e2e 需要）；seed `--reset` 只 DROP bank 的 7 个库。
 - **不杀用户进程**：808x 端口被占（如 corpit）时记录并报告，不得 kill；受影响验证跳过并在报告里注明。
 - **删除需确认**：本计划不删除任何既有文件；重打包前若发现 `templates/bank/` 下有 go build 残留二进制，**停下来报告**，不得自行删除。
 - **core/customer/payment/reward/risk 代码不动**；bizdate.go 仅追加 `addMonths`。
@@ -82,7 +82,7 @@
 **Interfaces:**
 - Produces: 两个 schema 文件，被 Task 11 建表（`cmd/seed` 的 `migrate.Run`）、Task 12 `template.yaml` 引用；表结构是 Task 3/7 domain 与 Task 5/9 repo 的事实源。`loan_balance` PK `(loan_no,biz_date)`、`wealth_nav` PK `(product_code,biz_date)`，其余表 TEXT 主键。
 
-- [ ] **Step 1: 创建 loan_db.sql**（DDL 逐字移植 bossy `backend/app/fixtures/schema/loan_db.sql`，列定义零差异；补索引，风格对齐 reward_db.sql 的 `CREATE INDEX IF NOT EXISTS idx_<表>_<列>`）
+- [ ] **Step 1: 创建 loan_db.sql**（DDL 列定义固定（零差异）；补索引，风格对齐 reward_db.sql 的 `CREATE INDEX IF NOT EXISTS idx_<表>_<列>`）
 
 `templates/bank/db/migrations/loan_db.sql`:
 ```sql
@@ -163,7 +163,7 @@ CREATE TABLE IF NOT EXISTS loan_balance (
 CREATE INDEX IF NOT EXISTS idx_loan_balance_bizdate ON loan_balance(biz_date);
 ```
 
-- [ ] **Step 2: 创建 wealth_db.sql**（逐字移植 bossy `backend/app/fixtures/schema/wealth_db.sql` + 补索引）
+- [ ] **Step 2: 创建 wealth_db.sql**（DDL 列定义固定 + 补索引）
 
 `templates/bank/db/migrations/wealth_db.sql`:
 ```sql
@@ -301,7 +301,7 @@ git commit -m "feat(bank): add loan_db + wealth_db schemas (B-4b)"
 
 `var` 块结束后追加产品元组类型与表（struct 不能在 var 块内）：
 ```go
-// LoanProduct 贷款产品元组（移植 bossy loan.py PRODUCTS；CustType 仅元组保真，loan_product 表无此列）。
+// LoanProduct 贷款产品元组（CustType 仅元组保真，loan_product 表无此列）。
 type LoanProduct struct {
 	Code, Name, LoanType, CustType string
 	MinRate, MaxRate               float64 // 年化比率（非金额）
@@ -309,7 +309,7 @@ type LoanProduct struct {
 	MaxAmountYuan                  int     // 元（写库时 ×100 转分）
 }
 
-// LoanProducts bossy 4 贷款产品。
+// LoanProducts 4 贷款产品。
 var LoanProducts = []LoanProduct{
 	{"LP-CONS", "个人消费贷", "消费", "个人", 0.0435, 0.0550, 36, 300000},
 	{"LP-HOUS", "个人住房贷", "房贷", "个人", 0.0380, 0.0450, 360, 5000000},
@@ -317,7 +317,7 @@ var LoanProducts = []LoanProduct{
 	{"LP-CRED", "信用贷", "消费", "个人", 0.0600, 0.0750, 12, 100000},
 }
 
-// OverdueClass 逾期五级分类档位（按逾期天数，移植 bossy OVERDUE_CLASSES）。
+// OverdueClass 逾期五级分类档位（按逾期天数）。
 type OverdueClass struct {
 	Days int
 	Name string
@@ -326,7 +326,7 @@ type OverdueClass struct {
 // OverdueClasses 5 档阈值表（天数升序）。
 var OverdueClasses = []OverdueClass{{0, "正常"}, {1, "关注"}, {30, "次级"}, {90, "可疑"}, {180, "损失"}}
 
-// WealthProduct 理财产品元组（移植 bossy wealth.py PRODUCTS）。
+// WealthProduct 理财产品元组。
 type WealthProduct struct {
 	Code, Name, Type, Risk string
 	ExpectedReturn         float64 // 年化比率（非金额）
@@ -334,7 +334,7 @@ type WealthProduct struct {
 	TermDays               int
 }
 
-// WealthProducts bossy 6 理财产品。
+// WealthProducts 6 理财产品。
 var WealthProducts = []WealthProduct{
 	{"WP-FIX1", "稳健固收1号", "固收", "低风险", 0.035, 1000, 365},
 	{"WP-FIX3", "稳健固收3号", "固收", "中低", 0.040, 5000, 730},
@@ -363,8 +363,8 @@ func addMonths(dateStr string, n int) string {
 
 `templates/bank/internal/platform/fdw/fdw.go`：把 `Mappings` 的注释 `覆盖 core/cust/pay/reward/risk 五库联邦` 改为 `覆盖 core/cust/pay/reward/risk/loan/wealth 七库联邦`，并在 slice 末尾追加两行：
 ```go
-	{Host: "loan_db", Remote: "cust_db", Tables: []string{"cust_info"}},   // B-4b 新增（bossy 已有）
-	{Host: "wealth_db", Remote: "cust_db", Tables: []string{"cust_info"}}, // B-4b 新增（bossy 已有）
+	{Host: "loan_db", Remote: "cust_db", Tables: []string{"cust_info"}},   // B-4b 新增
+	{Host: "wealth_db", Remote: "cust_db", Tables: []string{"cust_info"}}, // B-4b 新增
 ```
 `SetupFDW` 函数逻辑不变（自动遍历新 Mapping）。
 
@@ -622,7 +622,7 @@ git commit -m "feat(bank): loan domain——Money 副本 + 6 表模型 (B-4b)"
 
 - [ ] **Step 1: 写 loan.go**
 
-`templates/bank/internal/fixtures/domains/loan.go`（rng `seed+40` 静态 / `seed+41` 滚存单次；确定性 ID，无 uuid；忠实 bossy loan.py 公式）:
+`templates/bank/internal/fixtures/domains/loan.go`（rng `seed+40` 静态 / `seed+41` 滚存单次；确定性 ID，无 uuid；公式忠实还原）:
 ```go
 package domains
 
@@ -662,9 +662,9 @@ func GenLoanStatic(cfg fixtures.Config, custIDs []string) LoanStatic {
 	accounts := make([]domain.LoanAccount, 0, nLoans)
 	disbs := make([]domain.LoanDisbursement, 0, nLoans)
 	for i := 0; i < nLoans; i++ {
-		cid := pickStr(rng, custIDs) // 抽签顺序对齐 bossy：cust → product → principal → rate → term → start → guarantee/branch → to_account
+		cid := pickStr(rng, custIDs) // 抽签顺序固定：cust → product → principal → rate → term → start → guarantee/branch → to_account
 		p := fixtures.LoanProducts[rng.IntRange(0, len(fixtures.LoanProducts)-1)]
-		// bossy 公式：IntRange(0,99999)×(maxAmtYuan/100000) 元，clamp 到 [10000, maxAmtYuan]（纯整数）
+		// 公式：IntRange(0,99999)×(maxAmtYuan/100000) 元，clamp 到 [10000, maxAmtYuan]（纯整数）
 		principalYuan := rng.IntRange(0, 99999) * (p.MaxAmountYuan / 100000)
 		principalYuan = maxInt(10000, minInt(principalYuan, p.MaxAmountYuan))
 		principal := domain.NewMoneyFromCents(int64(principalYuan) * 100)
@@ -733,7 +733,7 @@ type loanState struct {
 }
 
 // RunLoan 按 bizDate 推进：月初还款计划 + 逾期五级分类滑落 + 每日全量余额快照。
-// rng seed+41 单次（无逐日随机，忠实 bossy）；每业务日一个 pg.RunInTx。全量重放确定。
+// rng seed+41 单次（无逐日随机）；每业务日一个 pg.RunInTx。全量重放确定。
 func RunLoan(ctx context.Context, db *sql.DB, cfg fixtures.Config, accounts []domain.LoanAccount) error {
 	if len(accounts) == 0 {
 		return fmt.Errorf("loan: 无借据")
@@ -752,7 +752,7 @@ func RunLoan(ctx context.Context, db *sql.DB, cfg fixtures.Config, accounts []do
 			rateFloat:        rateF,
 		}
 	}
-	// 逾期选择：~8%（bossy random_int(1,12)==1），overdue_start ∈ [start, max(start, end-2月)]
+	// 逾期选择：~8%（random_int(1,12)==1 口径），overdue_start ∈ [start, max(start, end-2月)]
 	for _, a := range accounts {
 		if rng.IntRange(1, 12) == 1 {
 			state[a.LoanNo].overdueStart = fixtures.RandomDate(rng, cfg.StartBizDate, maxDateStr(cfg.StartBizDate, addMonths(cfg.EndBizDate, -2)))
@@ -918,7 +918,7 @@ func bulkInsertLoanOverdues(ctx context.Context, q pg.DBTX, rows []domain.LoanOv
 	return nil
 }
 
-// overdueClass 按逾期天数划五级分类（移植 bossy _overdue_class）。
+// overdueClass 按逾期天数划五级分类。
 func overdueClass(days int) string {
 	cls := "正常"
 	for _, oc := range fixtures.OverdueClasses {
@@ -2073,7 +2073,7 @@ type WealthStatic struct {
 	Holdings []domain.WealthHolding
 }
 
-// GenWealthStatic 生成理财产品 + 初始持仓（每客户 0-3 个，bossy 公式）。
+// GenWealthStatic 生成理财产品 + 初始持仓（每客户 0-3 个）。
 func GenWealthStatic(cfg fixtures.Config, custIDs []string, demandAccounts []string) WealthStatic {
 	rng := fixtures.NewRNG(cfg.Seed + 50)
 	products := make([]domain.WealthProduct, len(fixtures.WealthProducts))
@@ -2093,7 +2093,7 @@ func GenWealthStatic(cfg fixtures.Config, custIDs []string, demandAccounts []str
 		n := rng.IntRange(0, 3)
 		for j := 0; j < n; j++ {
 			p := fixtures.WealthProducts[rng.IntRange(0, len(fixtures.WealthProducts)-1)]
-			nav0 := 1 + rng.Float64()*0.25 // 4dp；spec §6.4（bossy 为 1+uniform(-0.05,0.2)，Jiade 有意对齐为 [1,1.25)）
+			nav0 := 1 + rng.Float64()*0.25 // 4dp；spec §6.4（原实现为 1+uniform(-0.05,0.2)，这里有意对齐为 [1,1.25)）
 			amountYuan := maxInt(p.MinAmountYuan, rng.IntRange(0, 99999)*100)
 			amount := domain.NewMoneyFromCents(int64(amountYuan) * 100)
 			holdings = append(holdings, domain.WealthHolding{
@@ -2154,9 +2154,9 @@ func RunWealth(ctx context.Context, db *sql.DB, cfg fixtures.Config, products []
 	for _, p := range products {
 		ret, _ := strconv.ParseFloat(p.ExpectedReturn, 64)
 		prodRet[p.ProductCode] = ret
-		navState[p.ProductCode] = 1 + ret/365 // bossy：每日按预期年化微涨
+		navState[p.ProductCode] = 1 + ret/365 // 每日按预期年化微涨
 	}
-	// 持仓成本快照（供 income；订单不改持仓，对齐 bossy）
+	// 持仓成本快照（供 income；订单不改持仓）
 	type holdingCost struct {
 		costCents int64
 		prodCode  string
@@ -2193,7 +2193,7 @@ func RunWealth(ctx context.Context, db *sql.DB, cfg fixtures.Config, products []
 				BizDate: dateStr, CustID: pickStr(rng, custIDs), ProductCode: p.Code,
 				AccountNo: pickStr(rng, demandAccounts), OrderType: rng.Choice(fixtures.OrderTypes),
 				Amount: domain.NewMoneyFromCents(int64(amountYuan) * 100),
-				Share:  fmt.Sprintf("%.4f", float64(rng.IntRange(0, 999))), // bossy quirk：share 独立随机，不由 amount/nav 推导
+				Share:  fmt.Sprintf("%.4f", float64(rng.IntRange(0, 999))), // 有意保留的怪癖：share 独立随机，不由 amount/nav 推导
 				Nav:    fmt.Sprintf("%.6f", navState[p.Code]),
 				Status: "done",
 			})
@@ -3544,7 +3544,7 @@ Expected: 全绿（seed_test 的 B-4b 断言段 + loan/wealth repo 集成测试 
 
 - [ ] **Step 7: e2e 冒烟（生成物自包含验收，spec §14.3-14.7）**
 
-前置：`docker stop bossy-postgres`（释放 5432；只停容器不动数据，事后 `docker start bossy-postgres` 恢复）。确认 8080-8086 未被占用：`lsof -nP -iTCP:8080-8086 -sTCP:LISTEN`；若被占（如 corpit），**不要杀进程**——记录并在报告注明，跳过 e2e。
+前置：停掉占用 5432 的本地 postgres 容器（`docker stop <容器名>`；只停容器不动数据，事后 `docker start <容器名>` 恢复）。确认 8080-8086 未被占用：`lsof -nP -iTCP:8080-8086 -sTCP:LISTEN`；若被占（如 corpit），**不要杀进程**——记录并在报告注明，跳过 e2e。
 
 ```bash
 # 在 jiade 仓根
@@ -3568,7 +3568,7 @@ curl -s 'localhost:8086/api/v1/wealth/orders?limit=3'
 curl -s 'localhost:8086/api/v1/wealth/incomes?limit=3'
 # 收尾
 docker compose down
-docker start bossy-postgres
+docker start <容器名>
 ```
 Expected: 7 个 healthz 全 `{"status":"ok"}`；两 profile 含客户姓名字段；各列表端点返回非空数据。`/tmp/mybank-b4b` 保留不删（供用户复查；删除需用户确认）。
 
@@ -3590,7 +3590,7 @@ git commit -m "feat(bank): B-4b template.yaml + compose 加 loan/wealth（:8085/
 - §2.1-6 测试与验收 → 各任务单测 + Task 11 seed_test + Task 12 全量 ✓
 - §4 拓扑（7 进程 7 库、端口 8085/8086）→ Task 6/10/12 ✓
 - §5 schema（DDL 零差异 + 补索引）→ Task 1 ✓
-- §6 fixture（复用内核、rng 偏移 +40/+41/+50/+51、bossy 公式、Q1-B 每日利息、§6.5 有意偏离表）→ Task 2/4/8 ✓
+- §6 fixture（复用内核、rng 偏移 +40/+41/+50/+51、既定公式、Q1-B 每日利息、§6.5 有意偏离表）→ Task 2/4/8 ✓
 - §7 FDW → Task 2（Mappings）+ Task 5/9（JOIN 端点）✓
 - §8 分层 + 自带 Money → Task 3/5/6/7/9/10 ✓
 - §9 端点清单（含 `NULLIF($1,'')::date`、limit<=0→50、写操作不做）→ Task 5/6/9/10 ✓
@@ -3614,4 +3614,4 @@ git commit -m "feat(bank): B-4b template.yaml + compose 加 loan/wealth（:8085/
 **已知有意取舍**（非遗漏）：
 - `templates/bank/ARCHITECTURE.md` 的 FDW 章节不更新（B-4a 同样未更新，spec §11 未要求；留作后续 doc 债）。
 - `templates/bank/Makefile` 的 `up` 目标仍只起 3 个老服务（B-4a 既有疏漏；验收走 `jiade up` = `docker compose up -d` 全量，不受影响）。不在本 spec 范围，不顺手改。
-- wealth 订单 `share` 独立随机（bossy quirk），不由 amount/nav 推导——忠实移植。
+- wealth 订单 `share` 独立随机（有意保留的怪癖），不由 amount/nav 推导——忠实还原。

@@ -1,4 +1,4 @@
-// Package domains 的 bizdate 子模块：多日切日引擎（移植 bossy bizdate+distribution）。
+// Package domains 的 bizdate 子模块：多日切日引擎。
 package domains
 
 import (
@@ -14,7 +14,7 @@ import (
 	"bank/internal/platform/pg"
 )
 
-// bossy 节假日（公历固定，移植自 distribution.py HOLIDAYS）。
+// 节假日表（公历固定）。
 var holidays = map[string]bool{
 	"2025-10-01": true, "2025-10-02": true, "2025-10-03": true, // 国庆
 	"2026-01-01": true, // 元旦
@@ -24,7 +24,7 @@ var holidays = map[string]bool{
 
 func isHoliday(d time.Time) bool { return holidays[d.Format("2006-01-02")] }
 
-// trendFactor 每月 +2%（base 2025-06-01，移植 bossy trend_factor）。
+// trendFactor 每月 +2%（base 2025-06-01）。
 func trendFactor(d time.Time) float64 {
 	const baseYear, baseMonth = 2025, 6
 	months := (d.Year()-baseYear)*12 + int(d.Month()) - baseMonth
@@ -50,7 +50,7 @@ func seasonalFactor(d time.Time) float64 {
 	return f
 }
 
-// cyclicalFactor 周末 ~60%（移植 bossy cyclical_factor）。
+// cyclicalFactor 周末 ~60%。
 func cyclicalFactor(d time.Time) float64 {
 	if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
 		return 0.60
@@ -59,7 +59,7 @@ func cyclicalFactor(d time.Time) float64 {
 }
 
 // volumeForDay 当日交易笔数。每日独立 rng（seed+100+ordinal），factor=trend×seasonal×cyclical。
-// 单日结果只依赖日期，子范围重跑可复现（对齐 bossy volume_fn）。
+// 单日结果只依赖日期，子范围重跑可复现。
 func volumeForDay(cfg fixtures.Config, d time.Time) int {
 	base := parseDate(cfg.StartBizDate)
 	rng := fixtures.NewRNG(cfg.Seed + 100 + dayOrdinal(d, base))
@@ -245,7 +245,7 @@ func bulkInsertBalances(ctx context.Context, q pg.DBTX, rows []domain.Balance) e
 
 // ---- 引擎内核（纯函数，无 DB）----
 
-// DayState 账户余额的内存滚存态（对齐 bossy DailyState）。
+// DayState 账户余额的内存滚存态。
 type DayState struct{ Bal map[string]domain.Money }
 
 // newDayState 初始化每账户余额（rng seed+2，回收 Spec A 已删 GenBalanceRows 的偏移）。
@@ -282,7 +282,7 @@ func GenDay(cfg fixtures.Config, date time.Time, demandNos []string, st *DayStat
 			dc = domain.DCDebit
 			b := st.Bal[acct].Sub(amt)
 			if b < 0 {
-				b = domain.NewMoneyFromCents(0) // clamp 0（对齐 bossy max(0,...)）
+				b = domain.NewMoneyFromCents(0) // clamp 0（max(0,...) 口径）
 			}
 			st.Bal[acct] = b
 		}

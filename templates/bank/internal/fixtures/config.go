@@ -18,7 +18,7 @@ type Counts struct {
 	DailyTxnHi     int
 }
 
-// DEV 约为 FULL 的 1/4（对齐 bossy TARGET_COUNTS）。
+// DEV 约为 FULL 的 1/4。
 var targetCounts = map[Scale]Counts{
 	ScaleDev:  {Customers: 1250, DemandAccounts: 2000, FixedAccounts: 500, DailyTxnLo: 500, DailyTxnHi: 1250},
 	ScaleFull: {Customers: 5000, DemandAccounts: 8000, FixedAccounts: 2000, DailyTxnLo: 2000, DailyTxnHi: 5000},
@@ -32,7 +32,7 @@ type Config struct {
 	Seed         int64
 }
 
-// DefaultConfig 按规模给默认（对齐 bossy：start 2025-06-01, end 2026-07-13, seed 42）。
+// DefaultConfig 按规模给默认（start 2025-06-01, end 2026-07-13, seed 42）。
 func DefaultConfig(scale Scale) Config {
 	return Config{StartBizDate: "2025-06-01", EndBizDate: "2026-07-13", Scale: scale, Seed: 42}
 }
@@ -45,7 +45,7 @@ func (c Config) TargetCounts() Counts {
 	return targetCounts[ScaleDev]
 }
 
-// ScaleFactor 返回规模缩放（full=1.0, dev=0.25），移植 bossy scale_factor。
+// ScaleFactor 返回规模缩放（full=1.0, dev=0.25）。
 // reward/risk/loan/wealth 的每日量 = base × ScaleFactor × factor。
 func ScaleFactor(s Scale) float64 {
 	if s == ScaleFull {

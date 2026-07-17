@@ -11,7 +11,7 @@ import (
 	"bank/internal/risk/domain"
 )
 
-// risk 规则（移植 bossy risk.py RULES）。field/op/threshold 编进 condition_json。
+// risk 规则。field/op/threshold 编进 condition_json。
 var riskRules = []struct {
 	ID, Name, Field string
 	Threshold       int

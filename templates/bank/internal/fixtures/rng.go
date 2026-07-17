@@ -32,7 +32,7 @@ func (g *RNG) Choice(list []string) string {
 // Float64 返回 [0.0,1.0) 的确定性随机浮点（仅用于非金额生成，如 risk_score / factor 缩放）。
 func (g *RNG) Float64() float64 { return g.r.Float64() }
 
-// 手写小词库（对齐 bossy zh_CN 语义，零外部依赖）。
+// 手写小词库（zh_CN 语义，零外部依赖）。
 var (
 	Surnames   = []string{"王", "李", "张", "刘", "陈", "杨", "黄", "赵", "吴", "周"}
 	GivenNames = []string{"伟", "芳", "娜", "秀英", "敏", "静", "磊", "强", "洋", "艳"}
@@ -65,7 +65,7 @@ var (
 	IncomeTypes    = []string{"利息"}
 )
 
-// LoanProduct 贷款产品元组（移植 bossy loan.py PRODUCTS；CustType 仅元组保真，loan_product 表无此列）。
+// LoanProduct 贷款产品元组（CustType 仅元组保真，loan_product 表无此列）。
 type LoanProduct struct {
 	Code, Name, LoanType, CustType string
 	MinRate, MaxRate               float64 // 年化比率（非金额）
@@ -73,7 +73,7 @@ type LoanProduct struct {
 	MaxAmountYuan                  int     // 元（写库时 ×100 转分）
 }
 
-// LoanProducts bossy 4 贷款产品。
+// LoanProducts 4 贷款产品。
 var LoanProducts = []LoanProduct{
 	{"LP-CONS", "个人消费贷", "消费", "个人", 0.0435, 0.0550, 36, 300000},
 	{"LP-HOUS", "个人住房贷", "房贷", "个人", 0.0380, 0.0450, 360, 5000000},
@@ -81,7 +81,7 @@ var LoanProducts = []LoanProduct{
 	{"LP-CRED", "信用贷", "消费", "个人", 0.0600, 0.0750, 12, 100000},
 }
 
-// OverdueClass 逾期五级分类档位（按逾期天数，移植 bossy OVERDUE_CLASSES）。
+// OverdueClass 逾期五级分类档位（按逾期天数）。
 type OverdueClass struct {
 	Days int
 	Name string
@@ -90,7 +90,7 @@ type OverdueClass struct {
 // OverdueClasses 5 档阈值表（天数升序）。
 var OverdueClasses = []OverdueClass{{0, "正常"}, {1, "关注"}, {30, "次级"}, {90, "可疑"}, {180, "损失"}}
 
-// WealthProduct 理财产品元组（移植 bossy wealth.py PRODUCTS）。
+// WealthProduct 理财产品元组。
 type WealthProduct struct {
 	Code, Name, Type, Risk string
 	ExpectedReturn         float64 // 年化比率（非金额）
@@ -98,7 +98,7 @@ type WealthProduct struct {
 	TermDays               int
 }
 
-// WealthProducts bossy 6 理财产品。
+// WealthProducts 6 理财产品。
 var WealthProducts = []WealthProduct{
 	{"WP-FIX1", "稳健固收1号", "固收", "低风险", 0.035, 1000, 365},
 	{"WP-FIX3", "稳健固收3号", "固收", "中低", 0.040, 5000, 730},

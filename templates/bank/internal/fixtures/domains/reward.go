@@ -11,7 +11,7 @@ import (
 	"bank/internal/reward/domain"
 )
 
-// reward 会员等级（移植 Bossy reward.py LEVELS）。
+// reward 会员等级。
 var rewardLevels = []struct {
 	Code, Name string
 	Threshold  int
@@ -102,7 +102,7 @@ func WriteRewardStatic(ctx context.Context, db *sql.DB, s RewardStatic) error {
 }
 
 // RunReward 按 bizDate 推进生成 points_txn + coupon（逐日三因子 + 每日独立 rng seed+31+ordinal）。
-// balances 内存滚存自静态 points_acct 初始余额（redeem 不超余额，对齐 bossy）。逐日不回写 points_acct。
+// balances 内存滚存自静态 points_acct 初始余额（redeem 不超余额）。逐日不回写 points_acct。
 func RunReward(ctx context.Context, db *sql.DB, cfg fixtures.Config, accts []domain.PointsAcct, campaignIDs []string) error {
 	if len(accts) == 0 {
 		return fmt.Errorf("reward: 无积分账户")
@@ -150,7 +150,7 @@ func RunReward(ctx context.Context, db *sql.DB, cfg fixtures.Config, accts []dom
 					CampaignID: rng.Choice(campaignIDs),
 					FaceValue:  domain.NewMoneyFromCents(int64(couponFaceCents[rng.IntRange(0, len(couponFaceCents)-1)])),
 					MinSpend:   domain.NewMoneyFromCents(int64(couponMinCents[rng.IntRange(0, len(couponMinCents)-1)])),
-					Status:     "issued", IssueBizDate: dateStr, ExpireDate: dateStr, // 与 bossy 一致：同日发放即同日过期（短期券），非 bug
+					Status:     "issued", IssueBizDate: dateStr, ExpireDate: dateStr, // 有意如此：同日发放即同日过期（短期券），非 bug
 				})
 			}
 		}
