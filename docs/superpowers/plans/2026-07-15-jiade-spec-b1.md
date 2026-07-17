@@ -3043,7 +3043,7 @@ curl localhost:8082/api/v1/payments/transfers/PT000000000001/parties  # 跨库 F
 
 - [ ] **Step 3: 重新打包 templates.tar**（jiade 仓根）
 
-Run（jiade 仓根 `/Users/yuhaochen/Documents/codebase/projanvil/Jiade`）:
+Run（jiade 仓根 `.`）:
 ```
 go generate ./internal/template
 ```
