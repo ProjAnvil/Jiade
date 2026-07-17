@@ -1,14 +1,18 @@
 # bank 架构
 
-## 服务拓扑（Spec B-1：3 进程 + 3 库，单 postgres 实例）
+## 服务拓扑（Spec B-4b：7 进程 + 7 库，单 postgres 实例）
 
 | 服务 | 端口 | 库 | cmd 入口 | 职责 |
 |------|------|----|---------|------|
 | core-banking | 8080 | core_db | `cmd/core-banking/main.go` | 活期/定存 + 复式记账 + 总账（Spec A 只读；B-3 新增记账/冲正写接口） |
 | customer | 8081 | cust_db | `cmd/customer/main.go` | 客户信息 + 账户关系（只读，含跨库 FDW JOIN） |
 | payment | 8082 | pay_db | `cmd/payment/main.go` | 转账/商户（只读，含跨库 FDW JOIN） |
+| reward | 8083 | reward_db | `cmd/reward/main.go` | 积分/券（只读，含跨库 FDW JOIN） |
+| risk | 8084 | risk_db | `cmd/risk/main.go` | 风控事件（只读，含跨库 FDW JOIN） |
+| loan | 8085 | loan_db | `cmd/loan/main.go` | 贷款借据/还款/逾期/余额快照（只读，含跨库 FDW JOIN） |
+| wealth | 8086 | wealth_db | `cmd/wealth/main.go` | 理财净值/持仓/订单/收益（只读，含跨库 FDW JOIN） |
 
-每域一个独立 Go 进程，`docker-compose.yaml` 里各一个 service 定义 + 容器 + 端口。单个 postgres 实例承载 3 库，跨库查询走 `postgres_fdw`（非应用层拼接）。
+每域一个独立 Go 进程，`docker-compose.yaml` 里各一个 service 定义 + 容器 + 端口。单个 postgres 实例承载 7 库，跨库查询走 `postgres_fdw`（非应用层拼接）。
 
 ## 分层（每服务独立纵切）
 
@@ -30,6 +34,26 @@ internal/
 │   ├── repo/          本库 transfer_txn/merchant + FDW JOIN core_db + cust_db
 │   ├── service/
 │   └── api/
+├── reward/            Spec B-4a：reward 纵切（镜像 corebanking 四层）
+│   ├── domain/
+│   ├── repo/          本库 points_acct/points_txn/coupon + FDW JOIN cust_db
+│   ├── service/
+│   └── api/
+├── risk/              Spec B-4a：risk 纵切（镜像 corebanking 四层）
+│   ├── domain/
+│   ├── repo/          本库 risk_rule/risk_event/blacklist + FDW JOIN cust_db
+│   ├── service/
+│   └── api/
+├── loan/              Spec B-4b：loan 纵切（镜像 corebanking 四层）
+│   ├── domain/        Money int64 分（禁 float）
+│   ├── repo/          本库 loan_product/loan_account/loan_disbursement/loan_repay/loan_overdue/loan_balance + FDW JOIN cust_db
+│   ├── service/
+│   └── api/
+├── wealth/            Spec B-4b：wealth 纵切（镜像 corebanking 四层）
+│   ├── domain/        Money int64 分（禁 float）
+│   ├── repo/          本库 wealth_product/wealth_nav/wealth_holding/wealth_order/wealth_income + FDW JOIN cust_db
+│   ├── service/
+│   └── api/
 └── fixtures/          Go fixture 生成器（确定性：固定 seed）
 ```
 
@@ -41,32 +65,48 @@ internal/
 postgres 实例（容器 bank-postgres）
 ├── core_db   ← core-banking 连（Spec A 已有）
 ├── cust_db   ← customer 连（Spec B-1 新增）
-└── pay_db    ← payment 连（Spec B-1 新增）
+├── pay_db    ← payment 连（Spec B-1 新增）
+├── reward_db ← reward 连（Spec B-4a 新增）
+├── risk_db   ← risk 连（Spec B-4a 新增）
+├── loan_db   ← loan 连（Spec B-4b 新增）
+└── wealth_db ← wealth 连（Spec B-4b 新增）
 ```
 
 `postgres_fdw` 在 `cmd/seed` 末尾由 `platform/fdw.SetupFDW` 幂等建立外部表映射，命名规则 `ext_{remote}_{tbl}`：
 
 ```
-core_db:  ext_cust_db_cust_info, ext_cust_db_cust_account_rel
-cust_db:  ext_core_db_demand_account          ← B-1 新增映射
-pay_db:   ext_core_db_demand_account, ext_cust_db_cust_info
+core_db:   ext_cust_db_cust_info, ext_cust_db_cust_account_rel
+cust_db:   ext_core_db_demand_account          ← B-1 新增映射
+pay_db:    ext_core_db_demand_account, ext_cust_db_cust_info
+reward_db: ext_cust_db_cust_info               ← B-4a 新增映射
+risk_db:   ext_cust_db_cust_info               ← B-4a 新增映射
+loan_db:   ext_cust_db_cust_info               ← B-4b 新增映射
+wealth_db: ext_cust_db_cust_info               ← B-4b 新增映射
 ```
 
 外部表映射图（host 库引入 remote 库的表）：
 
 ```
-core_db ←──FDW── cust_db (cust_info, cust_account_rel)
-cust_db ←──FDW── core_db (demand_account)        [B-1 新增]
-pay_db  ←──FDW── core_db (demand_account)
-pay_db  ←──FDW── cust_db (cust_info)
+core_db   ←──FDW── cust_db (cust_info, cust_account_rel)
+cust_db   ←──FDW── core_db (demand_account)        [B-1 新增]
+pay_db    ←──FDW── core_db (demand_account)
+pay_db    ←──FDW── cust_db (cust_info)
+reward_db ←──FDW── cust_db (cust_info)             [B-4a 新增]
+risk_db   ←──FDW── cust_db (cust_info)             [B-4a 新增]
+loan_db   ←──FDW── cust_db (cust_info)             [B-4b 新增]
+wealth_db ←──FDW── cust_db (cust_info)             [B-4b 新增]
 ```
 
-### 2 个跨库 FDW JOIN 端点
+### 6 个跨库 FDW JOIN 端点
 
 | 端点 | 服务 | JOIN 路径 | 返回 |
 |------|------|----------|------|
 | `GET /api/v1/customers/{cust_id}/accounts` | customer (8081) | `cust_db.cust_account_rel` JOIN `ext_core_db_demand_account` | 客户关联的 core 账户行（账号/币种/状态/开户日） |
 | `GET /api/v1/payments/transfers/{txn_id}/parties` | payment (8082) | `pay_db.transfer_txn` JOIN `ext_core_db_demand_account`(×2) JOIN `ext_cust_db_cust_info`(×2) | 转账双方账号 + 户主客户姓名 |
+| `GET /api/v1/reward/customers/{cust_id}/profile` | reward (8083) | `reward_db.points_acct` JOIN `ext_cust_db_cust_info` | 积分余额 + 会员等级 + 客户姓名/类型 |
+| `GET /api/v1/risk/events/{event_id}` | risk (8084) | `risk_db.risk_event` JOIN `ext_cust_db_cust_info` | 事件详情 + 客户姓名/类型 |
+| `GET /api/v1/loan/accounts/{loan_no}/profile` | loan (8085) | `loan_db.loan_account` JOIN `ext_cust_db_cust_info` | 借据本金/余额 + 客户姓名/类型 |
+| `GET /api/v1/wealth/holdings/{holding_id}/profile` | wealth (8086) | `wealth_db.wealth_holding` JOIN `ext_cust_db_cust_info` | 持仓份额/市值 + 客户姓名/类型 |
 
 ### core-banking 端点（:8080）
 
@@ -83,18 +123,24 @@ pay_db  ←──FDW── cust_db (cust_info)
 
 ## 数据流
 
-- `cmd/seed`：连 postgres 管理库 → 建 3 库（core_db/cust_db/pay_db）→ 跑 3 套迁移 SQL → 灌 core 静态主数据/账户/余额/流水 → 灌 customer 客户+关系 → 灌 payment 商户/转账/消费 → `setup_fdw` 建外部表（6 步，幂等：`--reset` 重建）。
+- `cmd/seed`：连 postgres 管理库 → 建 7 库 → 跑 7 套迁移 SQL → 灌 core 静态主数据/账户/余额/流水 → 灌 customer 客户+关系 → 灌 payment 商户/转账/消费 → 灌 reward 积分/券 → 灌 risk 规则/事件/黑名单 → 灌 loan 借据/放款/还款/逾期/余额快照 → 灌 wealth 产品/净值/持仓/订单/收益 → `setup_fdw` 建外部表（10 步，幂等：`--reset` 重建）。
 - `cmd/core-banking`：连 core_db，暴露 HTTP API（:8080）—— Spec A 只读查询 + B-3 记账/冲正写接口（事务内复式过账）。
 - `cmd/customer`：连 cust_db（只读），暴露只读 HTTP API（:8081），含跨库 FDW JOIN。
 - `cmd/payment`：连 pay_db（只读），暴露只读 HTTP API（:8082），含跨库 FDW JOIN。
+- `cmd/reward`：连 reward_db（只读），暴露只读 HTTP API（:8083），含跨库 FDW JOIN。
+- `cmd/risk`：连 risk_db（只读），暴露只读 HTTP API（:8084），含跨库 FDW JOIN。
+- `cmd/loan`：连 loan_db（只读），暴露只读 HTTP API（:8085），含跨库 FDW JOIN。
+- `cmd/wealth`：连 wealth_db（只读），暴露只读 HTTP API（:8086），含跨库 FDW JOIN。
 
 ## 范围
 
 - **Spec A**：core-banking 单服务（活期/定存 + 复式记账 + 总账）。
 - **Spec B-1**：customer + payment 两服务纵切 + 多库 + FDW 联邦（本架构）。
+- **Spec B-2**：core 多日切日引擎（逐日三因子流水 + 余额跨日滚存）。
 - **Spec B-3**：core-banking 新增记账/冲正写接口（`POST /txns`、`POST /vouchers/{}/reverse`）；`LedgerService.Post` 内部化为 txn_service 基础设施——客户端只见业务意图，复式分录不再对外暴露。
-- **Spec B-2/B-4**（留后续）：多日切日引擎、剩余 4 服务（reward/risk/loan/wealth）。
-- **注**：pay_db 的 `channel_txn`/`fee_record`/`settlement_record` 表已建（schema 完整），fixture 数据留 B-2 多日引擎一起补（B-1 不阻塞：仅 merchant/transfer 参与 FDW 联邦与只读 API）。
+- **Spec B-4a**：reward + risk 两服务纵切（逐日三因子 fixture：积分流水/风控事件）。
+- **Spec B-4b**：loan + wealth 两服务纵切（逐日滚存：loan 余额快照/逾期五级分类滑落，wealth NAV 游走/每日收益）。
+- **注**：pay_db 的 `channel_txn`/`fee_record`/`settlement_record` 表已建（schema 完整），fixture 数据仍留后续补（不阻塞：仅 merchant/transfer 参与 FDW 联邦与只读 API）。
 
 ## 金融不变量
 

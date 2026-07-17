@@ -1,28 +1,36 @@
-# bank（jiade 模板：core-banking + customer + payment 纵切）
+# bank（jiade 模板：7 服务纵切——core-banking + customer + payment + reward + risk + loan + wealth）
 
 简化版银行核心系统——「现实世界大工程的缩影」。本工程由 `jiade init --template bank` 生成，**自包含**：离开 jiade 也可独立运行（仅需 docker + go）。
 
-Spec B-1 扩展为 **3 服务 + 3 库 + FDW 跨库联邦**：
+Spec B-4b 扩展为 **7 服务 + 7 库 + FDW 跨库联邦 + 逐日滚存/三因子 fixture**：
 
 | 服务 | 端口 | 库 |
 |------|------|----|
 | core-banking | 8080 | core_db |
 | customer | 8081 | cust_db |
 | payment | 8082 | pay_db |
+| reward | 8083 | reward_db |
+| risk | 8084 | risk_db |
+| loan | 8085 | loan_db |
+| wealth | 8086 | wealth_db |
 
 ## 快速开始
 
 ```bash
-make up       # docker compose up -d（postgres + core-banking + customer + payment）
-make seed     # 建 3 库 → 建 3 库表 → 灌 fixture → setup_fdw（幂等：--reset）
+make up       # docker compose up -d（postgres + 全部 7 服务）
+make seed     # 建 7 库 → 建 7 库表 → 灌 7 域 fixture → setup_fdw（10 步，幂等：--reset）
 ```
 
-三服务 healthz：
+七服务 healthz：
 
 ```bash
 curl -sf localhost:8080/healthz                       # core-banking
 curl -sf localhost:8081/healthz                       # customer
 curl -sf localhost:8082/healthz                       # payment
+curl -sf localhost:8083/healthz                       # reward
+curl -sf localhost:8084/healthz                       # risk
+curl -sf localhost:8085/healthz                       # loan
+curl -sf localhost:8086/healthz                       # wealth
 ```
 
 core-banking 只读查询（Spec A）：
@@ -59,9 +67,17 @@ curl -sf localhost:8082/api/v1/payments/transfers/PT000000000001/parties
 
 预期：`/accounts` 返回该客户在 core_db 的账户行；`/parties` 返回转账双方账号 + 户主客户姓名（跨 3 库联邦）。
 
+loan/wealth 只读端点示例（Spec B-4b）：
+
+```bash
+curl -sf localhost:8085/api/v1/loan/accounts
+curl -sf localhost:8085/api/v1/loan/accounts/{loan_no}/profile
+curl -sf localhost:8086/api/v1/wealth/holdings/{holding_id}/profile
+```
+
 ## 架构
 
-见 [ARCHITECTURE.md](ARCHITECTURE.md)。3 进程 + 3 库 + FDW 联邦；每服务分层 `api → service → repo → domain`，domain 零外部依赖。
+见 [ARCHITECTURE.md](ARCHITECTURE.md)。7 进程 + 7 库 + FDW 联邦；每服务分层 `api → service → repo → domain`，domain 零外部依赖。
 
 ## 金融不变量
 

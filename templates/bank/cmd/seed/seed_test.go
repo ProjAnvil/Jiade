@@ -26,7 +26,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestEnsureDBs_CreatesAllThree(t *testing.T) {
+func TestEnsureDBs_CreatesAllDBs(t *testing.T) {
 	ctx := context.Background()
 	// 先确保 admin 可连
 	admin, err := pg.Open("postgres")
@@ -71,8 +71,8 @@ func TestSeedRun_PopulatesAllDBs(t *testing.T) {
 		{"pay_db", "merchant"}, {"pay_db", "transfer_txn"}, {"pay_db", "consumption_txn"},
 		{"reward_db", "points_acct"}, {"reward_db", "points_txn"}, {"reward_db", "coupon"},
 		{"risk_db", "risk_rule"}, {"risk_db", "risk_event"}, {"risk_db", "blacklist"},
-		{"loan_db", "loan_product"}, {"loan_db", "loan_account"}, {"loan_db", "loan_repay"},
-		{"loan_db", "loan_balance"}, {"loan_db", "loan_overdue"},
+		{"loan_db", "loan_product"}, {"loan_db", "loan_account"}, {"loan_db", "loan_disbursement"},
+		{"loan_db", "loan_repay"}, {"loan_db", "loan_balance"}, {"loan_db", "loan_overdue"},
 		{"wealth_db", "wealth_product"}, {"wealth_db", "wealth_nav"}, {"wealth_db", "wealth_holding"},
 		{"wealth_db", "wealth_order"}, {"wealth_db", "wealth_income"},
 	} {

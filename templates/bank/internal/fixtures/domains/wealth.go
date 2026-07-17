@@ -131,15 +131,16 @@ func RunWealth(ctx context.Context, db *sql.DB, cfg fixtures.Config, products []
 		n := orderVolumeForDay(sf, factor)
 		orders := make([]domain.WealthOrder, 0, n)
 		for i := 0; i < n; i++ {
-			p := fixtures.WealthProducts[rng.IntRange(0, len(fixtures.WealthProducts)-1)]
-			amountYuan := maxInt(p.MinAmountYuan, rng.IntRange(0, 99999)*100) // 同持仓公式
+			// 订单产品从 products 参数选（与 fixtures.WealthProducts 同序同源，rng 流不变）
+			p := products[rng.IntRange(0, len(products)-1)]
+			amountYuan := maxInt(int(p.MinAmount.Cents()/100), rng.IntRange(0, 99999)*100) // 同持仓公式
 			orders = append(orders, domain.WealthOrder{
 				OrderID: fmt.Sprintf("WP-OD-%s-%05d", compact, i),
-				BizDate: dateStr, CustID: pickStr(rng, custIDs), ProductCode: p.Code,
+				BizDate: dateStr, CustID: pickStr(rng, custIDs), ProductCode: p.ProductCode,
 				AccountNo: pickStr(rng, demandAccounts), OrderType: rng.Choice(fixtures.OrderTypes),
 				Amount: domain.NewMoneyFromCents(int64(amountYuan) * 100),
 				Share:  fmt.Sprintf("%.4f", float64(rng.IntRange(0, 999))), // bossy quirk：share 独立随机，不由 amount/nav 推导
-				Nav:    fmt.Sprintf("%.6f", navState[p.Code]),
+				Nav:    fmt.Sprintf("%.6f", navState[p.ProductCode]),
 				Status: "done",
 			})
 		}

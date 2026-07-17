@@ -148,6 +148,17 @@ func TestRecord_Concurrent_NoDeadlock(t *testing.T) {
 			VALUES ($1,'2026-07-15',10000.00,10000.00,'2011')`, no) // 各 10000.00 元
 	}
 
+	// 本测试日期假设独立于 seed 契约：Record 按 sys_param.biz_date 写当日快照，
+	// 须晚于初始余额日 2026-07-15。测后恢复，免污染同库其他测试。
+	var prevBizDate string
+	if err := db.QueryRowContext(ctx, "SELECT param_value FROM sys_param WHERE param_key='biz_date'").Scan(&prevBizDate); err != nil {
+		t.Fatalf("读 biz_date: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE sys_param SET param_value='2026-07-16' WHERE param_key='biz_date'"); err != nil {
+		t.Fatalf("调 biz_date: %v", err)
+	}
+	defer db.ExecContext(context.Background(), "UPDATE sys_param SET param_value=$1 WHERE param_key='biz_date'", prevBizDate)
+
 	errs := make(chan error, 2)
 	// T1: A→B；T2: B→A —— 若无 lock ordering 会 AB-BA 死锁
 	go func() { _, e := svc.Record(ctx, service.RecordInput{Action: domain.ActionTransfer, FromAccount: "CD-A", ToAccount: "CD-B", Amount: domain.NewMoneyFromCents(10000), Ccy: "CNY"}); errs <- e }()
