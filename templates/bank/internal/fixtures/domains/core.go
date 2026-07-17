@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
 
 	"bank/internal/corebanking/domain"
 	"bank/internal/fixtures"
@@ -176,14 +175,6 @@ func WriteAccounts(ctx context.Context, db *sql.DB, demand []domain.DemandAccoun
 // WriteBalances / WriteTxns 已由 Spec B-2 多日切日引擎（bizdate.go bulkInsert*）取代，删除。
 
 // ---- helpers ----
-
-func addMonths(dateStr string, months int) string {
-	t, err := time.Parse("2006-01-02", dateStr)
-	if err != nil {
-		return dateStr
-	}
-	return t.AddDate(0, months, 0).Format("2006-01-02")
-}
 
 func nullable(s string) any {
 	if s == "" {

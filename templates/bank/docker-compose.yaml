@@ -85,6 +85,34 @@ services:
     ports: ["8084:8084"]
     depends_on:
       postgres: {condition: service_healthy}
+  loan:
+    build:
+      context: .
+      args:
+        CMD: loan
+    container_name: bank-loan
+    restart: unless-stopped
+    environment:
+      <<: *svcenv
+      DB_NAME: loan_db
+      API_PORT: "8085"
+    ports: ["8085:8085"]
+    depends_on:
+      postgres: {condition: service_healthy}
+  wealth:
+    build:
+      context: .
+      args:
+        CMD: wealth
+    container_name: bank-wealth
+    restart: unless-stopped
+    environment:
+      <<: *svcenv
+      DB_NAME: wealth_db
+      API_PORT: "8086"
+    ports: ["8086:8086"]
+    depends_on:
+      postgres: {condition: service_healthy}
 
 volumes:
   pgdata:

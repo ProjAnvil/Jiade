@@ -3,7 +3,7 @@
 up:
 	docker compose up -d --build postgres
 	$(MAKE) seed
-	docker compose up -d --build core-banking customer payment
+	docker compose up -d --build
 
 down:
 	docker compose down
@@ -15,4 +15,4 @@ test:
 	go test ./...
 
 integration-test:
-	go test -tags=integration ./...
+	go test -tags=integration -p 1 ./...

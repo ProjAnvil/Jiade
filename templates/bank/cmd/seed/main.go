@@ -23,6 +23,8 @@ var allDBs = []struct{ name, sql string }{
 	{"pay_db", "db/migrations/pay_db.sql"},
 	{"reward_db", "db/migrations/reward_db.sql"},
 	{"risk_db", "db/migrations/risk_db.sql"},
+	{"loan_db", "db/migrations/loan_db.sql"},
+	{"wealth_db", "db/migrations/wealth_db.sql"},
 }
 
 func main() {
@@ -35,7 +37,7 @@ func main() {
 	if err := runSeed(context.Background(), cfg, *reset); err != nil {
 		log.Fatalf("[seed] 失败: %v", err)
 	}
-	log.Println("[seed] 完成 ✅（5 库 + core + customer + payment + reward + risk + FDW）")
+	log.Println("[seed] 完成 ✅（7 库 + core + customer + payment + reward + risk + loan + wealth + FDW）")
 }
 
 func runSeed(ctx context.Context, cfg fixtures.Config, reset bool) error {
@@ -43,11 +45,11 @@ func runSeed(ctx context.Context, cfg fixtures.Config, reset bool) error {
 	for i, d := range allDBs {
 		names[i] = d.name
 	}
-	log.Println("[seed] 1/8 建 5 库")
+	log.Println("[seed] 1/10 建 7 库")
 	if err := ensureDBs(ctx, reset, names); err != nil {
 		return fmt.Errorf("建库: %w（请先 make up）", err)
 	}
-	log.Println("[seed] 2/8 建 5 库表")
+	log.Println("[seed] 2/10 建 7 库表")
 	for _, d := range allDBs {
 		db, err := pg.Open(d.name)
 		if err != nil {
@@ -64,7 +66,7 @@ func runSeed(ctx context.Context, cfg fixtures.Config, reset bool) error {
 		db.Close()
 	}
 
-	log.Println("[seed] 3/8 core")
+	log.Println("[seed] 3/10 core")
 	coreDB, err := pg.Open("core_db")
 	if err != nil {
 		return err
@@ -85,7 +87,7 @@ func runSeed(ctx context.Context, cfg fixtures.Config, reset bool) error {
 		return err
 	}
 
-	log.Println("[seed] 4/8 customer")
+	log.Println("[seed] 4/10 customer")
 	// cust_id/account_no 编号规则与 core 一致 → 确定性关联
 	nCustomers := cfg.TargetCounts().DemandAccounts / 2
 	if nCustomers < 1 {
@@ -116,7 +118,7 @@ func runSeed(ctx context.Context, cfg fixtures.Config, reset bool) error {
 	}
 	custDB.Close()
 
-	log.Println("[seed] 5/8 payment")
+	log.Println("[seed] 5/10 payment")
 	tc := cfg.TargetCounts()
 	nMerchants := 50 // dev 缩影
 	if tc.DemandAccounts > 4000 {
@@ -142,7 +144,7 @@ func runSeed(ctx context.Context, cfg fixtures.Config, reset bool) error {
 	}
 	payDB.Close()
 
-	log.Println("[seed] 6/8 reward")
+	log.Println("[seed] 6/10 reward")
 	rewardStatic := domains.GenRewardStatic(cfg, custIDs)
 	campaignIDs := make([]string, len(rewardStatic.Campaigns))
 	for i, c := range rewardStatic.Campaigns {
@@ -162,7 +164,7 @@ func runSeed(ctx context.Context, cfg fixtures.Config, reset bool) error {
 	}
 	rewardDB.Close()
 
-	log.Println("[seed] 7/8 risk")
+	log.Println("[seed] 7/10 risk")
 	riskStatic := domains.GenRiskStatic(cfg, custIDs)
 	riskDB, err := pg.Open("risk_db")
 	if err != nil {
@@ -178,7 +180,39 @@ func runSeed(ctx context.Context, cfg fixtures.Config, reset bool) error {
 	}
 	riskDB.Close()
 
-	log.Println("[seed] 8/8 setup_fdw")
+	log.Println("[seed] 8/10 loan")
+	loanStatic := domains.GenLoanStatic(cfg, custIDs)
+	loanDB, err := pg.Open("loan_db")
+	if err != nil {
+		return err
+	}
+	if err := domains.WriteLoanStatic(ctx, loanDB, loanStatic); err != nil {
+		loanDB.Close()
+		return err
+	}
+	if err := domains.RunLoan(ctx, loanDB, cfg, loanStatic.Accounts); err != nil {
+		loanDB.Close()
+		return err
+	}
+	loanDB.Close()
+
+	log.Println("[seed] 9/10 wealth")
+	wealthStatic := domains.GenWealthStatic(cfg, custIDs, demandNos)
+	wealthDB, err := pg.Open("wealth_db")
+	if err != nil {
+		return err
+	}
+	if err := domains.WriteWealthStatic(ctx, wealthDB, wealthStatic); err != nil {
+		wealthDB.Close()
+		return err
+	}
+	if err := domains.RunWealth(ctx, wealthDB, cfg, wealthStatic.Products, wealthStatic.Holdings, custIDs, demandNos); err != nil {
+		wealthDB.Close()
+		return err
+	}
+	wealthDB.Close()
+
+	log.Println("[seed] 10/10 setup_fdw")
 	if err := fdw.SetupFDW(ctx); err != nil {
 		return fmt.Errorf("setup_fdw: %w", err)
 	}

@@ -123,6 +123,15 @@ func bizDateRange(start, end string) ([]time.Time, error) {
 	return out, nil
 }
 
+// addMonths 把 YYYY-MM-DD 加 n 月（n 可正可负；loan mature_date = start + term 用）。
+func addMonths(dateStr string, n int) string {
+	t, err := parseDate2(dateStr)
+	if err != nil {
+		return dateStr
+	}
+	return t.AddDate(0, n, 0).Format("2006-01-02")
+}
+
 // ---- 写入循环（批量 + 逐日幂等 + 切 sys_param）----
 
 const bizDateBatchSize = 1000

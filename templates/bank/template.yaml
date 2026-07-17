@@ -1,6 +1,6 @@
 name: bank
-description: 简化版银行核心系统（core/customer/payment/reward/risk 服务，Spec B-4a）
-version: 0.3.0
+description: 简化版银行核心系统（core/customer/payment/reward/risk/loan/wealth 服务，Spec B-4b）
+version: 0.4.0
 databases:
   - name: core_db
     migrate: db/migrations/core_db.sql
@@ -12,12 +12,18 @@ databases:
     migrate: db/migrations/reward_db.sql
   - name: risk_db
     migrate: db/migrations/risk_db.sql
+  - name: loan_db
+    migrate: db/migrations/loan_db.sql
+  - name: wealth_db
+    migrate: db/migrations/wealth_db.sql
 services:
   - {name: core-banking, port: 8080, db: core_db}
   - {name: customer, port: 8081, db: cust_db}
   - {name: payment, port: 8082, db: pay_db}
   - {name: reward, port: 8083, db: reward_db}
   - {name: risk, port: 8084, db: risk_db}
+  - {name: loan, port: 8085, db: loan_db}
+  - {name: wealth, port: 8086, db: wealth_db}
 seed:
   entrypoint: go run ./cmd/seed
   scales: [dev, full]
