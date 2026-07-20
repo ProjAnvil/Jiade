@@ -39,7 +39,7 @@ func main() {
 		TxnSvc:   txnSvc,
 		Ledger:   ledgerRepo,
 	}
-	port := getenv("API_PORT", "8080")
+	port := getenv("API_PORT", "18080")
 	srv := &http.Server{Addr: ":" + port, Handler: api.NewRouter(handlers)}
 
 	go func() {

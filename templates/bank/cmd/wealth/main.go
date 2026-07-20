@@ -30,7 +30,7 @@ func main() {
 	handlers := &api.Handlers{
 		Svc: service.NewWealthService(repo.NewWealthRepo(db)),
 	}
-	port := getenv("API_PORT", "8086")
+	port := getenv("API_PORT", "18086")
 	srv := &http.Server{Addr: ":" + port, Handler: api.NewRouter(handlers)}
 
 	go func() {

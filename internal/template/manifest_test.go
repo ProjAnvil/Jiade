@@ -28,11 +28,11 @@ func TestManifest_Bank(t *testing.T) {
 	if m.Name != "bank" {
 		t.Errorf("name=%q want bank", m.Name)
 	}
-	// Spec B-4b：7 服务（+loan:8085 / wealth:8086）。
+	// Spec B-4b：7 服务（+loan:18085 / wealth:18086）。
 	if len(m.Services) != 7 {
 		t.Fatalf("services=%+v want 7", m.Services)
 	}
-	wantSvc := map[string]int{"core-banking": 8080, "customer": 8081, "payment": 8082, "reward": 8083, "risk": 8084, "loan": 8085, "wealth": 8086}
+	wantSvc := map[string]int{"core-banking": 18080, "customer": 18081, "payment": 18082, "reward": 18083, "risk": 18084, "loan": 18085, "wealth": 18086}
 	for _, s := range m.Services {
 		if port, ok := wantSvc[s.Name]; !ok || s.Port != port {
 			t.Errorf("service %+v not in %v", s, wantSvc)

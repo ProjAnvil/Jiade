@@ -4,13 +4,13 @@
 
 | 服务 | 端口 | 库 | cmd 入口 | 职责 |
 |------|------|----|---------|------|
-| core-banking | 8080 | core_db | `cmd/core-banking/main.go` | 活期/定存 + 复式记账 + 总账（Spec A 只读；B-3 新增记账/冲正写接口） |
-| customer | 8081 | cust_db | `cmd/customer/main.go` | 客户信息 + 账户关系（只读，含跨库 FDW JOIN） |
-| payment | 8082 | pay_db | `cmd/payment/main.go` | 转账/商户（只读，含跨库 FDW JOIN） |
-| reward | 8083 | reward_db | `cmd/reward/main.go` | 积分/券（只读，含跨库 FDW JOIN） |
-| risk | 8084 | risk_db | `cmd/risk/main.go` | 风控事件（只读，含跨库 FDW JOIN） |
-| loan | 8085 | loan_db | `cmd/loan/main.go` | 贷款借据/还款/逾期/余额快照（只读，含跨库 FDW JOIN） |
-| wealth | 8086 | wealth_db | `cmd/wealth/main.go` | 理财净值/持仓/订单/收益（只读，含跨库 FDW JOIN） |
+| core-banking | 18080 | core_db | `cmd/core-banking/main.go` | 活期/定存 + 复式记账 + 总账（Spec A 只读；B-3 新增记账/冲正写接口） |
+| customer | 18081 | cust_db | `cmd/customer/main.go` | 客户信息 + 账户关系（只读，含跨库 FDW JOIN） |
+| payment | 18082 | pay_db | `cmd/payment/main.go` | 转账/商户（只读，含跨库 FDW JOIN） |
+| reward | 18083 | reward_db | `cmd/reward/main.go` | 积分/券（只读，含跨库 FDW JOIN） |
+| risk | 18084 | risk_db | `cmd/risk/main.go` | 风控事件（只读，含跨库 FDW JOIN） |
+| loan | 18085 | loan_db | `cmd/loan/main.go` | 贷款借据/还款/逾期/余额快照（只读，含跨库 FDW JOIN） |
+| wealth | 18086 | wealth_db | `cmd/wealth/main.go` | 理财净值/持仓/订单/收益（只读，含跨库 FDW JOIN） |
 
 每域一个独立 Go 进程，`docker-compose.yaml` 里各一个 service 定义 + 容器 + 端口。单个 postgres 实例承载 7 库，跨库查询走 `postgres_fdw`（非应用层拼接）。
 
@@ -101,14 +101,14 @@ wealth_db ←──FDW── cust_db (cust_info)             [B-4b 新增]
 
 | 端点 | 服务 | JOIN 路径 | 返回 |
 |------|------|----------|------|
-| `GET /api/v1/customers/{cust_id}/accounts` | customer (8081) | `cust_db.cust_account_rel` JOIN `ext_core_db_demand_account` | 客户关联的 core 账户行（账号/币种/状态/开户日） |
-| `GET /api/v1/payments/transfers/{txn_id}/parties` | payment (8082) | `pay_db.transfer_txn` JOIN `ext_core_db_demand_account`(×2) JOIN `ext_cust_db_cust_info`(×2) | 转账双方账号 + 户主客户姓名 |
-| `GET /api/v1/reward/customers/{cust_id}/profile` | reward (8083) | `reward_db.points_acct` JOIN `ext_cust_db_cust_info` | 积分余额 + 会员等级 + 客户姓名/类型 |
-| `GET /api/v1/risk/events/{event_id}` | risk (8084) | `risk_db.risk_event` JOIN `ext_cust_db_cust_info` | 事件详情 + 客户姓名/类型 |
-| `GET /api/v1/loan/accounts/{loan_no}/profile` | loan (8085) | `loan_db.loan_account` JOIN `ext_cust_db_cust_info` | 借据本金/余额 + 客户姓名/类型 |
-| `GET /api/v1/wealth/holdings/{holding_id}/profile` | wealth (8086) | `wealth_db.wealth_holding` JOIN `ext_cust_db_cust_info` | 持仓份额/市值 + 客户姓名/类型 |
+| `GET /api/v1/customers/{cust_id}/accounts` | customer (18081) | `cust_db.cust_account_rel` JOIN `ext_core_db_demand_account` | 客户关联的 core 账户行（账号/币种/状态/开户日） |
+| `GET /api/v1/payments/transfers/{txn_id}/parties` | payment (18082) | `pay_db.transfer_txn` JOIN `ext_core_db_demand_account`(×2) JOIN `ext_cust_db_cust_info`(×2) | 转账双方账号 + 户主客户姓名 |
+| `GET /api/v1/reward/customers/{cust_id}/profile` | reward (18083) | `reward_db.points_acct` JOIN `ext_cust_db_cust_info` | 积分余额 + 会员等级 + 客户姓名/类型 |
+| `GET /api/v1/risk/events/{event_id}` | risk (18084) | `risk_db.risk_event` JOIN `ext_cust_db_cust_info` | 事件详情 + 客户姓名/类型 |
+| `GET /api/v1/loan/accounts/{loan_no}/profile` | loan (18085) | `loan_db.loan_account` JOIN `ext_cust_db_cust_info` | 借据本金/余额 + 客户姓名/类型 |
+| `GET /api/v1/wealth/holdings/{holding_id}/profile` | wealth (18086) | `wealth_db.wealth_holding` JOIN `ext_cust_db_cust_info` | 持仓份额/市值 + 客户姓名/类型 |
 
-### core-banking 端点（:8080）
+### core-banking 端点（:18080）
 
 读（Spec A）+ 记账/冲正写（Spec B-3）：
 
@@ -124,13 +124,13 @@ wealth_db ←──FDW── cust_db (cust_info)             [B-4b 新增]
 ## 数据流
 
 - `cmd/seed`：连 postgres 管理库 → 建 7 库 → 跑 7 套迁移 SQL → 灌 core 静态主数据/账户/余额/流水 → 灌 customer 客户+关系 → 灌 payment 商户/转账/消费 → 灌 reward 积分/券 → 灌 risk 规则/事件/黑名单 → 灌 loan 借据/放款/还款/逾期/余额快照 → 灌 wealth 产品/净值/持仓/订单/收益 → `setup_fdw` 建外部表（10 步，幂等：`--reset` 重建）。
-- `cmd/core-banking`：连 core_db，暴露 HTTP API（:8080）—— Spec A 只读查询 + B-3 记账/冲正写接口（事务内复式过账）。
-- `cmd/customer`：连 cust_db（只读），暴露只读 HTTP API（:8081），含跨库 FDW JOIN。
-- `cmd/payment`：连 pay_db（只读），暴露只读 HTTP API（:8082），含跨库 FDW JOIN。
-- `cmd/reward`：连 reward_db（只读），暴露只读 HTTP API（:8083），含跨库 FDW JOIN。
-- `cmd/risk`：连 risk_db（只读），暴露只读 HTTP API（:8084），含跨库 FDW JOIN。
-- `cmd/loan`：连 loan_db（只读），暴露只读 HTTP API（:8085），含跨库 FDW JOIN。
-- `cmd/wealth`：连 wealth_db（只读），暴露只读 HTTP API（:8086），含跨库 FDW JOIN。
+- `cmd/core-banking`：连 core_db，暴露 HTTP API（:18080）—— Spec A 只读查询 + B-3 记账/冲正写接口（事务内复式过账）。
+- `cmd/customer`：连 cust_db（只读），暴露只读 HTTP API（:18081），含跨库 FDW JOIN。
+- `cmd/payment`：连 pay_db（只读），暴露只读 HTTP API（:18082），含跨库 FDW JOIN。
+- `cmd/reward`：连 reward_db（只读），暴露只读 HTTP API（:18083），含跨库 FDW JOIN。
+- `cmd/risk`：连 risk_db（只读），暴露只读 HTTP API（:18084），含跨库 FDW JOIN。
+- `cmd/loan`：连 loan_db（只读），暴露只读 HTTP API（:18085），含跨库 FDW JOIN。
+- `cmd/wealth`：连 wealth_db（只读），暴露只读 HTTP API（:18086），含跨库 FDW JOIN。
 
 ## 范围
 

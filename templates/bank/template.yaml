@@ -17,13 +17,13 @@ databases:
   - name: wealth_db
     migrate: db/migrations/wealth_db.sql
 services:
-  - {name: core-banking, port: 8080, db: core_db}
-  - {name: customer, port: 8081, db: cust_db}
-  - {name: payment, port: 8082, db: pay_db}
-  - {name: reward, port: 8083, db: reward_db}
-  - {name: risk, port: 8084, db: risk_db}
-  - {name: loan, port: 8085, db: loan_db}
-  - {name: wealth, port: 8086, db: wealth_db}
+  - {name: core-banking, port: 18080, db: core_db}
+  - {name: customer, port: 18081, db: cust_db}
+  - {name: payment, port: 18082, db: pay_db}
+  - {name: reward, port: 18083, db: reward_db}
+  - {name: risk, port: 18084, db: risk_db}
+  - {name: loan, port: 18085, db: loan_db}
+  - {name: wealth, port: 18086, db: wealth_db}
 seed:
   entrypoint: go run ./cmd/seed
   scales: [dev, full]

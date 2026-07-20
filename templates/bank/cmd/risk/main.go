@@ -30,7 +30,7 @@ func main() {
 	handlers := &api.Handlers{
 		Svc: service.NewRiskService(repo.NewRiskRepo(db)),
 	}
-	port := getenv("API_PORT", "8084")
+	port := getenv("API_PORT", "18084")
 	srv := &http.Server{Addr: ":" + port, Handler: api.NewRouter(handlers)}
 
 	go func() {

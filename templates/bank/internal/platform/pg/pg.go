@@ -15,7 +15,7 @@ func DSN(dbName string) string {
 		Getenv("DB_USER", "bank"),
 		Getenv("DB_PASSWORD", "bank"),
 		Getenv("DB_HOST", "localhost"),
-		Getenv("DB_PORT", "5432"),
+		Getenv("DB_PORT", "15432"),
 		dbName,
 	)
 }

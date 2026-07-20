@@ -32,7 +32,7 @@ func main() {
 	handlers := &api.Handlers{
 		Svc: service.NewPaymentService(repo.NewPaymentRepo(db)),
 	}
-	port := getenv("API_PORT", "8082")
+	port := getenv("API_PORT", "18082")
 	srv := &http.Server{Addr: ":" + port, Handler: api.NewRouter(handlers)}
 
 	go func() {
