@@ -21,7 +21,7 @@ func New() *cobra.Command {
 		Use:   "jiade",
 		Short: "生成「现实世界大工程的缩影」——可运行的行业 Go 工程",
 	}
-	root.PersistentFlags().StringVar(&opts.Dir, "dir", "", "目标工程根目录")
+	root.PersistentFlags().StringVar(&opts.Dir, "dir", "", "目标工程根目录（up/down/seed 默认当前目录；init 为空时交互式询问）")
 	root.AddCommand(newListCmd(opts))
 	root.AddCommand(newInitCmd(opts))
 	root.AddCommand(newUpCmd(opts))

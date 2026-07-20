@@ -16,7 +16,7 @@ func newSeedCmd(opts *Options) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir := opts.Dir
 			if dir == "" {
-				return fmt.Errorf("需要 --dir 指定目标工程目录")
+				dir = "." // 默认当前目录（配合 init 提示：cd <dir> 后再跑 jiade seed）
 			}
 			scale, _ := cmd.Flags().GetString("scale")
 			reset, _ := cmd.Flags().GetBool("reset")
