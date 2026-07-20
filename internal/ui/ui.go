@@ -1,4 +1,4 @@
-// Package ui 提供 jiade 的终端输出（符号前缀，无颜色库依赖）。
+// Package ui provides jiade's terminal output (symbol prefixes, no color-library dependency).
 package ui
 
 import (

@@ -7,21 +7,21 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Options 持有跨子命令共享的全局状态。
+// Options holds state shared across subcommands.
 type Options struct {
-	Dir    string // 目标工程根目录（--dir）
+	Dir    string // target project root (--dir)
 	Stdout io.Writer
 	Stderr io.Writer
 }
 
-// New 返回装配好子命令的 jiade root 命令。
+// New returns the jiade root command with subcommands wired up.
 func New() *cobra.Command {
 	opts := &Options{Stdout: os.Stdout, Stderr: os.Stderr}
 	root := &cobra.Command{
 		Use:   "jiade",
-		Short: "生成「现实世界大工程的缩影」——可运行的行业 Go 工程",
+		Short: "Generate a microcosm of real-world large-scale engineering — a runnable industry Go project",
 	}
-	root.PersistentFlags().StringVar(&opts.Dir, "dir", "", "目标工程根目录（up/down/seed 默认当前目录；init 为空时交互式询问）")
+	root.PersistentFlags().StringVar(&opts.Dir, "dir", "", "target project root (up/down/seed default to the current dir; init prompts if empty)")
 	root.AddCommand(newListCmd(opts))
 	root.AddCommand(newInitCmd(opts))
 	root.AddCommand(newUpCmd(opts))

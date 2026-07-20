@@ -14,6 +14,6 @@ func TestList_PrintsBank(t *testing.T) {
 	}
 	out := opts.Stdout.(*bytes.Buffer).String()
 	if !strings.Contains(out, "bank") {
-		t.Errorf("list 输出应含 bank: %q", out)
+		t.Errorf("list output should contain \"bank\": %q", out)
 	}
 }

@@ -9,7 +9,7 @@ import (
 func newListCmd(opts *Options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "列出可用模板",
+		Short: "List available templates",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			reg, err := template.New()
 			if err != nil {
@@ -21,7 +21,7 @@ func newListCmd(opts *Options) *cobra.Command {
 			}
 			u := ui.New(opts.Stdout, opts.Stderr)
 			if len(names) == 0 {
-				u.Warn("无可用模板")
+				u.Warn("No templates available")
 				return nil
 			}
 			for _, n := range names {
@@ -29,7 +29,7 @@ func newListCmd(opts *Options) *cobra.Command {
 				if m, err := reg.Manifest(n); err == nil {
 					desc = m.Description
 				}
-				u.Step("%s — %s", n, desc)
+				u.Step("%s -- %s", n, desc)
 			}
 			return nil
 		},
