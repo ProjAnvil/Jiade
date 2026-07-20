@@ -12,13 +12,13 @@ A miniature core-banking system — **7 Go microservices + 7 PostgreSQL database
 
 | Service | Port | Database | Contents |
 |---------|------|----------|----------|
-| core-banking | 8080 | core_db | Demand/fixed accounts, double-entry ledger, daily balances, write API (post/reverse) |
-| customer | 8081 | cust_db | Customer info, account relationships (read-only + FDW join) |
-| payment | 8082 | pay_db | Merchants, transfers, consumption txns (read-only + FDW join) |
-| reward | 8083 | reward_db | Points accounts/txns, coupons, campaigns (read-only + FDW join) |
-| risk | 8084 | risk_db | Risk rules, events, blacklist (read-only + FDW join) |
-| loan | 8085 | loan_db | Loan accounts, disbursements, monthly repayment, 5-class overdue, **daily balance snapshots** |
-| wealth | 8086 | wealth_db | Wealth products, **daily NAV walk**, holdings, orders, daily interest |
+| core-banking | 18080 | core_db | Demand/fixed accounts, double-entry ledger, daily balances, write API (post/reverse) |
+| customer | 18081 | cust_db | Customer info, account relationships (read-only + FDW join) |
+| payment | 18082 | pay_db | Merchants, transfers, consumption txns (read-only + FDW join) |
+| reward | 18083 | reward_db | Points accounts/txns, coupons, campaigns (read-only + FDW join) |
+| risk | 18084 | risk_db | Risk rules, events, blacklist (read-only + FDW join) |
+| loan | 18085 | loan_db | Loan accounts, disbursements, monthly repayment, 5-class overdue, **daily balance snapshots** |
+| wealth | 18086 | wealth_db | Wealth products, **daily NAV walk**, holdings, orders, daily interest |
 
 Every service follows the same four-layer vertical slice (`api → service → repo → domain`). Highlights of the data engine:
 
@@ -59,12 +59,12 @@ jiade up      # docker compose up -d
 jiade seed    # go run ./cmd/seed --scale=dev --reset
 
 # 3. Probe it
-curl localhost:8085/healthz                                          # loan
-curl localhost:8086/healthz                                          # wealth
-curl localhost:8085/api/v1/loan/accounts                             # loan list
-curl localhost:8085/api/v1/loan/accounts/LN0000001/profile           # FDW: loan ⋈ customer
-curl 'localhost:8086/api/v1/wealth/nav?product_code=WP-FIX1'         # daily NAV series
-curl 'localhost:8085/api/v1/loan/overdue?overdue_class=可疑'          # 5-class overdue
+curl localhost:18085/healthz                                          # loan
+curl localhost:18086/healthz                                          # wealth
+curl localhost:18085/api/v1/loan/accounts                             # loan list
+curl localhost:18085/api/v1/loan/accounts/LN0000001/profile           # FDW: loan ⋈ customer
+curl 'localhost:18086/api/v1/wealth/nav?product_code=WP-FIX1'         # daily NAV series
+curl 'localhost:18085/api/v1/loan/overdue?overdue_class=可疑'          # 5-class overdue
 
 # 4. Tear down
 jiade down
@@ -100,7 +100,7 @@ go build ./... && go test ./...
 # the bank template (separate module)
 cd templates/bank
 go build ./... && go test ./...
-go test -tags=integration -p 1 ./...   # needs a postgres on localhost:5432 (DB_PORT to override)
+go test -tags=integration -p 1 ./...   # needs a postgres on localhost:15432 (DB_PORT to override)
 
 # after changing templates/bank, re-embed:
 go generate ./internal/template

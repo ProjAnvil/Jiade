@@ -23,15 +23,15 @@ e2e: generate
 	cd /tmp/jiade-e2e && go run ./cmd/seed --scale=dev --reset
 	cd /tmp/jiade-e2e && docker compose up -d --build core-banking customer payment
 	# 三服务 healthz（验收 #4）
-	curl -sf --retry 10 --retry-connrefused --retry-delay 2 localhost:8080/healthz
-	curl -sf --retry 10 --retry-connrefused --retry-delay 2 localhost:8081/healthz
-	curl -sf --retry 10 --retry-connrefused --retry-delay 2 localhost:8082/healthz
+	curl -sf --retry 10 --retry-connrefused --retry-delay 2 localhost:18080/healthz
+	curl -sf --retry 10 --retry-connrefused --retry-delay 2 localhost:18081/healthz
+	curl -sf --retry 10 --retry-connrefused --retry-delay 2 localhost:18082/healthz
 	# core-banking 只读（Spec A）
-	curl -sf localhost:8080/api/v1/accounts/D0000000001
-	curl -sf "localhost:8080/api/v1/accounts/D0000000001/balance"
+	curl -sf localhost:18080/api/v1/accounts/D0000000001
+	curl -sf "localhost:18080/api/v1/accounts/D0000000001/balance"
 	# 2 个跨库 FDW JOIN 端点（验收 #5）
-	curl -sf localhost:8081/api/v1/customers/C0000001/accounts
-	curl -sf localhost:8082/api/v1/payments/transfers/PT000000000001/parties
+	curl -sf localhost:18081/api/v1/customers/C0000001/accounts
+	curl -sf localhost:18082/api/v1/payments/transfers/PT000000000001/parties
 	@echo "E2E OK"
 
 clean:

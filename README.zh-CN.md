@@ -12,13 +12,13 @@
 
 | 服务 | 端口 | 库 | 内容 |
 |------|------|----|------|
-| core-banking | 8080 | core_db | 活期/定存账户、复式记账总账、逐日余额、写接口（过账/冲正） |
-| customer | 8081 | cust_db | 客户信息、账户关系（只读 + FDW JOIN） |
-| payment | 8082 | pay_db | 商户、转账、消费流水（只读 + FDW JOIN） |
-| reward | 8083 | reward_db | 积分账户/流水、优惠券、活动（只读 + FDW JOIN） |
-| risk | 8084 | risk_db | 风控规则、事件、黑名单（只读 + FDW JOIN） |
-| loan | 8085 | loan_db | 借据、放款、月度还款、五级分类逾期、**逐日余额快照** |
-| wealth | 8086 | wealth_db | 理财产品、**逐日净值游走**、持仓、申赎订单、每日利息 |
+| core-banking | 18080 | core_db | 活期/定存账户、复式记账总账、逐日余额、写接口（过账/冲正） |
+| customer | 18081 | cust_db | 客户信息、账户关系（只读 + FDW JOIN） |
+| payment | 18082 | pay_db | 商户、转账、消费流水（只读 + FDW JOIN） |
+| reward | 18083 | reward_db | 积分账户/流水、优惠券、活动（只读 + FDW JOIN） |
+| risk | 18084 | risk_db | 风控规则、事件、黑名单（只读 + FDW JOIN） |
+| loan | 18085 | loan_db | 借据、放款、月度还款、五级分类逾期、**逐日余额快照** |
+| wealth | 18086 | wealth_db | 理财产品、**逐日净值游走**、持仓、申赎订单、每日利息 |
 
 每个服务都是同一个四层纵切（`api → service → repo → domain`）。数据引擎要点：
 
@@ -59,12 +59,12 @@ jiade up      # docker compose up -d
 jiade seed    # go run ./cmd/seed --scale=dev --reset
 
 # 3. 试一试
-curl localhost:8085/healthz                                          # loan
-curl localhost:8086/healthz                                          # wealth
-curl localhost:8085/api/v1/loan/accounts                             # 借据列表
-curl localhost:8085/api/v1/loan/accounts/LN0000001/profile           # 联邦：借据 ⋈ 客户
-curl 'localhost:8086/api/v1/wealth/nav?product_code=WP-FIX1'         # 逐日净值序列
-curl 'localhost:8085/api/v1/loan/overdue?overdue_class=可疑'          # 五级分类逾期
+curl localhost:18085/healthz                                          # loan
+curl localhost:18086/healthz                                          # wealth
+curl localhost:18085/api/v1/loan/accounts                             # 借据列表
+curl localhost:18085/api/v1/loan/accounts/LN0000001/profile           # 联邦：借据 ⋈ 客户
+curl 'localhost:18086/api/v1/wealth/nav?product_code=WP-FIX1'         # 逐日净值序列
+curl 'localhost:18085/api/v1/loan/overdue?overdue_class=可疑'          # 五级分类逾期
 
 # 4. 拆除
 jiade down
@@ -100,7 +100,7 @@ go build ./... && go test ./...
 # bank 模板（独立 module）
 cd templates/bank
 go build ./... && go test ./...
-go test -tags=integration -p 1 ./...   # 需本机 5432 有 postgres（可用 DB_PORT 覆盖）
+go test -tags=integration -p 1 ./...   # 需本机 15432 有 postgres（可用 DB_PORT 覆盖）
 
 # 改动 templates/bank 后重新内嵌：
 go generate ./internal/template
