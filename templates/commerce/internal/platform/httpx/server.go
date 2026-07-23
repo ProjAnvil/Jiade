@@ -1,0 +1,115 @@
+package httpx
+
+import (
+	"context"
+	"errors"
+	"net"
+	"net/http"
+	"sync/atomic"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+const defaultBodyLimit = 1 << 20
+
+// ServerConfig configures a production HTTP server.
+type ServerConfig struct {
+	Service          string
+	Instance         string
+	Addr             string
+	Handler          http.Handler
+	Ready            func(context.Context) error
+	Registry         *prometheus.Registry
+	ShutdownTimeout  time.Duration
+	RequestBodyLimit int64
+}
+
+// Server owns an HTTP server and its readiness state.
+type Server struct {
+	server          *http.Server
+	handler         http.Handler
+	ready           func(context.Context) error
+	shuttingDown    atomic.Bool
+	shutdownTimeout time.Duration
+}
+
+// NewServer creates a server with health, metrics, safety, and observability middleware.
+func NewServer(config ServerConfig) *Server {
+	if config.Addr == "" {
+		config.Addr = ":8080"
+	}
+	if config.ShutdownTimeout <= 0 {
+		config.ShutdownTimeout = 20 * time.Second
+	}
+	if config.RequestBodyLimit <= 0 {
+		config.RequestBodyLimit = defaultBodyLimit
+	}
+
+	server := &Server{ready: config.Ready, shutdownTimeout: config.ShutdownTimeout}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/readyz", server.readiness)
+	if config.Registry == nil {
+		mux.Handle("/metrics", promhttp.Handler())
+	} else {
+		mux.Handle("/metrics", promhttp.HandlerFor(config.Registry, promhttp.HandlerOpts{}))
+	}
+	if config.Handler != nil {
+		mux.Handle("/", config.Handler)
+	}
+
+	server.handler = accessLog(recoverPanic(serviceInstance(config.Instance, requestID(limitBody(config.RequestBodyLimit, mux)))))
+	server.server = &http.Server{
+		Addr:              config.Addr,
+		Handler:           server.handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       time.Minute,
+	}
+	return server
+}
+
+// Handler returns the configured HTTP handler for in-process tests and embedding.
+func (s *Server) Handler() http.Handler { return s.handler }
+
+// Serve serves HTTP requests from listener.
+func (s *Server) Serve(listener net.Listener) error { return s.server.Serve(listener) }
+
+// ListenAndServe starts serving at the configured address.
+func (s *Server) ListenAndServe() error { return s.server.ListenAndServe() }
+
+// Shutdown marks the server unready and gracefully completes in-flight requests.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.shuttingDown.Store(true)
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.shutdownTimeout)
+		defer cancel()
+	}
+	return s.server.Shutdown(ctx)
+}
+
+func (s *Server) readiness(w http.ResponseWriter, r *http.Request) {
+	if s.shuttingDown.Load() {
+		WriteProblem(w, Problem{Status: http.StatusServiceUnavailable, Code: "not_ready"})
+		return
+	}
+	if s.ready != nil {
+		if err := s.ready(r.Context()); err != nil {
+			WriteProblem(w, Problem{Status: http.StatusServiceUnavailable, Code: "not_ready"})
+			return
+		}
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// ErrServerClosed reports the normal terminal error returned after Shutdown.
+var ErrServerClosed = http.ErrServerClosed
+
+// IsClosed reports whether err is the normal server-closed condition.
+func IsClosed(err error) bool { return errors.Is(err, http.ErrServerClosed) }
