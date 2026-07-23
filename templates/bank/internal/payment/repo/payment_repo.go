@@ -1,22 +1,33 @@
-// Package repo 是 payment 服务的仓储层：pgx raw SQL（本库 + 跨库 FDW JOIN）。
+// Package repo is the data access layer of the payment service: SQL of this library + HTTP API of other microservices.
 package repo
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 
 	"bank/internal/payment/domain"
+	"bank/internal/platform/serviceclient"
 )
 
-// PaymentRepo payment 仓储。本库 transfer_txn / merchant 查询，并经 FDW 跨库 JOIN
-// ext_core_db_demand_account + ext_cust_db_cust_info（由 platform/fdw 在 seed 阶段于 pay_db 建立）。
-type PaymentRepo struct{ db *sql.DB }
+// PaymentRepo payment repository. This library only queries transfer_txn/merchant.
+type PaymentRepo struct {
+	db       *sql.DB
+	core     *serviceclient.Client
+	customer *serviceclient.Client
+}
 
-// NewPaymentRepo 构造 PaymentRepo。
-func NewPaymentRepo(db *sql.DB) *PaymentRepo { return &PaymentRepo{db: db} }
+// NewPaymentRepo constructs PaymentRepo.
+func NewPaymentRepo(db *sql.DB) *PaymentRepo {
+	return &PaymentRepo{
+		db:       db,
+		core:     serviceclient.New(getenv("CORE_BANKING_URL", "http://localhost:18080")),
+		customer: serviceclient.New(getenv("CUSTOMER_URL", "http://localhost:18081")),
+	}
+}
 
-// ListTransfers 按账户/日期筛选转账（空则不限），分页。limit<=0 时取 50。
+// ListTransfers filters transfers by account/date (no limit if empty), pagination. When limit<=0, take 50.
 func (r *PaymentRepo) ListTransfers(ctx context.Context, accountNo, from, to string, limit, offset int) ([]domain.Transfer, error) {
 	if limit <= 0 {
 		limit = 50
@@ -38,7 +49,7 @@ func (r *PaymentRepo) ListTransfers(ctx context.Context, accountNo, from, to str
 	return out, nil
 }
 
-// GetTransfer 查单笔转账。不存在返回包装的 sql.ErrNoRows。
+// GetTransfer checks a single transfer. There is no return wrapped sql.ErrNoRows.
 func (r *PaymentRepo) GetTransfer(ctx context.Context, txnID string) (domain.Transfer, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT txn_id,biz_date,out_account,in_account,amount,ccy,fee,channel,counter_bank,status,summary
 		FROM transfer_txn WHERE txn_id=$1`, txnID)
@@ -49,36 +60,49 @@ func (r *PaymentRepo) GetTransfer(ctx context.Context, txnID string) (domain.Tra
 	return t, nil
 }
 
-// GetTransferParties 跨库联邦：transfer_txn JOIN ext_core_db_demand_account(×2) JOIN ext_cust_db_cust_info(×2)。
-// 返回转账双方账户 + 户主客户姓名。
+// GetTransferParties checks the bank transfer, and then calls core-banking/customer to obtain the names of both parties' customers.
 func (r *PaymentRepo) GetTransferParties(ctx context.Context, txnID string) (domain.TransferParty, error) {
-	q := `SELECT t.txn_id, t.amount, t.ccy, t.biz_date,
-			t.out_account, oc.name, t.in_account, ic.name
-		FROM transfer_txn t
-		LEFT JOIN ext_core_db_demand_account od ON t.out_account=od.account_no
-		LEFT JOIN ext_cust_db_cust_info oc ON od.cust_id=oc.cust_id
-		LEFT JOIN ext_core_db_demand_account id ON t.in_account=id.account_no
-		LEFT JOIN ext_cust_db_cust_info ic ON id.cust_id=ic.cust_id
-		WHERE t.txn_id=$1`
 	var p domain.TransferParty
-	var outName, inName sql.NullString
 	var amtStr string
-	err := r.db.QueryRowContext(ctx, q, txnID).Scan(
-		&p.TxnID, &amtStr, &p.Ccy, &p.BizDate,
-		&p.OutAccount, &outName, &p.InAccount, &inName)
+	err := r.db.QueryRowContext(ctx,
+		`SELECT txn_id,amount,ccy,biz_date,out_account,in_account FROM transfer_txn WHERE txn_id=$1`,
+		txnID).Scan(&p.TxnID, &amtStr, &p.Ccy, &p.BizDate, &p.OutAccount, &p.InAccount)
 	if err != nil {
-		return domain.TransferParty{}, fmt.Errorf("repo: 联邦查转账双方 %s: %w", txnID, err)
+		return domain.TransferParty{}, fmt.Errorf("repo: 查转账双方 %s: %w", txnID, err)
 	}
 	amt, err := domain.ParseCents(amtStr)
 	if err != nil {
 		return domain.TransferParty{}, fmt.Errorf("repo: 联邦查转账双方 %s 解析金额: %w", txnID, err)
 	}
 	p.Amount = amt
-	p.OutCustName, p.InCustName = outName.String, inName.String
+	p.OutCustName, err = r.customerNameForAccount(ctx, p.OutAccount)
+	if err != nil {
+		return domain.TransferParty{}, fmt.Errorf("repo: 查转出方 %s: %w", p.OutAccount, err)
+	}
+	p.InCustName, err = r.customerNameForAccount(ctx, p.InAccount)
+	if err != nil {
+		return domain.TransferParty{}, fmt.Errorf("repo: 查转入方 %s: %w", p.InAccount, err)
+	}
 	return p, nil
 }
 
-// GetMerchant 查商户。不存在返回包装的 sql.ErrNoRows。
+func (r *PaymentRepo) customerNameForAccount(ctx context.Context, accountNo string) (string, error) {
+	var account struct {
+		CustID string `json:"cust_id"`
+	}
+	if err := r.core.Get(ctx, "/api/v1/accounts/"+serviceclient.EscapePath(accountNo), &account); err != nil {
+		return "", err
+	}
+	var customer struct {
+		Name string `json:"name"`
+	}
+	if err := r.customer.Get(ctx, "/api/v1/customers/"+serviceclient.EscapePath(account.CustID), &customer); err != nil {
+		return "", err
+	}
+	return customer.Name, nil
+}
+
+// GetMerchant Check merchants. There is no return wrapped sql.ErrNoRows.
 func (r *PaymentRepo) GetMerchant(ctx context.Context, merchantID string) (domain.Merchant, error) {
 	var m domain.Merchant
 	err := r.db.QueryRowContext(ctx, `SELECT merchant_id,merchant_name,mcc,region,status,create_biz_date
@@ -90,7 +114,7 @@ func (r *PaymentRepo) GetMerchant(ctx context.Context, merchantID string) (domai
 	return m, nil
 }
 
-// scanTransfers 批量扫描转账行（DRY：ListTransfers 复用）。
+// scanTransfers scans transfer lines in batches (DRY: ListTransfers multiplexing).
 func scanTransfers(rows *sql.Rows) ([]domain.Transfer, error) {
 	var out []domain.Transfer
 	for rows.Next() {
@@ -106,7 +130,7 @@ func scanTransfers(rows *sql.Rows) ([]domain.Transfer, error) {
 	return out, nil
 }
 
-// scanTransfer 单行扫描（scan 函数由 QueryRow 或 Rows 注入，DRY：Get/List 复用）。
+// scanTransfer single row scan (scan function is injected by QueryRow or Rows, DRY: Get/List multiplexing).
 func scanTransfer(scan func(dest ...any) error) (domain.Transfer, error) {
 	var t domain.Transfer
 	var amount, fee string
@@ -126,4 +150,11 @@ func scanTransfer(scan func(dest ...any) error) (domain.Transfer, error) {
 	t.Amount, t.Fee = amt, f
 	t.Channel, t.CounterBank, t.Summary = channel.String, counter.String, summary.String
 	return t, nil
+}
+
+func getenv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

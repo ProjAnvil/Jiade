@@ -1,4 +1,4 @@
-// Package domain 是 core-banking 的纯领域模型，零 DB/框架依赖（最内层）。
+// Package domain is a pure domain model of core-banking, with zero DB/framework dependencies (innermost layer).
 package domain
 
 import (
@@ -10,15 +10,15 @@ import (
 
 var osReadFile = os.ReadFile
 
-// Money 用 int64 分表示金额。金融禁 float。
-// 构造仅经 NewMoneyFromCents 或 ParseCents——无 float 入口。
+// Money represents the amount in int64 cents. Financial ban float.
+// Constructed only via NewMoneyFromCents or ParseCents - no float entry.
 type Money int64
 
-// NewMoneyFromCents 直接由分构造（推荐入口，无 float）。
+// NewMoneyFromCents is constructed directly from points (recommended entry, no float).
 func NewMoneyFromCents(cents int64) Money { return Money(cents) }
 
-// ParseCents 把 NUMERIC(18,2) 字符串（如 "1234.56"）解析为分（123456）。
-// 纯整数运算，杜绝 float 精度问题。
+// ParseCents Parses a NUMERIC(18,2) string (such as "1234.56") into cents (123456).
+// Pure integer operations, eliminating float precision issues.
 func ParseCents(s string) (Money, error) {
 	s = strings.TrimSpace(s)
 	neg := false
@@ -49,16 +49,16 @@ func ParseCents(s string) (Money, error) {
 	return Money(n), nil
 }
 
-// Add 返回 m+o。
+// Add returns m+o.
 func (m Money) Add(o Money) Money { return m + o }
 
-// Sub 返回 m-o。
+// Sub returns m-o.
 func (m Money) Sub(o Money) Money { return m - o }
 
-// Cents 返回分值。
+// Cents Returns the points value.
 func (m Money) Cents() int64 { return int64(m) }
 
-// String 返回 NUMERIC(18,2) 风格字符串（写入 DB 用），如 "1234.56"。
+// String returns a NUMERIC(18,2) style string (for writing to DB), such as "1234.56".
 func (m Money) String() string {
 	n := int64(m)
 	neg := n < 0

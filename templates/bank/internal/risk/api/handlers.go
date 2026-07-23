@@ -1,4 +1,4 @@
-// Package api 是 risk 服务的传输层：http handlers + chi router。
+// Package api is the transport layer of risk service: http handlers + chi router.
 package api
 
 import (
@@ -13,17 +13,17 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// Handlers 持有 risk 只读服务。
+// Handlers hold risk read-only services.
 type Handlers struct {
 	Svc *service.RiskService
 }
 
-// Healthz 存活检查。
+// Healthz Survival Check.
 func (h *Handlers) Healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// ListEvents 按条件筛选并分页（query: from/to/rule_id/action/offset/limit）。
+// ListEvents is filtered and paginated by conditions (query: from/to/rule_id/action/offset/limit).
 func (h *Handlers) ListEvents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	offset, _ := strconv.Atoi(q.Get("offset"))
@@ -43,7 +43,7 @@ func (h *Handlers) ListEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"events": out})
 }
 
-// GetEvent 查事件详情（跨库联邦 JOIN）。不存在返回 404。
+// GetEvent Check event details (cross-database federation JOIN). Does not exist and returns 404.
 func (h *Handlers) GetEvent(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "event_id")
 	d, err := h.Svc.Event(r.Context(), id)
@@ -64,7 +64,7 @@ func (h *Handlers) GetEvent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListRules 列风控规则（静态）。
+// ListRules lists risk control rules (static).
 func (h *Handlers) ListRules(w http.ResponseWriter, r *http.Request) {
 	rules, err := h.Svc.Rules(r.Context())
 	if err != nil {
@@ -74,7 +74,7 @@ func (h *Handlers) ListRules(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"rules": rules})
 }
 
-// ListBlacklists 按客户筛选黑名单（query: cust_id/offset/limit）。
+// ListBlacklists filters blacklists by customer (query: cust_id/offset/limit).
 func (h *Handlers) ListBlacklists(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	offset, _ := strconv.Atoi(q.Get("offset"))

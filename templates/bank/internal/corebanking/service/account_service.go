@@ -7,7 +7,7 @@ import (
 	"bank/internal/corebanking/domain"
 )
 
-// AccountStore 账户用例的持久化接口（repo 实现）。
+// AccountStore Persistence interface (repo implementation) for account use cases.
 type AccountStore interface {
 	InsertDemand(ctx context.Context, a domain.DemandAccount) error
 	InsertFixed(ctx context.Context, a domain.FixedAccount) error
@@ -22,7 +22,7 @@ func NewAccountService(store AccountStore) *AccountService {
 	return &AccountService{store: store}
 }
 
-// OpenDemand 开活期账户。未指定状态时默认 active；强制新开户为 active。
+// Open a current account with OpenDemand. When the status is not specified, the default is active; new accounts are forced to be active.
 func (s *AccountService) OpenDemand(ctx context.Context, a domain.DemandAccount) error {
 	if a.Status == "" {
 		a.Status = domain.AccountStatusActive
@@ -33,7 +33,7 @@ func (s *AccountService) OpenDemand(ctx context.Context, a domain.DemandAccount)
 	return s.store.InsertDemand(ctx, a)
 }
 
-// OpenFixed 开定期账户（同样默认 active）。
+// OpenFixed opens a fixed account (also defaults to active).
 func (s *AccountService) OpenFixed(ctx context.Context, a domain.FixedAccount) error {
 	if a.Status == "" {
 		a.Status = domain.AccountStatusActive
@@ -41,7 +41,7 @@ func (s *AccountService) OpenFixed(ctx context.Context, a domain.FixedAccount) e
 	return s.store.InsertFixed(ctx, a)
 }
 
-// Close 销户：经状态机校验 active→closed。
+// Close Account cancellation: active→closed after state machine verification.
 func (s *AccountService) Close(ctx context.Context, accountNo string, current domain.AccountStatus) error {
 	next, err := domain.Close(current)
 	if err != nil {
@@ -50,7 +50,7 @@ func (s *AccountService) Close(ctx context.Context, accountNo string, current do
 	return s.store.SetDemandStatus(ctx, accountNo, next)
 }
 
-// Freeze 冻结：active→frozen。
+// Freeze: active→frozen.
 func (s *AccountService) Freeze(ctx context.Context, accountNo string, current domain.AccountStatus) error {
 	next, err := domain.Freeze(current)
 	if err != nil {
@@ -59,7 +59,7 @@ func (s *AccountService) Freeze(ctx context.Context, accountNo string, current d
 	return s.store.SetDemandStatus(ctx, accountNo, next)
 }
 
-// Unfreeze 解冻：frozen→active。
+// Unfreeze: frozen→active.
 func (s *AccountService) Unfreeze(ctx context.Context, accountNo string, current domain.AccountStatus) error {
 	next, err := domain.Unfreeze(current)
 	if err != nil {

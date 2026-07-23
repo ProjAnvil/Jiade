@@ -1,4 +1,4 @@
-// Package api 是 core-banking 传输层：http handlers + chi router。
+// Package api is core-banking transport layer: http handlers + chi router.
 package api
 
 import (
@@ -14,41 +14,43 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// AccountReader 账户只读查询（repo.AccountRepo 实现）。
+// AccountReader account read-only query (implemented by repo.AccountRepo).
 type AccountReader interface {
 	GetDemand(ctx context.Context, accountNo string) (domain.DemandAccount, error)
 	GetFixed(ctx context.Context, accountNo string) (domain.FixedAccount, error)
 }
 
-// LedgerReader 总账只读查询（repo.LedgerRepo 实现）。
+// LedgerReader general ledger read-only query (implemented by repo.LedgerRepo).
 type LedgerReader interface {
 	GetGL(ctx context.Context, bizDate string) ([]domain.GLBalance, error)
 }
 
-// Handlers 持有所有只读依赖。
+// Handlers hold all read-only dependencies.
 type Handlers struct {
 	Accounts AccountReader
 	TxnSvc   *service.TxnService
 	Ledger   LedgerReader
 }
 
-// Healthz 存活检查。
+// Healthz Survival Check.
 func (h *Handlers) Healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// GetAccount 查账户（先活期，无则定期，都无则 404）。
+// GetAccount Check the account (check the current account first, if there is no current account, then regular account, if there are none, then 404).
 func (h *Handlers) GetAccount(w http.ResponseWriter, r *http.Request) {
 	no := chiURLParam(r, "account_no")
 	ctx := r.Context()
 	if d, err := h.Accounts.GetDemand(ctx, no); err == nil {
 		writeJSON(w, http.StatusOK, accountResp{
 			AccountNo: d.AccountNo, CustID: d.CustID, Type: "demand",
-			Ccy: d.Ccy, Status: string(d.Status),
+			Ccy: d.Ccy, Status: string(d.Status), OpenBizDate: d.OpenBizDate,
+			BranchCode: d.BranchCode,
 		})
 		return
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		writeJSON(w, http.StatusInternalServerError, errMap(err)); return
+		writeJSON(w, http.StatusInternalServerError, errMap(err))
+		return
 	}
 	if f, err := h.Accounts.GetFixed(ctx, no); err == nil {
 		writeJSON(w, http.StatusOK, accountResp{
@@ -61,11 +63,12 @@ func (h *Handlers) GetAccount(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errMap(errors.New("账户不存在")))
 		return
 	} else {
-		writeJSON(w, http.StatusInternalServerError, errMap(err)); return
+		writeJSON(w, http.StatusInternalServerError, errMap(err))
+		return
 	}
 }
 
-// GetBalance 查最新 biz_date 余额。
+// GetBalance checks the latest biz_date balance.
 func (h *Handlers) GetBalance(w http.ResponseWriter, r *http.Request) {
 	no := chiURLParam(r, "account_no")
 	b, err := h.TxnSvc.GetBalance(r.Context(), no)
@@ -74,7 +77,8 @@ func (h *Handlers) GetBalance(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, errMap(errors.New("无余额记录")))
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, errMap(err)); return
+		writeJSON(w, http.StatusInternalServerError, errMap(err))
+		return
 	}
 	writeJSON(w, http.StatusOK, balanceResp{
 		AccountNo: b.AccountNo, BizDate: b.BizDate, Balance: b.Balance.String(),
@@ -82,12 +86,13 @@ func (h *Handlers) GetBalance(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListTxns 查流水（query: account_no/from/to）。
+// ListTxns Check the transaction (query: account_no/from/to).
 func (h *Handlers) ListTxns(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	txns, err := h.TxnSvc.ListTxns(r.Context(), q.Get("account_no"), q.Get("from"), q.Get("to"))
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errMap(err)); return
+		writeJSON(w, http.StatusInternalServerError, errMap(err))
+		return
 	}
 	out := make([]txnResp, 0, len(txns))
 	for _, t := range txns {
@@ -99,15 +104,17 @@ func (h *Handlers) ListTxns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"txns": out})
 }
 
-// GetLedger 查总账（query: biz_date）。
+// GetLedger checks the general ledger (query: biz_date).
 func (h *Handlers) GetLedger(w http.ResponseWriter, r *http.Request) {
 	bizDate := r.URL.Query().Get("biz_date")
 	if bizDate == "" {
-		writeJSON(w, http.StatusBadRequest, errMap(errors.New("缺少 biz_date"))); return
+		writeJSON(w, http.StatusBadRequest, errMap(errors.New("缺少 biz_date")))
+		return
 	}
 	gls, err := h.Ledger.GetGL(r.Context(), bizDate)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errMap(err)); return
+		writeJSON(w, http.StatusInternalServerError, errMap(err))
+		return
 	}
 	out := make([]ledgerResp, 0, len(gls))
 	for _, g := range gls {
@@ -119,21 +126,25 @@ func (h *Handlers) GetLedger(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ledger": out})
 }
 
-// PostTxn 记账：业务意图 → 复式过账。
+// PostTxn Accounting: Business Intent → Double Entry Posting.
 func (h *Handlers) PostTxn(w http.ResponseWriter, r *http.Request) {
 	var req postTxnReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errMap(errors.New("请求体非法 JSON"))); return
+		writeJSON(w, http.StatusBadRequest, errMap(errors.New("请求体非法 JSON")))
+		return
 	}
 	if req.Action == "" {
-		writeJSON(w, http.StatusBadRequest, errMap(errors.New("缺少 action"))); return
+		writeJSON(w, http.StatusBadRequest, errMap(errors.New("缺少 action")))
+		return
 	}
 	if req.Amount == "" {
-		writeJSON(w, http.StatusBadRequest, errMap(errors.New("缺少 amount"))); return
+		writeJSON(w, http.StatusBadRequest, errMap(errors.New("缺少 amount")))
+		return
 	}
 	amt, err := domain.ParseCents(req.Amount)
 	if err != nil || amt <= 0 {
-		writeJSON(w, http.StatusBadRequest, errMap(errors.New("amount 非法（须元.分且>0）"))); return
+		writeJSON(w, http.StatusBadRequest, errMap(errors.New("amount 非法（须元.分且>0）")))
+		return
 	}
 	in := service.RecordInput{
 		Action: domain.Action(req.Action), Amount: amt, Ccy: req.Ccy, Summary: req.Summary,
@@ -141,12 +152,13 @@ func (h *Handlers) PostTxn(w http.ResponseWriter, r *http.Request) {
 	}
 	booking, err := h.TxnSvc.Record(r.Context(), in)
 	if err != nil {
-		writeJSON(w, statusFor(err), errMap(err)); return
+		writeJSON(w, statusFor(err), errMap(err))
+		return
 	}
 	writeJSON(w, http.StatusCreated, bookingToResp(booking))
 }
 
-// ReverseVoucher 冲正：?mode=blue|red（默认 blue）。
+// ReverseVoucher correction:?mode=blue|red (default blue).
 func (h *Handlers) ReverseVoucher(w http.ResponseWriter, r *http.Request) {
 	voucherNo := chiURLParam(r, "voucher_no")
 	mode := domain.ReverseMode(r.URL.Query().Get("mode"))
@@ -154,19 +166,21 @@ func (h *Handlers) ReverseVoucher(w http.ResponseWriter, r *http.Request) {
 		mode = domain.ReverseBlue
 	}
 	if mode != domain.ReverseBlue && mode != domain.ReverseRed {
-		writeJSON(w, http.StatusBadRequest, errMap(errors.New("mode 须 blue 或 red"))); return
+		writeJSON(w, http.StatusBadRequest, errMap(errors.New("mode 须 blue 或 red")))
+		return
 	}
 	res, err := h.TxnSvc.Reverse(r.Context(), voucherNo, mode)
 	if err != nil {
-		writeJSON(w, statusFor(err), errMap(err)); return
+		writeJSON(w, statusFor(err), errMap(err))
+		return
 	}
 	writeJSON(w, http.StatusOK, reverseToResp(res))
 }
 
-// statusFor 把 service 层错误映射到 HTTP 状态码。
+// statusFor maps service layer errors to HTTP status codes.
 func statusFor(err error) int {
-	// Postgres 死锁（SQLSTATE 40P01）→ 409 Conflict（spec §8.3：客户端可安全重试）。
-	// 必须先于 switch 检查：pgconn.PgError 是底层驱动错误，不会被 service 的哨兵 errors.Is 命中。
+	// Postgres Deadlock (SQLSTATE 40P01) → 409 Conflict (spec §8.3: Client can safely retry).
+	// Must be checked before switch: pgconn.PgError is an underlying driver error and will not be hit by the service's sentinel errors.Is.
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "40P01" {
 		return http.StatusConflict
@@ -188,15 +202,17 @@ func statusFor(err error) int {
 // --- DTO ---
 
 type accountResp struct {
-	AccountNo  string `json:"account_no"`
-	CustID     string `json:"cust_id"`
-	Type       string `json:"type"`
-	Ccy        string `json:"ccy"`
-	Status     string `json:"status"`
-	Principal  string `json:"principal,omitempty"`
-	Rate       string `json:"rate,omitempty"`
-	Term       int    `json:"term_months,omitempty"`
-	MatureDate string `json:"mature_date,omitempty"`
+	AccountNo   string `json:"account_no"`
+	CustID      string `json:"cust_id"`
+	Type        string `json:"type"`
+	Ccy         string `json:"ccy"`
+	Status      string `json:"status"`
+	Principal   string `json:"principal,omitempty"`
+	Rate        string `json:"rate,omitempty"`
+	Term        int    `json:"term_months,omitempty"`
+	MatureDate  string `json:"mature_date,omitempty"`
+	OpenBizDate string `json:"open_biz_date,omitempty"`
+	BranchCode  string `json:"branch_code,omitempty"`
 }
 
 type balanceResp struct {

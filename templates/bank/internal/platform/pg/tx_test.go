@@ -29,7 +29,7 @@ func TestRunInTx_RollsBackOnError(t *testing.T) {
 			VALUES ('TX-D1','C','CNY','active','2026-07-15','2011')`); e != nil {
 			return e
 		}
-		return boom // 故意失败
+		return boom // Failure on purpose
 	})
 	if err != boom {
 		t.Fatalf("应透出 boom, got %v", err)
@@ -47,5 +47,5 @@ func (errBoom) Error() string { return "boom" }
 
 var _ error = errBoom{}
 
-// 兼容 sql.Result 编译期检查
+// Compatible with sql.Result compile-time check
 var _ = func() { var _ sql.Result = nil }

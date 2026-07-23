@@ -1,21 +1,31 @@
-// Package repo 是 loan 服务的仓储层：pgx raw SQL（本库 + 跨库 FDW JOIN）。
+// Package repo is the data access layer of the loan service: this library SQL + customer HTTP API.
 package repo
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 
 	"bank/internal/loan/domain"
+	"bank/internal/platform/serviceclient"
 )
 
-// LoanRepo loan 仓储。本库 loan_* 查询，并经 FDW 跨库 JOIN cust_db.cust_info。
-type LoanRepo struct{ db *sql.DB }
+// LoanRepo loan warehousing. This library only queries loan_*.
+type LoanRepo struct {
+	db       *sql.DB
+	customer *serviceclient.Client
+}
 
-// NewLoanRepo 构造 LoanRepo。
-func NewLoanRepo(db *sql.DB) *LoanRepo { return &LoanRepo{db: db} }
+// NewLoanRepo constructs LoanRepo.
+func NewLoanRepo(db *sql.DB) *LoanRepo {
+	return &LoanRepo{
+		db:       db,
+		customer: serviceclient.New(getenv("CUSTOMER_URL", "http://localhost:18081")),
+	}
+}
 
-// ListProducts 列贷款产品（静态全量）。
+// ListProducts lists loan products (static full quantity).
 func (r *LoanRepo) ListProducts(ctx context.Context) ([]domain.LoanProduct, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT product_code,product_name,loan_type,rate_type,min_rate,max_rate,max_term,max_amount,status
@@ -45,7 +55,7 @@ func (r *LoanRepo) ListProducts(ctx context.Context) ([]domain.LoanProduct, erro
 	return out, nil
 }
 
-// ListAccounts 按产品/状态筛选借据（空则不限），分页。limit<=0 取 50。
+// ListAccounts filters IOUs by product/status (no limit if empty), pagination. limit<=0 takes 50.
 func (r *LoanRepo) ListAccounts(ctx context.Context, productCode, status string, offset, limit int) ([]domain.LoanAccount, error) {
 	if limit <= 0 {
 		limit = 50
@@ -72,7 +82,7 @@ func (r *LoanRepo) ListAccounts(ctx context.Context, productCode, status string,
 	return out, nil
 }
 
-// GetAccount 查单个借据。不存在返回包装 sql.ErrNoRows。
+// GetAccount checks a single IOU. Return wrapper sql.ErrNoRows does not exist.
 func (r *LoanRepo) GetAccount(ctx context.Context, loanNo string) (domain.LoanAccount, error) {
 	a, err := scanAccount(r.db.QueryRowContext(ctx,
 		`SELECT loan_no,cust_id,product_code,ccy,principal,balance,rate,start_biz_date,mature_date,term_months,status,guarantee_type,branch_code
@@ -83,7 +93,7 @@ func (r *LoanRepo) GetAccount(ctx context.Context, loanNo string) (domain.LoanAc
 	return a, nil
 }
 
-// ListBalances 按日期范围/借据查逐日余额快照（空则不限），分页。
+// ListBalances Check daily balance snapshots by date range/IOU (no limit if empty), paging.
 func (r *LoanRepo) ListBalances(ctx context.Context, from, to, loanNo string, offset, limit int) ([]domain.LoanBalance, error) {
 	if limit <= 0 {
 		limit = 50
@@ -120,7 +130,7 @@ func (r *LoanRepo) ListBalances(ctx context.Context, from, to, loanNo string, of
 	return out, nil
 }
 
-// ListOverdue 按五级分类/日期范围查逾期（空则不限），分页。
+// ListOverdue checks overdue items by five-level classification/date range (no limit if empty), pagination.
 func (r *LoanRepo) ListOverdue(ctx context.Context, overdueClass, from, to string, offset, limit int) ([]domain.LoanOverdue, error) {
 	if limit <= 0 {
 		limit = 50
@@ -155,18 +165,15 @@ func (r *LoanRepo) ListOverdue(ctx context.Context, overdueClass, from, to strin
 	return out, nil
 }
 
-// GetProfile 跨库联邦：loan_account JOIN ext_cust_db_cust_info → 借据本金/余额 + 客户姓名/类型。
+// GetProfile checks the library IOU, and then calls customer to obtain the customer name/type.
 func (r *LoanRepo) GetProfile(ctx context.Context, loanNo string) (domain.LoanProfile, error) {
 	var p domain.LoanProfile
-	var principal, balance, rate, status, name, ctype sql.NullString
+	var principal, balance, rate, status sql.NullString
 	err := r.db.QueryRowContext(ctx,
-		`SELECT la.loan_no, la.cust_id, la.principal, la.balance, la.rate, la.status, ci.name, ci.cust_type
-		FROM loan_account la
-		LEFT JOIN ext_cust_db_cust_info ci ON la.cust_id=ci.cust_id
-		WHERE la.loan_no=$1`, loanNo).
-		Scan(&p.LoanNo, &p.CustID, &principal, &balance, &rate, &status, &name, &ctype)
+		`SELECT loan_no,cust_id,principal,balance,rate,status FROM loan_account WHERE loan_no=$1`, loanNo).
+		Scan(&p.LoanNo, &p.CustID, &principal, &balance, &rate, &status)
 	if err != nil {
-		return domain.LoanProfile{}, fmt.Errorf("repo: 联邦查借据档案 %s: %w", loanNo, err)
+		return domain.LoanProfile{}, fmt.Errorf("repo: 查借据档案 %s: %w", loanNo, err)
 	}
 	if p.Principal, err = domain.ParseCents(principal.String); err != nil {
 		return domain.LoanProfile{}, fmt.Errorf("repo: 解析借据本金: %w", err)
@@ -174,11 +181,18 @@ func (r *LoanRepo) GetProfile(ctx context.Context, loanNo string) (domain.LoanPr
 	if p.Balance, err = domain.ParseCents(balance.String); err != nil {
 		return domain.LoanProfile{}, fmt.Errorf("repo: 解析借据余额: %w", err)
 	}
-	p.Rate, p.Status, p.CustName, p.CustType = rate.String, status.String, name.String, ctype.String
+	var customer struct {
+		Name     string `json:"name"`
+		CustType string `json:"cust_type"`
+	}
+	if err := r.customer.Get(ctx, "/api/v1/customers/"+serviceclient.EscapePath(p.CustID), &customer); err != nil {
+		return domain.LoanProfile{}, fmt.Errorf("repo: 从 customer 查客户 %s: %w", p.CustID, err)
+	}
+	p.Rate, p.Status, p.CustName, p.CustType = rate.String, status.String, customer.Name, customer.CustType
 	return p, nil
 }
 
-// scanAccount 扫描单行 loan_account（scan 函数由 QueryRow 或 Rows 注入）。
+// scanAccount scans a single row loan_account (scan function is injected by QueryRow or Rows).
 func scanAccount(scan func(dest ...any) error) (domain.LoanAccount, error) {
 	var a domain.LoanAccount
 	var principal, balance, rate, guarantee, branch sql.NullString
@@ -195,4 +209,11 @@ func scanAccount(scan func(dest ...any) error) (domain.LoanAccount, error) {
 	}
 	a.Rate, a.GuaranteeType, a.BranchCode = rate.String, guarantee.String, branch.String
 	return a, nil
+}
+
+func getenv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

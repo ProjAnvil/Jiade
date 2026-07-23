@@ -1,24 +1,24 @@
 package domain
 
-// DCFlag 借贷标志（复式记账核心）。
+// DCFlag Debit and credit flag (core of double-entry accounting).
 type DCFlag string
 
 const (
-	DCDebit  DCFlag = "借" // 资产、费用增加
-	DCCredit DCFlag = "贷" // 负债、收入增加
+	DCDebit  DCFlag = "借" // Increase in assets and expenses
+	DCCredit DCFlag = "贷" // Increase in liabilities and income
 )
 
-// Subject 会计科目（对应 chart_of_acct 表）。
+// Subject accounting account (corresponding to chart_of_acct table).
 type Subject struct {
 	Code       string
 	Name       string
-	DCAttr     DCFlag // 科目借贷属性
+	DCAttr     DCFlag // Account loan attributes
 	Level      int
 	ParentCode string
 	Status     string
 }
 
-// Entry 一笔复式记账分录：哪个账户、借或贷、多少、入哪个科目。
+// Entry A double-entry accounting entry: which account, debit or credit, how much, and into which account.
 type Entry struct {
 	AccountNo   string
 	DCFlag      DCFlag
@@ -26,17 +26,17 @@ type Entry struct {
 	SubjectCode string
 }
 
-// GLBalance 总账余额（对应 gl_balance 表）。
+// GLBalance General ledger balance (corresponding to gl_balance table).
 type GLBalance struct {
 	SubjectCode string
 	BizDate     string
-	DCBalance   Money // 借方余额
-	CCBalance   Money // 贷方余额
+	DCBalance   Money // debit balance
+	CCBalance   Money // credit balance
 	Ccy         string
 }
 
-// BalanceDelta 某账户在某 biz_date 的余额增量（贷为正、借为负）。
-// 过账时由 service 计算并交给 repo 累加。
+// BalanceDelta is the balance increment of an account on a certain biz_date (credit is positive, debit is negative).
+// When posting, it is calculated by service and handed over to repo for accumulation.
 type BalanceDelta struct {
 	AccountNo   string
 	Delta       Money

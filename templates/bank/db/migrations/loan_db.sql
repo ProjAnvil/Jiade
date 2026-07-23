@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS loan_product (
     product_code TEXT PRIMARY KEY,
     product_name TEXT NOT NULL,
-    loan_type    TEXT NOT NULL,              -- 个人/对公/房贷/消费/经营
+    loan_type    TEXT NOT NULL,              -- Personal/Corporate/Mortgage/Consumption/Business
     rate_type    TEXT,
     min_rate     NUMERIC(10,6),
     max_rate     NUMERIC(10,6),
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS loan_account (
     mature_date     DATE NOT NULL,
     term_months     INTEGER NOT NULL,
     status          TEXT DEFAULT 'disbursed',-- 放款/还款中/结清/逾期
-    guarantee_type  TEXT,                    -- 信用/抵押/保证
+    guarantee_type  TEXT,                    -- Credit/Mortgage/Guarantee
     branch_code     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_loan_account_cust ON loan_account(cust_id);
@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS loan_repay (
     interest_amt   NUMERIC(18,2) NOT NULL,
     paid_principal NUMERIC(18,2) DEFAULT 0,
     paid_interest  NUMERIC(18,2) DEFAULT 0,
-    status         TEXT DEFAULT 'open'       -- 未到期/已还/逾期
+    status         TEXT DEFAULT 'open'       -- Not due/repaid/overdue
 );
 CREATE INDEX IF NOT EXISTS idx_loan_repay_bizdate ON loan_repay(biz_date);
 CREATE INDEX IF NOT EXISTS idx_loan_repay_loan ON loan_repay(loan_no);
@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS loan_overdue (
     biz_date       DATE NOT NULL,
     loan_no        TEXT NOT NULL,
     overdue_days   INTEGER NOT NULL,
-    overdue_class  TEXT NOT NULL,            -- 正常/关注/次级/可疑/损失
+    overdue_class  TEXT NOT NULL,            -- Normal/Concern/Secondary/Suspicious/Loss
     overdue_amount NUMERIC(18,2) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_loan_overdue_bizdate ON loan_overdue(biz_date);

@@ -2,7 +2,7 @@ package domain
 
 import "fmt"
 
-// AccountStatus 账户状态。
+// AccountStatus Account status.
 type AccountStatus string
 
 const (
@@ -11,13 +11,13 @@ const (
 	AccountStatusFrozen AccountStatus = "frozen"
 )
 
-// 账户状态机（合法迁移）：
+// Account state machine (legal migration):
 //
-//	active --Close--> closed（终态）
+//active --Close--> closed (final state)
 //	active --Freeze--> frozen
 //	frozen --Unfreeze--> active
 
-// Close 销户：仅 active → closed。
+// Close account cancellation: only active → closed.
 func Close(from AccountStatus) (AccountStatus, error) {
 	if from == AccountStatusActive {
 		return AccountStatusClosed, nil
@@ -25,7 +25,7 @@ func Close(from AccountStatus) (AccountStatus, error) {
 	return from, fmt.Errorf("account: 只有 active 可销户，当前 %q", from)
 }
 
-// Freeze 冻结：仅 active → frozen。
+// Freeze: only active → frozen.
 func Freeze(from AccountStatus) (AccountStatus, error) {
 	if from == AccountStatusActive {
 		return AccountStatusFrozen, nil
@@ -33,7 +33,7 @@ func Freeze(from AccountStatus) (AccountStatus, error) {
 	return from, fmt.Errorf("account: 只有 active 可冻结，当前 %q", from)
 }
 
-// Unfreeze 解冻：仅 frozen → active。
+// Unfreeze: only frozen → active.
 func Unfreeze(from AccountStatus) (AccountStatus, error) {
 	if from == AccountStatusFrozen {
 		return AccountStatusActive, nil
@@ -41,7 +41,7 @@ func Unfreeze(from AccountStatus) (AccountStatus, error) {
 	return from, fmt.Errorf("account: 只有 frozen 可解冻，当前 %q", from)
 }
 
-// DemandAccount 活期账户（对应 demand_account 表）。
+// DemandAccount current account (corresponds to demand_account table).
 type DemandAccount struct {
 	AccountNo   string
 	CustID      string
@@ -53,8 +53,8 @@ type DemandAccount struct {
 	SubjectCode string
 }
 
-// FixedAccount 定期账户（对应 fixed_account 表）。Principal 为金额（分），
-// Rate 为 NUMERIC(10,6) 字符串（禁 float 运算，透传）。
+// FixedAccount fixed account (corresponding to fixed_account table). Principal is the amount (cents),
+// Rate is a NUMERIC(10,6) string (float operation is prohibited and transparent transmission is prohibited).
 type FixedAccount struct {
 	AccountNo    string
 	CustID       string

@@ -9,8 +9,8 @@ import (
 	"bank/internal/fixtures"
 )
 
-// GenCustomers 生成 n 个客户（cust_id=C%07d(j+1)，与 core 账户的 cust_id 编号一致）。
-// 20% 对公（j%5==0）。rng 偏移 +10。
+// GenCustomers generates n customers (cust_id=C%07d(j+1), consistent with the cust_id number of the core account).
+// 20% for men (j%5==0). rng offset +10.
 func GenCustomers(cfg fixtures.Config, n int) []domain.Customer {
 	rng := fixtures.NewRNG(cfg.Seed + 10)
 	out := make([]domain.Customer, n)
@@ -41,7 +41,7 @@ func GenCustomers(cfg fixtures.Config, n int) []domain.Customer {
 	return out
 }
 
-// GenAccountRels 由 (custID, accountNo) 对生成户主关系。rel_id 确定性。
+// GenAccountRels generates household head relationships from (custID, accountNo) pairs. rel_id deterministic.
 func GenAccountRels(pairs [][2]string) []domain.AccountRel {
 	out := make([]domain.AccountRel, len(pairs))
 	for i, p := range pairs {
@@ -53,7 +53,7 @@ func GenAccountRels(pairs [][2]string) []domain.AccountRel {
 	return out
 }
 
-// WriteCustomers 幂等写 cust_info（先 DELETE 后 INSERT）。
+// WriteCustomers writes cust_info idempotently (DELETE first and then INSERT).
 func WriteCustomers(ctx context.Context, db *sql.DB, rows []domain.Customer) error {
 	if _, err := db.ExecContext(ctx, "DELETE FROM cust_info"); err != nil {
 		return fmt.Errorf("清空 cust_info: %w", err)
@@ -77,7 +77,7 @@ func WriteCustomers(ctx context.Context, db *sql.DB, rows []domain.Customer) err
 	return nil
 }
 
-// WriteAccountRels 幂等写 cust_account_rel。
+// WriteAccountRels Idempotent writes cust_account_rel.
 func WriteAccountRels(ctx context.Context, db *sql.DB, rels []domain.AccountRel) error {
 	if _, err := db.ExecContext(ctx, "DELETE FROM cust_account_rel"); err != nil {
 		return err
@@ -92,12 +92,12 @@ func WriteAccountRels(ctx context.Context, db *sql.DB, rels []domain.AccountRel)
 	return nil
 }
 
-// orgName 生成对公客户名（行业 + "有限公司"）。
+// orgName generates the corporate customer name (industry + "Limited Company").
 func orgName(rng *fixtures.RNG) string {
 	return rng.Choice(fixtures.Industries) + rng.Choice(fixtures.CustRegions) + "有限公司"
 }
 
-// numerify 生成 n 位数字串（确定性）。
+// numerify generates an n-digit numeric string (deterministically).
 func numerify(rng *fixtures.RNG, n int) string {
 	const digits = "0123456789"
 	b := make([]byte, n)

@@ -1,21 +1,31 @@
-// Package repo 是 wealth 服务的仓储层：pgx raw SQL（本库 + 跨库 FDW JOIN）。
+// Package repo is the data access layer of wealth service: this library SQL + customer HTTP API.
 package repo
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 
+	"bank/internal/platform/serviceclient"
 	"bank/internal/wealth/domain"
 )
 
-// WealthRepo wealth 仓储。本库 wealth_* 查询，并经 FDW 跨库 JOIN cust_db.cust_info。
-type WealthRepo struct{ db *sql.DB }
+// WealthRepo wealth storage. This library only queries wealth_*.
+type WealthRepo struct {
+	db       *sql.DB
+	customer *serviceclient.Client
+}
 
-// NewWealthRepo 构造 WealthRepo。
-func NewWealthRepo(db *sql.DB) *WealthRepo { return &WealthRepo{db: db} }
+// NewWealthRepo Constructs WealthRepo.
+func NewWealthRepo(db *sql.DB) *WealthRepo {
+	return &WealthRepo{
+		db:       db,
+		customer: serviceclient.New(getenv("CUSTOMER_URL", "http://localhost:18081")),
+	}
+}
 
-// ListProducts 列理财产品（静态全量）。
+// ListProducts lists financial products (static full quantity).
 func (r *WealthRepo) ListProducts(ctx context.Context) ([]domain.WealthProduct, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT product_code,product_name,product_type,risk_level,expected_return,min_amount,term_days,start_biz_date,end_biz_date,status
@@ -45,7 +55,7 @@ func (r *WealthRepo) ListProducts(ctx context.Context) ([]domain.WealthProduct, 
 	return out, nil
 }
 
-// ListNav 按产品/日期范围查每日净值（空则不限；序列量小不分页）。
+// ListNav checks the daily net value by product/date range (no limit if empty; no pagination if the sequence volume is small).
 func (r *WealthRepo) ListNav(ctx context.Context, productCode, from, to string) ([]domain.WealthNav, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT product_code,biz_date,nav,accum_nav FROM wealth_nav
@@ -73,7 +83,7 @@ func (r *WealthRepo) ListNav(ctx context.Context, productCode, from, to string) 
 	return out, nil
 }
 
-// ListHoldings 按客户筛选持仓（空则不限），分页。limit<=0 取 50。
+// ListHoldings filters holdings by customer (no limit if empty), pagination. limit<=0 takes 50.
 func (r *WealthRepo) ListHoldings(ctx context.Context, custID string, offset, limit int) ([]domain.WealthHolding, error) {
 	if limit <= 0 {
 		limit = 50
@@ -99,7 +109,7 @@ func (r *WealthRepo) ListHoldings(ctx context.Context, custID string, offset, li
 	return out, nil
 }
 
-// ListOrders 按客户/产品/日期范围查订单（空则不限），分页。
+// ListOrders Check orders by customer/product/date range (no limit if empty), pagination.
 func (r *WealthRepo) ListOrders(ctx context.Context, custID, productCode, from, to string, offset, limit int) ([]domain.WealthOrder, error) {
 	if limit <= 0 {
 		limit = 50
@@ -134,7 +144,7 @@ func (r *WealthRepo) ListOrders(ctx context.Context, custID, productCode, from, 
 	return out, nil
 }
 
-// ListIncomes 按持仓/日期范围查收益（空则不限），分页。
+// ListIncomes Check the income by position/date range (no limit if empty), paging.
 func (r *WealthRepo) ListIncomes(ctx context.Context, holdingID, from, to string, offset, limit int) ([]domain.WealthIncome, error) {
 	if limit <= 0 {
 		limit = 50
@@ -169,28 +179,32 @@ func (r *WealthRepo) ListIncomes(ctx context.Context, holdingID, from, to string
 	return out, nil
 }
 
-// GetHoldingProfile 跨库联邦：wealth_holding JOIN ext_cust_db_cust_info → 持仓份额/市值 + 客户姓名/类型。
+// GetHoldingProfile checks the library's holdings, and then calls customer to obtain the customer's name/type.
 func (r *WealthRepo) GetHoldingProfile(ctx context.Context, holdingID string) (domain.WealthProfile, error) {
 	var p domain.WealthProfile
-	var share, cv, name, ctype sql.NullString
+	var share, cv sql.NullString
 	err := r.db.QueryRowContext(ctx,
-		`SELECT h.holding_id, h.cust_id, h.product_code, h.share, h.current_value, ci.name, ci.cust_type
-		FROM wealth_holding h
-		LEFT JOIN ext_cust_db_cust_info ci ON h.cust_id=ci.cust_id
-		WHERE h.holding_id=$1`, holdingID).
-		Scan(&p.HoldingID, &p.CustID, &p.ProductCode, &share, &cv, &name, &ctype)
+		`SELECT holding_id,cust_id,product_code,share,current_value FROM wealth_holding WHERE holding_id=$1`, holdingID).
+		Scan(&p.HoldingID, &p.CustID, &p.ProductCode, &share, &cv)
 	if err != nil {
-		return domain.WealthProfile{}, fmt.Errorf("repo: 联邦查持仓档案 %s: %w", holdingID, err)
+		return domain.WealthProfile{}, fmt.Errorf("repo: 查持仓档案 %s: %w", holdingID, err)
 	}
 	m, err := domain.ParseCents(cv.String)
 	if err != nil {
 		return domain.WealthProfile{}, fmt.Errorf("repo: 解析持仓市值: %w", err)
 	}
-	p.Share, p.CurrentValue, p.CustName, p.CustType = share.String, m, name.String, ctype.String
+	var customer struct {
+		Name     string `json:"name"`
+		CustType string `json:"cust_type"`
+	}
+	if err := r.customer.Get(ctx, "/api/v1/customers/"+serviceclient.EscapePath(p.CustID), &customer); err != nil {
+		return domain.WealthProfile{}, fmt.Errorf("repo: 从 customer 查客户 %s: %w", p.CustID, err)
+	}
+	p.Share, p.CurrentValue, p.CustName, p.CustType = share.String, m, customer.Name, customer.CustType
 	return p, nil
 }
 
-// scanHolding 扫描单行 wealth_holding（scan 函数由 QueryRow 或 Rows 注入）。
+// scanHolding scans a single row wealth_holding (scan function is injected by QueryRow or Rows).
 func scanHolding(scan func(dest ...any) error) (domain.WealthHolding, error) {
 	var h domain.WealthHolding
 	var share, cost, cv sql.NullString
@@ -206,4 +220,11 @@ func scanHolding(scan func(dest ...any) error) (domain.WealthHolding, error) {
 	}
 	h.Share = share.String
 	return h, nil
+}
+
+func getenv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

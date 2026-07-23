@@ -11,18 +11,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Registry 已发现的内嵌模板集合（从 templates.tar）。
+// Registry A collection of discovered inline templates (from templates.tar).
 type Registry struct{}
 
-// New 验证 templates.tar 已打包。
+// New Verify templates.tar is packaged.
 func New() (*Registry, error) {
 	if len(templatesTar) == 0 {
-		return nil, fmt.Errorf("template: templates.tar 为空（运行 go generate ./internal/template 重新打包）")
+		return nil, fmt.Errorf("template: templates.tar is empty (run go generate ./internal/template to rebuild it)")
 	}
 	return &Registry{}, nil
 }
 
-// Names 返回 tar 内顶层模板名（排序）。
+// Names returns the top-level template name in tar (sorted).
 func (r *Registry) Names() ([]string, error) {
 	seen := map[string]bool{}
 	tr := tar.NewReader(bytes.NewReader(templatesTar))
@@ -47,15 +47,15 @@ func (r *Registry) Names() ([]string, error) {
 	return names, nil
 }
 
-// Manifest 读某模板的 template.yaml。
+// Manifest reads template.yaml of a certain template.
 func (r *Registry) Manifest(name string) (*Manifest, error) {
 	data, err := readTarFile(name + "/template.yaml")
 	if err != nil {
-		return nil, fmt.Errorf("template: 读 %s/template.yaml: %w", name, err)
+		return nil, fmt.Errorf("template: read %s/template.yaml: %w", name, err)
 	}
 	var m Manifest
 	if err := yaml.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("template: 解析 %s manifest: %w", name, err)
+		return nil, fmt.Errorf("template: parse %s manifest: %w", name, err)
 	}
 	return &m, nil
 }

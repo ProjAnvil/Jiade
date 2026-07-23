@@ -1,32 +1,32 @@
-// Package domain 是 risk 服务的纯领域模型，零 DB/框架依赖（最内层）。
-// risk 无金额字段：risk_score/threshold 作 NUMERIC 文本直存（不引入 Money）。
+// Package domain is a pure domain model of the risk service, with zero DB/framework dependencies (innermost layer).
+// risk has no amount field: risk_score/threshold is used as NUMERIC text direct deposit (without introducing Money).
 package domain
 
-// RiskRule 对应 risk_rule 表。
+// RiskRule corresponds to the risk_rule table.
 type RiskRule struct {
 	RuleID        string
 	RuleName      string
 	RuleType      string
 	ConditionJSON string
-	Threshold     string // NUMERIC(18,2) 文本，非金额（通用阈值）
+	Threshold     string // NUMERIC(18,2) text, not amount (universal threshold)
 	Action        string
 	Status        string
 }
 
-// RiskEvent 对应 risk_event 表。
+// RiskEvent corresponds to the risk_event table.
 type RiskEvent struct {
 	EventID     string
 	BizDate     string
 	CustID      string
 	AccountNo   string
 	RuleID      string
-	RiskScore   string // NUMERIC(6,2) 文本（0.30~0.95），非金额
+	RiskScore   string // NUMERIC(6,2) text (0.30~0.95), not amount
 	ActionTaken string
 	TxnRef      string
 	Summary     string
 }
 
-// Blacklist 对应 blacklist 表。
+// Blacklist corresponds to the blacklist table.
 type Blacklist struct {
 	ListID           string
 	CustID           string
@@ -37,7 +37,7 @@ type Blacklist struct {
 	Status           string
 }
 
-// RiskEventDetail 是联邦查询结果（risk_event JOIN ext_cust_db_cust_info）。
+// RiskEventDetail is the event details aggregated by risk and customer services.
 type RiskEventDetail struct {
 	RiskEvent
 	CustName string

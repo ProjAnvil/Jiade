@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"log"
 	"os"
 	"path/filepath"
@@ -16,8 +15,8 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	// runSeed 用相对模块根的路径读 db/migrations/*.sql；go test 把 CWD 设为包目录 cmd/seed/，
-	// 切到模块根（templates/bank/）使集成测试可直接 `go test -tags=integration ./cmd/seed/` 运行。
+	// runSeed reads db/migrations/*.sql using the path relative to the module root; go test sets CWD to the package directory cmd/seed/,
+	// Cut to the module root (templates/bank/) so that the integration test can be run directly with `go test -tags=integration ./cmd/seed/`.
 	_, file, _, _ := runtime.Caller(0)
 	moduleRoot := filepath.Join(filepath.Dir(file), "..", "..")
 	if err := os.Chdir(moduleRoot); err != nil {
@@ -28,7 +27,7 @@ func TestMain(m *testing.M) {
 
 func TestEnsureDBs_CreatesAllDBs(t *testing.T) {
 	ctx := context.Background()
-	// 先确保 admin 可连
+	// First make sure admin can connect
 	admin, err := pg.Open("postgres")
 	if err != nil {
 		t.Skipf("无 postgres 管理库连接，跳过: %v", err)
@@ -62,7 +61,7 @@ func TestSeedRun_PopulatesAllDBs(t *testing.T) {
 	if err := admin.Ping(); err != nil {
 		t.Skipf("postgres 未就绪: %v", err)
 	}
-	// 直接调 main 的编排函数（需把编排逻辑抽成 run()，见 Step 3）
+	// Directly call the orchestration function of main (the orchestration logic needs to be extracted into run(), see Step 3)
 	if err := runSeed(ctx, fixtures.DefaultConfig(fixtures.ScaleDev), true); err != nil {
 		t.Fatalf("runSeed 失败: %v", err)
 	}
@@ -84,19 +83,13 @@ func TestSeedRun_PopulatesAllDBs(t *testing.T) {
 		err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+c.table).Scan(&n)
 		db.Close()
 		if err != nil {
-			t.Fatalf("查 %s.%s 失败（fdw/表未建？）: %v", c.db, c.table, err)
+			t.Fatalf("查 %s.%s 失败（表未建？）: %v", c.db, c.table, err)
 		}
 		if n == 0 {
 			t.Errorf("%s.%s 灌数据为空", c.db, c.table)
 		}
 	}
-	// fdw 联邦表可查
-	cust, _ := pg.Open("cust_db")
-	defer cust.Close()
-	if _, err := cust.ExecContext(ctx, "SELECT account_no FROM ext_core_db_demand_account LIMIT 1"); err != nil {
-		t.Errorf("fdw 外部表不可查: %v", err)
-	}
-	// B-2: core 多日切日引擎
+	// B-2: core multi-day cutting engine
 	coreDB2, err := pg.Open("core_db")
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +109,7 @@ func TestSeedRun_PopulatesAllDBs(t *testing.T) {
 	if txnDays < 400 {
 		t.Errorf("acct_txn 覆盖天数=%d, want ≥400", txnDays)
 	}
-	// 周末日均 < 工作日日均（cyclical ×0.60，聚合稳健）
+	// Weekend daily average < weekday daily average (cyclical ×0.60, robust aggregation)
 	var wkAvg, wdAvg float64
 	err = coreDB2.QueryRowContext(ctx, `SELECT
 		AVG(CASE WHEN EXTRACT(DOW FROM biz_date) IN (0,6) THEN c END),
@@ -128,7 +121,7 @@ func TestSeedRun_PopulatesAllDBs(t *testing.T) {
 	if wkAvg >= wdAvg {
 		t.Errorf("周末日均(%.0f) 应 < 工作日日均(%.0f)", wkAvg, wdAvg)
 	}
-	// B-4a: reward/risk 逐日三因子——周末日均 < 工作日日均
+	// B-4a: reward/risk three factors on a daily basis - weekend daily average < weekday daily average
 	rewardDB, err := pg.Open("reward_db")
 	if err != nil {
 		t.Fatal(err)
@@ -144,16 +137,7 @@ func TestSeedRun_PopulatesAllDBs(t *testing.T) {
 		t.Errorf("reward 周末日均(%.0f) 应 < 工作日(%.0f)", rwWk, rwWd)
 	}
 	rewardDB.Close()
-	// reward/risk 联邦外部表可查
-	riskDB, err := pg.Open("risk_db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := riskDB.ExecContext(ctx, "SELECT cust_id FROM ext_cust_db_cust_info LIMIT 1"); err != nil {
-		t.Errorf("risk_db 联邦表 ext_cust_db_cust_info 不可查: %v", err)
-	}
-	riskDB.Close()
-	// B-4b: loan 逐日滚存——loan_balance 末日有快照；逾期五级分类可滑且档位合法；联邦可 JOIN
+	// B-4b: Loans are rolled over day by day - loan_balance has a snapshot at the end of the day; the overdue five-level classification can be slid and the level is legal
 	loanDB, err := pg.Open("loan_db")
 	if err != nil {
 		t.Fatal(err)
@@ -178,13 +162,8 @@ func TestSeedRun_PopulatesAllDBs(t *testing.T) {
 	if badClass > 0 {
 		t.Errorf("loan_overdue 含非法五级分类 %d 行", badClass)
 	}
-	var loanCustName sql.NullString
-	if err := loanDB.QueryRowContext(ctx, `SELECT ci.name FROM loan_account la
-		JOIN ext_cust_db_cust_info ci ON la.cust_id=ci.cust_id LIMIT 1`).Scan(&loanCustName); err != nil {
-		t.Errorf("loan_db 联邦 JOIN 不可查: %v", err)
-	}
 	loanDB.Close()
-	// B-4b: wealth——nav 每产品每日有行；订单周末<工作日；income 覆盖全部持仓；联邦可 JOIN
+	// B-4b: wealth——nav Each product has daily rows; orders are on weekends < working days; income covers all positions
 	wealthDB, err := pg.Open("wealth_db")
 	if err != nil {
 		t.Fatal(err)
@@ -215,11 +194,6 @@ func TestSeedRun_PopulatesAllDBs(t *testing.T) {
 	}
 	if incomeHoldings != holdingN || incomeDays < 400 {
 		t.Errorf("wealth_income 覆盖持仓 %d/%d 天数 %d(应≥400)", incomeHoldings, holdingN, incomeDays)
-	}
-	var wealthCustName sql.NullString
-	if err := wealthDB.QueryRowContext(ctx, `SELECT ci.name FROM wealth_holding h
-		JOIN ext_cust_db_cust_info ci ON h.cust_id=ci.cust_id LIMIT 1`).Scan(&wealthCustName); err != nil {
-		t.Errorf("wealth_db 联邦 JOIN 不可查: %v", err)
 	}
 	wealthDB.Close()
 }

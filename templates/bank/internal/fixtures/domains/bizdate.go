@@ -1,4 +1,4 @@
-// Package domains 的 bizdate 子模块：多日切日引擎。
+// The bizdate submodule of Package domains: a multi-day date cutting engine.
 package domains
 
 import (
@@ -14,43 +14,43 @@ import (
 	"bank/internal/platform/pg"
 )
 
-// 节假日表（公历固定）。
+// Holiday schedule (fixed Gregorian calendar).
 var holidays = map[string]bool{
-	"2025-10-01": true, "2025-10-02": true, "2025-10-03": true, // 国庆
-	"2026-01-01": true, // 元旦
-	"2026-02-16": true, "2026-02-17": true, "2026-02-18": true, // 春节
-	"2025-10-10": true, "2025-11-11": true, // 双十一
+	"2025-10-01": true, "2025-10-02": true, "2025-10-03": true, // National Day
+	"2026-01-01": true,                                         // New Year
+	"2026-02-16": true, "2026-02-17": true, "2026-02-18": true, // Spring Festival
+	"2025-10-10": true, "2025-11-11": true, // Double Eleven
 }
 
 func isHoliday(d time.Time) bool { return holidays[d.Format("2006-01-02")] }
 
-// trendFactor 每月 +2%（base 2025-06-01）。
+// trendFactor +2% per month (base 2025-06-01).
 func trendFactor(d time.Time) float64 {
 	const baseYear, baseMonth = 2025, 6
 	months := (d.Year()-baseYear)*12 + int(d.Month()) - baseMonth
 	return 1.0 + 0.02*float64(months)
 }
 
-// seasonalFactor 季末×1.35 / 年末×1.50 / 发薪日×1.40 / 节假日×1.30（乘性叠加）。
+// seasonalFactor End of season ×1.35 / End of year ×1.50 / Payday ×1.40 / Holiday ×1.30 (multiplicative superposition).
 func seasonalFactor(d time.Time) float64 {
 	f := 1.0
 	m := int(d.Month())
-	if (m == 3 || m == 6 || m == 9 || m == 12) && d.Day() >= 28 { // 季末考核
+	if (m == 3 || m == 6 || m == 9 || m == 12) && d.Day() >= 28 { // End of quarter assessment
 		f *= 1.35
 	}
-	if m == 12 && d.Day() >= 25 { // 年末 surge
+	if m == 12 && d.Day() >= 25 { // year-end surge
 		f *= 1.50
 	}
-	if d.Day() == 10 || d.Day() == 15 { // 发薪日
+	if d.Day() == 10 || d.Day() == 15 { // payday
 		f *= 1.40
 	}
-	if isHoliday(d) { // 节假日消费高峰
+	if isHoliday(d) { // Holiday consumption peak
 		f *= 1.30
 	}
 	return f
 }
 
-// cyclicalFactor 周末 ~60%。
+// cyclicalFactor Weekend ~60%.
 func cyclicalFactor(d time.Time) float64 {
 	if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
 		return 0.60
@@ -58,8 +58,8 @@ func cyclicalFactor(d time.Time) float64 {
 	return 1.0
 }
 
-// volumeForDay 当日交易笔数。每日独立 rng（seed+100+ordinal），factor=trend×seasonal×cyclical。
-// 单日结果只依赖日期，子范围重跑可复现。
+// volumeForDay Number of transactions on the day. Daily independent rng (seed+100+ordinal), factor=trend×seasonal×cyclical.
+// The single-day results only depend on the date and can be reproduced by re-running the sub-range.
 func volumeForDay(cfg fixtures.Config, d time.Time) int {
 	base := parseDate(cfg.StartBizDate)
 	rng := fixtures.NewRNG(cfg.Seed + 100 + dayOrdinal(d, base))
@@ -76,7 +76,7 @@ func volumeForDay(cfg fixtures.Config, d time.Time) int {
 	return rng.IntRange(lo, hi)
 }
 
-// ---- 日期 helper ----
+// ---- Date helper ----
 
 func parseDate(s string) time.Time {
 	t, err := time.Parse("2006-01-02", s)
@@ -86,17 +86,17 @@ func parseDate(s string) time.Time {
 	return t
 }
 
-// parseDate2 解析 YYYY-MM-DD（返回 error，供 addDays 等需错误反馈处使用）。
+// parseDate2 parses YYYY-MM-DD (returns error for use in addDays and other places that require error feedback).
 func parseDate2(s string) (time.Time, error) {
 	return time.Parse("2006-01-02", s)
 }
 
-// dayOrdinal d 自 base 起的天数（含 0）。
+// dayOrdinal d The number of days since base (inclusive of 0).
 func dayOrdinal(d, base time.Time) int64 {
 	return int64(d.Sub(base).Hours() / 24)
 }
 
-// dateCompact "2026-07-16" → "20260716"（txn_id 用）。
+// dateCompact "2026-07-16" → "20260716" (for txn_id).
 func dateCompact(d time.Time) string {
 	var b strings.Builder
 	for _, c := range d.Format("2006-01-02") {
@@ -107,7 +107,7 @@ func dateCompact(d time.Time) string {
 	return b.String()
 }
 
-// bizDateRange [start,end]（YYYY-MM-DD，含两端）的日历日列表。
+// A list of calendar days for bizDateRange [start,end] (YYYY-MM-DD, inclusive).
 func bizDateRange(start, end string) ([]time.Time, error) {
 	t0, t1 := parseDate(start), parseDate(end)
 	if t0.IsZero() || t1.IsZero() {
@@ -123,7 +123,7 @@ func bizDateRange(start, end string) ([]time.Time, error) {
 	return out, nil
 }
 
-// addMonths 把 YYYY-MM-DD 加 n 月（n 可正可负；loan mature_date = start + term 用）。
+// addMonths adds n months to YYYY-MM-DD (n can be positive or negative; loan mature_date = start + term is used).
 func addMonths(dateStr string, n int) string {
 	t, err := parseDate2(dateStr)
 	if err != nil {
@@ -132,12 +132,12 @@ func addMonths(dateStr string, n int) string {
 	return t.AddDate(0, n, 0).Format("2006-01-02")
 }
 
-// ---- 写入循环（批量 + 逐日幂等 + 切 sys_param）----
+// ---- Write loop (batch + daily idempotent + cut sys_param)----
 
 const bizDateBatchSize = 1000
 
-// RunBizDate 从 StartBizDate 推进到 EndBizDate：每日 GenDay → 逐日 tx 内 DELETE 当日 + 批量 INSERT；
-// 末尾 UPSERT sys_param.biz_date（=EndBizDate）/prev_biz_date（=次末日）。
+// RunBizDate advances from StartBizDate to EndBizDate: daily GenDay → daily tx within DELETE current day + batch INSERT;
+// END UPSERT sys_param.biz_date(=EndBizDate)/prev_biz_date(=EndBizDate).
 func RunBizDate(ctx context.Context, db *sql.DB, cfg fixtures.Config, demandNos []string) error {
 	if len(demandNos) == 0 {
 		return fmt.Errorf("bizdate: 无账户")
@@ -177,7 +177,7 @@ func RunBizDate(ctx context.Context, db *sql.DB, cfg fixtures.Config, demandNos 
 	return nil
 }
 
-// placeholders 生成 nRows×nCols 的 $N 占位符串：($1,$2),($3,$4),...
+// placeholders generate $N placeholder strings of nRows×nCols: ($1,$2),($3,$4),...
 func placeholders(nRows, nCols int) string {
 	var b strings.Builder
 	idx := 1
@@ -199,7 +199,7 @@ func placeholders(nRows, nCols int) string {
 	return b.String()
 }
 
-// bulkInsertTxns 批量插 acct_txn（11 列；voucher_no/txn_status 走 DEFAULT ''/'normal'）。
+// bulkInsertTxns Bulk insert acct_txn (11 columns; voucher_no/txn_status goes DEFAULT ”/'normal').
 func bulkInsertTxns(ctx context.Context, q pg.DBTX, rows []domain.Txn) error {
 	const cols = 11
 	const stmt = "INSERT INTO acct_txn(txn_id,biz_date,account_no,dc_flag,amount,ccy,subject_code,opp_account,ref_txn_id,channel,summary) VALUES "
@@ -221,7 +221,7 @@ func bulkInsertTxns(ctx context.Context, q pg.DBTX, rows []domain.Txn) error {
 	return nil
 }
 
-// bulkInsertBalances 批量插 account_balance（6 列）。
+// bulkInsertBalances bulk inserts account_balance (6 columns).
 func bulkInsertBalances(ctx context.Context, q pg.DBTX, rows []domain.Balance) error {
 	const cols = 6
 	const stmt = "INSERT INTO account_balance(account_no,biz_date,balance,available_balance,frozen_amount,subject_code) VALUES "
@@ -243,12 +243,12 @@ func bulkInsertBalances(ctx context.Context, q pg.DBTX, rows []domain.Balance) e
 	return nil
 }
 
-// ---- 引擎内核（纯函数，无 DB）----
+// ---- Engine kernel (pure function, no DB)----
 
-// DayState 账户余额的内存滚存态。
+// DayState The memory rollover state of the account balance.
 type DayState struct{ Bal map[string]domain.Money }
 
-// newDayState 初始化每账户余额（rng seed+2，回收 Spec A 已删 GenBalanceRows 的偏移）。
+// newDayState initializes the balance of each account (rng seed+2, reclaims the offset of Spec A deleted GenBalanceRows).
 func newDayState(cfg fixtures.Config, demandNos []string) *DayState {
 	rng := fixtures.NewRNG(cfg.Seed + 2)
 	st := &DayState{Bal: make(map[string]domain.Money, len(demandNos))}
@@ -258,8 +258,8 @@ func newDayState(cfg fixtures.Config, demandNos []string) *DayState {
 	return st
 }
 
-// GenDay 生成当日流水 + 当日全账户余额快照，推进 st。纯函数。
-// 每日独立内容 rng（seed+200+ordinal）；流水贷多借少→余额温和增长；txn_id 确定。
+// GenDay generates the current day's flow + snapshot of the entire account balance on the day, advancing st. Pure function.
+// Daily independent content rng (seed+200+ordinal); more running loans, less borrowing → the balance grows moderately; txn_id is determined.
 func GenDay(cfg fixtures.Config, date time.Time, demandNos []string, st *DayState) (dayTxns []domain.Txn, dayBalances []domain.Balance) {
 	if len(demandNos) == 0 {
 		return nil, nil
@@ -273,7 +273,7 @@ func GenDay(cfg fixtures.Config, date time.Time, demandNos []string, st *DayStat
 	for i := 0; i < n; i++ {
 		acct := demandNos[rng.IntRange(0, len(demandNos)-1)]
 		amt := domain.NewMoneyFromCents(int64(rng.IntRange(1, 9999)) * 1000)
-		credit := rng.IntRange(0, 2) < 2 // 0/1=贷(2/3)，2=借(1/3)
+		credit := rng.IntRange(0, 2) < 2 // 0/1=credit(2/3), 2=borrow(1/3)
 		var dc domain.DCFlag
 		if credit {
 			dc = domain.DCCredit
@@ -282,7 +282,7 @@ func GenDay(cfg fixtures.Config, date time.Time, demandNos []string, st *DayStat
 			dc = domain.DCDebit
 			b := st.Bal[acct].Sub(amt)
 			if b < 0 {
-				b = domain.NewMoneyFromCents(0) // clamp 0（max(0,...) 口径）
+				b = domain.NewMoneyFromCents(0) // clamp 0 (max(0,...) diameter)
 			}
 			st.Bal[acct] = b
 		}
@@ -303,7 +303,7 @@ func GenDay(cfg fixtures.Config, date time.Time, demandNos []string, st *DayStat
 	}
 
 	dayBalances = make([]domain.Balance, 0, len(demandNos))
-	for _, no := range demandNos { // 按 demandNos 顺序快照（确定性，不 range map）
+	for _, no := range demandNos { // Snapshots ordered by demandNos (deterministic, not range map)
 		bal := st.Bal[no]
 		dayBalances = append(dayBalances, domain.Balance{
 			AccountNo: no, BizDate: dateStr,

@@ -1,7 +1,6 @@
 services:
   postgres:
     image: postgres:16
-    container_name: bank-postgres
     environment:
       POSTGRES_USER: bank
       POSTGRES_PASSWORD: bank
@@ -17,7 +16,6 @@ services:
       retries: 10
   core-banking:
     build: .
-    container_name: bank-core-banking
     restart: unless-stopped
     environment: &svcenv
       DB_HOST: postgres
@@ -34,85 +32,93 @@ services:
       context: .
       args:
         CMD: customer
-    container_name: bank-customer
     restart: unless-stopped
     environment:
       <<: *svcenv
       DB_NAME: cust_db
       API_PORT: "18081"
+      CORE_BANKING_URL: http://core-banking:18080
     ports: ["18081:18081"]
     depends_on:
       postgres: {condition: service_healthy}
+      core-banking: {condition: service_started}
   payment:
     build:
       context: .
       args:
         CMD: payment
-    container_name: bank-payment
     restart: unless-stopped
     environment:
       <<: *svcenv
       DB_NAME: pay_db
       API_PORT: "18082"
+      CORE_BANKING_URL: http://core-banking:18080
+      CUSTOMER_URL: http://customer:18081
     ports: ["18082:18082"]
     depends_on:
       postgres: {condition: service_healthy}
+      core-banking: {condition: service_started}
+      customer: {condition: service_started}
   reward:
     build:
       context: .
       args:
         CMD: reward
-    container_name: bank-reward
     restart: unless-stopped
     environment:
       <<: *svcenv
       DB_NAME: reward_db
       API_PORT: "18083"
+      CUSTOMER_URL: http://customer:18081
     ports: ["18083:18083"]
     depends_on:
       postgres: {condition: service_healthy}
+      customer: {condition: service_started}
   risk:
     build:
       context: .
       args:
         CMD: risk
-    container_name: bank-risk
     restart: unless-stopped
     environment:
       <<: *svcenv
       DB_NAME: risk_db
       API_PORT: "18084"
+      CUSTOMER_URL: http://customer:18081
     ports: ["18084:18084"]
     depends_on:
       postgres: {condition: service_healthy}
+      customer: {condition: service_started}
   loan:
     build:
       context: .
       args:
         CMD: loan
-    container_name: bank-loan
     restart: unless-stopped
     environment:
       <<: *svcenv
       DB_NAME: loan_db
       API_PORT: "18085"
+      CUSTOMER_URL: http://customer:18081
     ports: ["18085:18085"]
     depends_on:
       postgres: {condition: service_healthy}
+      customer: {condition: service_started}
   wealth:
     build:
       context: .
       args:
         CMD: wealth
-    container_name: bank-wealth
     restart: unless-stopped
     environment:
       <<: *svcenv
       DB_NAME: wealth_db
       API_PORT: "18086"
+      CUSTOMER_URL: http://customer:18081
     ports: ["18086:18086"]
     depends_on:
       postgres: {condition: service_healthy}
+      customer: {condition: service_started}
 
 volumes:
   pgdata:

@@ -1,4 +1,4 @@
-// Package repo 是 core-banking 仓储层：pgx raw SQL 落库。
+// Package repo is the core-banking warehousing layer: pgx raw SQL is dropped into the library.
 package repo
 
 import (
@@ -9,14 +9,14 @@ import (
 	"bank/internal/corebanking/domain"
 )
 
-// AccountRepo 账户仓储。实现 service.AccountStore（写）+ 只读查询。
+// AccountRepo Account repository. Implement service.AccountStore (write) + read-only query.
 type AccountRepo struct {
 	db *sql.DB
 }
 
 func NewAccountRepo(db *sql.DB) *AccountRepo { return &AccountRepo{db: db} }
 
-// InsertDemand 实现 service.AccountStore.InsertDemand。
+// InsertDemand implements service.AccountStore.InsertDemand.
 func (r *AccountRepo) InsertDemand(ctx context.Context, a domain.DemandAccount) error {
 	_, err := r.db.ExecContext(ctx, `INSERT INTO demand_account
 		(account_no,cust_id,ccy,acct_status,open_biz_date,branch_code,product_code,subject_code)
@@ -29,7 +29,7 @@ func (r *AccountRepo) InsertDemand(ctx context.Context, a domain.DemandAccount) 
 	return nil
 }
 
-// InsertFixed 实现 service.AccountStore.InsertFixed。
+// InsertFixed implements service.AccountStore.InsertFixed.
 func (r *AccountRepo) InsertFixed(ctx context.Context, a domain.FixedAccount) error {
 	_, err := r.db.ExecContext(ctx, `INSERT INTO fixed_account
 		(account_no,cust_id,ccy,principal,rate,term_months,start_biz_date,mature_date,acct_status,subject_code)
@@ -42,7 +42,7 @@ func (r *AccountRepo) InsertFixed(ctx context.Context, a domain.FixedAccount) er
 	return nil
 }
 
-// SetDemandStatus 实现 service.AccountStore.SetDemandStatus。
+// SetDemandStatus implements service.AccountStore.SetDemandStatus.
 func (r *AccountRepo) SetDemandStatus(ctx context.Context, accountNo string, status domain.AccountStatus) error {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE demand_account SET acct_status=$2 WHERE account_no=$1`, accountNo, string(status))
@@ -55,7 +55,7 @@ func (r *AccountRepo) SetDemandStatus(ctx context.Context, accountNo string, sta
 	return nil
 }
 
-// GetDemand 查活期账户。不存在时返回包装的 sql.ErrNoRows。
+// GetDemand checks current accounts. Returns wrapped sql.ErrNoRows when not present.
 func (r *AccountRepo) GetDemand(ctx context.Context, accountNo string) (domain.DemandAccount, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT account_no,cust_id,ccy,acct_status,open_biz_date,
 		branch_code,product_code,subject_code FROM demand_account WHERE account_no=$1`, accountNo)
@@ -70,7 +70,7 @@ func (r *AccountRepo) GetDemand(ctx context.Context, accountNo string) (domain.D
 	return a, nil
 }
 
-// GetFixed 查定期账户。
+// GetFixed checks term accounts.
 func (r *AccountRepo) GetFixed(ctx context.Context, accountNo string) (domain.FixedAccount, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT account_no,cust_id,ccy,principal,rate,term_months,
 		start_biz_date,mature_date,acct_status,subject_code FROM fixed_account WHERE account_no=$1`, accountNo)

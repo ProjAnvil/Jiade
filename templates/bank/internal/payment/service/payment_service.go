@@ -1,4 +1,4 @@
-// Package service 是 payment 服务的用例层（查询编排，纯逻辑可单测）。
+// Package service is the use case layer of payment service (query orchestration, pure logic can be tested individually).
 package service
 
 import (
@@ -7,7 +7,7 @@ import (
 	"bank/internal/payment/domain"
 )
 
-// PaymentStore payment 查询接口（repo 实现）。单测用 fakePayRepo 注入。
+// PaymentStore payment query interface (repo implementation). Use fakePayRepo to inject single test.
 type PaymentStore interface {
 	ListTransfers(ctx context.Context, accountNo, from, to string, limit, offset int) ([]domain.Transfer, error)
 	GetTransfer(ctx context.Context, txnID string) (domain.Transfer, error)
@@ -15,28 +15,28 @@ type PaymentStore interface {
 	GetMerchant(ctx context.Context, merchantID string) (domain.Merchant, error)
 }
 
-// PaymentService payment 只读服务，包装 PaymentStore 做查询编排。
+// PaymentService payment is a read-only service that wraps PaymentStore for query arrangement.
 type PaymentService struct{ store PaymentStore }
 
-// NewPaymentService 构造 PaymentService。
+// NewPaymentService constructs PaymentService.
 func NewPaymentService(store PaymentStore) *PaymentService { return &PaymentService{store: store} }
 
-// ListTransfers 按账户/日期筛选转账并分页。
+// ListTransfers Filter and paginate transfers by account/date.
 func (s *PaymentService) ListTransfers(ctx context.Context, accountNo, from, to string, limit, offset int) ([]domain.Transfer, error) {
 	return s.store.ListTransfers(ctx, accountNo, from, to, limit, offset)
 }
 
-// GetTransfer 查单笔转账。
+// GetTransfer checks a single transfer.
 func (s *PaymentService) GetTransfer(ctx context.Context, txnID string) (domain.Transfer, error) {
 	return s.store.GetTransfer(ctx, txnID)
 }
 
-// GetParties 查转账双方（跨库联邦）。
+// GetParties checks the transfer parties (aggregated through the core-banking/customer service).
 func (s *PaymentService) GetParties(ctx context.Context, txnID string) (domain.TransferParty, error) {
 	return s.store.GetTransferParties(ctx, txnID)
 }
 
-// GetMerchant 查商户。
+// GetMerchant Check merchants.
 func (s *PaymentService) GetMerchant(ctx context.Context, id string) (domain.Merchant, error) {
 	return s.store.GetMerchant(ctx, id)
 }

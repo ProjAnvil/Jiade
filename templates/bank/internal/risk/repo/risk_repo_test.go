@@ -48,10 +48,9 @@ func TestRiskRepo_ListEventsAndBlacklists(t *testing.T) {
 	}
 }
 
-func TestRiskRepo_GetEvent_FDWJoin(t *testing.T) {
+func TestRiskRepo_GetEvent_NotFound(t *testing.T) {
 	db := setupRiskDB(t)
 	defer db.Close()
-	// 联邦 JOIN 不报错即可（依赖 seed 数据 + setup_fdw）
 	_, err := repo.NewRiskRepo(db).GetEvent(context.Background(), "RS-EV-NOPE")
 	if err == nil {
 		t.Error("不存在的事件应返回错误")

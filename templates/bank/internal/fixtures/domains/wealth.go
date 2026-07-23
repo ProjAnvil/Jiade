@@ -12,13 +12,13 @@ import (
 	"bank/internal/wealth/domain"
 )
 
-// WealthStatic 静态表行集合（一次性生成；持仓与产品共享 rng seed+50，避免与逐日 +51 碰撞）。
+// WealthStatic static table row collection (generated once; positions share rng seed+50 with products to avoid collision with daily +51).
 type WealthStatic struct {
 	Products []domain.WealthProduct
 	Holdings []domain.WealthHolding
 }
 
-// GenWealthStatic 生成理财产品 + 初始持仓（每客户 0-3 个）。
+// GenWealthStatic generates financial products + initial positions (0-3 per client).
 func GenWealthStatic(cfg fixtures.Config, custIDs []string, demandAccounts []string) WealthStatic {
 	rng := fixtures.NewRNG(cfg.Seed + 50)
 	products := make([]domain.WealthProduct, len(fixtures.WealthProducts))
@@ -29,7 +29,7 @@ func GenWealthStatic(cfg fixtures.Config, custIDs []string, demandAccounts []str
 			MinAmount:      domain.NewMoneyFromCents(int64(p.MinAmountYuan) * 100),
 			TermDays:       p.TermDays,
 			StartBizDate:   cfg.StartBizDate, EndBizDate: addDays(cfg.EndBizDate, 365),
-			Status:         "active",
+			Status: "active",
 		}
 	}
 	var holdings []domain.WealthHolding
@@ -38,13 +38,13 @@ func GenWealthStatic(cfg fixtures.Config, custIDs []string, demandAccounts []str
 		n := rng.IntRange(0, 3)
 		for j := 0; j < n; j++ {
 			p := fixtures.WealthProducts[rng.IntRange(0, len(fixtures.WealthProducts)-1)]
-			nav0 := 1 + rng.Float64()*0.25 // 4dp；spec §6.4（原实现为 1+uniform(-0.05,0.2)，这里有意对齐为 [1,1.25)）
+			nav0 := 1 + rng.Float64()*0.25 // 4dp; spec §6.4 (the original implementation is 1+uniform(-0.05,0.2), the intentional alignment here is [1,1.25))
 			amountYuan := maxInt(p.MinAmountYuan, rng.IntRange(0, 99999)*100)
 			amount := domain.NewMoneyFromCents(int64(amountYuan) * 100)
 			holdings = append(holdings, domain.WealthHolding{
 				HoldingID: fmt.Sprintf("WP-HD-%07d", idx), CustID: cid,
 				AccountNo: pickStr(rng, demandAccounts), ProductCode: p.Code, Ccy: "CNY",
-				Share: fmt.Sprintf("%.4f", float64(amountYuan)/nav0), // 非金额小数，4dp 文本
+				Share: fmt.Sprintf("%.4f", float64(amountYuan)/nav0), // non-amount decimal, 4dp text
 				Cost:  amount, CurrentValue: amount,
 				BizDate: cfg.StartBizDate,
 			})
@@ -54,7 +54,7 @@ func GenWealthStatic(cfg fixtures.Config, custIDs []string, demandAccounts []str
 	return WealthStatic{Products: products, Holdings: holdings}
 }
 
-// WriteWealthStatic 幂等写 wealth_product/wealth_holding（先 DELETE 后 INSERT）。
+// WriteWealthStatic writes wealth_product/wealth_holding idempotently (DELETE first and then INSERT).
 func WriteWealthStatic(ctx context.Context, db *sql.DB, s WealthStatic) error {
 	for _, t := range []string{"wealth_holding", "wealth_product"} {
 		if _, err := db.ExecContext(ctx, "DELETE FROM "+t); err != nil {
@@ -80,8 +80,8 @@ func WriteWealthStatic(ctx context.Context, db *sql.DB, s WealthStatic) error {
 	return nil
 }
 
-// RunWealth 按 bizDate 推进：每日 NAV 游走（滚存）+ 三因子订单（每日独立 rng）+ 每日利息（Q1-B）。
-// 每业务日一个 pg.RunInTx。
+// RunWealth advances by bizDate: daily NAV walk (rollover) + three-factor order (daily independent rng) + daily interest (Q1-B).
+// One pg.RunInTx per business day.
 func RunWealth(ctx context.Context, db *sql.DB, cfg fixtures.Config, products []domain.WealthProduct, holdings []domain.WealthHolding, custIDs []string, demandAccounts []string) error {
 	if len(products) == 0 {
 		return fmt.Errorf("wealth: 无产品")
@@ -99,9 +99,9 @@ func RunWealth(ctx context.Context, db *sql.DB, cfg fixtures.Config, products []
 	for _, p := range products {
 		ret, _ := strconv.ParseFloat(p.ExpectedReturn, 64)
 		prodRet[p.ProductCode] = ret
-		navState[p.ProductCode] = 1 + ret/365 // 每日按预期年化微涨
+		navState[p.ProductCode] = 1 + ret/365 // Daily annualized slight increase as expected
 	}
-	// 持仓成本快照（供 income；订单不改持仓）
+	// Position cost snapshot (for income; orders do not change positions)
 	type holdingCost struct {
 		costCents int64
 		prodCode  string
@@ -112,11 +112,11 @@ func RunWealth(ctx context.Context, db *sql.DB, cfg fixtures.Config, products []
 	}
 	base := parseDate(cfg.StartBizDate)
 	for _, d := range days {
-		rng := fixtures.NewRNG(cfg.Seed + 51 + dayOrdinal(d, base)) // per-day rng（对齐 reward）
+		rng := fixtures.NewRNG(cfg.Seed + 51 + dayOrdinal(d, base)) // per-day rng (alignment reward)
 		dateStr := d.Format("2006-01-02")
 		compact := dateCompact(d)
 		factor := trendFactor(d) * seasonalFactor(d) * cyclicalFactor(d)
-		// NAV 游走（路径依赖：navState 跨日滚存）
+		// NAV travel (path dependency: navState rollover across days)
 		navRows := make([]domain.WealthNav, 0, len(products))
 		for _, p := range products {
 			drift := navState[p.ProductCode] * (1 + (rng.Float64()*0.006 - 0.002))
@@ -127,24 +127,24 @@ func RunWealth(ctx context.Context, db *sql.DB, cfg fixtures.Config, products []
 				AccumNav: fmt.Sprintf("%.6f", navState[p.ProductCode]*1.1),
 			})
 		}
-		// 三因子订单
+		// three factor order
 		n := orderVolumeForDay(sf, factor)
 		orders := make([]domain.WealthOrder, 0, n)
 		for i := 0; i < n; i++ {
-			// 订单产品从 products 参数选（与 fixtures.WealthProducts 同序同源，rng 流不变）
+			// Order products are selected from the products parameter (same order and source as fixtures.WealthProducts, rng stream unchanged)
 			p := products[rng.IntRange(0, len(products)-1)]
-			amountYuan := maxInt(int(p.MinAmount.Cents()/100), rng.IntRange(0, 99999)*100) // 同持仓公式
+			amountYuan := maxInt(int(p.MinAmount.Cents()/100), rng.IntRange(0, 99999)*100) // Same position formula
 			orders = append(orders, domain.WealthOrder{
 				OrderID: fmt.Sprintf("WP-OD-%s-%05d", compact, i),
 				BizDate: dateStr, CustID: pickStr(rng, custIDs), ProductCode: p.ProductCode,
 				AccountNo: pickStr(rng, demandAccounts), OrderType: rng.Choice(fixtures.OrderTypes),
 				Amount: domain.NewMoneyFromCents(int64(amountYuan) * 100),
-				Share:  fmt.Sprintf("%.4f", float64(rng.IntRange(0, 999))), // 有意保留的怪癖：share 独立随机，不由 amount/nav 推导
+				Share:  fmt.Sprintf("%.4f", float64(rng.IntRange(0, 999))), // Intentionally reserved quirk: share is independently random and not derived from amount/nav
 				Nav:    fmt.Sprintf("%.6f", navState[p.ProductCode]),
 				Status: "done",
 			})
 		}
-		// 每日利息（Q1-B）：每持仓 cost × expected_return / 365，四舍五入到分
+		// Daily interest (Q1-B): cost per position × expected_return / 365, rounded to cents
 		incomes := make([]domain.WealthIncome, 0, len(costs))
 		for i, hc := range costs {
 			incomes = append(incomes, domain.WealthIncome{
@@ -178,12 +178,12 @@ func RunWealth(ctx context.Context, db *sql.DB, cfg fixtures.Config, products []
 	return nil
 }
 
-// orderVolumeForDay 当日理财订单笔数（三因子缩放；提取为函数供单测比周末/工作日）。
+// orderVolumeForDay The number of financial management orders on the day (three-factor scaling; extracted as a function for order testing compared to weekends/working days).
 func orderVolumeForDay(sf, factor float64) int {
 	return maxInt(0, int(20*sf*factor))
 }
 
-// bulkInsertWealthNavs 批量插 wealth_nav（4 列）。
+// bulkInsertWealthNavs bulk inserts wealth_nav (4 columns).
 func bulkInsertWealthNavs(ctx context.Context, q pg.DBTX, rows []domain.WealthNav) error {
 	if len(rows) == 0 {
 		return nil
@@ -207,7 +207,7 @@ func bulkInsertWealthNavs(ctx context.Context, q pg.DBTX, rows []domain.WealthNa
 	return nil
 }
 
-// bulkInsertWealthOrders 批量插 wealth_order（10 列）。
+// bulkInsertWealthOrders bulk inserts wealth_order (10 columns).
 func bulkInsertWealthOrders(ctx context.Context, q pg.DBTX, rows []domain.WealthOrder) error {
 	if len(rows) == 0 {
 		return nil
@@ -232,7 +232,7 @@ func bulkInsertWealthOrders(ctx context.Context, q pg.DBTX, rows []domain.Wealth
 	return nil
 }
 
-// bulkInsertWealthIncomes 批量插 wealth_income（5 列）。
+// bulkInsertWealthIncomes bulk inserts wealth_income (5 columns).
 func bulkInsertWealthIncomes(ctx context.Context, q pg.DBTX, rows []domain.WealthIncome) error {
 	if len(rows) == 0 {
 		return nil

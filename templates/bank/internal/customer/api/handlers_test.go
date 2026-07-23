@@ -64,7 +64,7 @@ func TestGetCustomer_OK(t *testing.T) {
 }
 
 func TestGetCustomer_NotFound(t *testing.T) {
-	h := &Handlers{Svc: service.NewCustomerService(fakeCustRepo{})} // 返回 ErrNoRows
+	h := &Handlers{Svc: service.NewCustomerService(fakeCustRepo{})} // Return ErrNoRows
 	code, _ := get(t, NewRouter(h), "/api/v1/customers/NOPE")
 	if code != 404 {
 		t.Errorf("want 404 got %d", code)

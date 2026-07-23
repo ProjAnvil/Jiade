@@ -1,4 +1,4 @@
-// Package pg 提供 PostgreSQL 连接构造。
+// Package pg provides PostgreSQL connection constructs.
 package pg
 
 import (
@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // 注册 pgx 到 database/sql
+	_ "github.com/jackc/pgx/v5/stdlib" // Register pgx to database/sql
 )
 
-// DSN 从环境变量构造连接串。dbName 指定连哪个库（postgres / core_db）。
+// DSN constructs a connection string from environment variables. dbName specifies which library to connect to (postgres/core_db).
 func DSN(dbName string) string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
 		Getenv("DB_USER", "bank"),
@@ -20,7 +20,7 @@ func DSN(dbName string) string {
 	)
 }
 
-// Open 打开一个到 dbName 的连接池。调用方负责 Close。
+// Open opens a connection pool to dbName. The caller is responsible for Close.
 func Open(dbName string) (*sql.DB, error) {
 	db, err := sql.Open("pgx", DSN(dbName))
 	if err != nil {
@@ -29,7 +29,7 @@ func Open(dbName string) (*sql.DB, error) {
 	return db, nil
 }
 
-// Getenv 读环境变量，空则返回 def。
+// Getenv reads environment variables, and returns def if empty.
 func Getenv(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v

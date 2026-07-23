@@ -1,4 +1,4 @@
-// Package service 是 core-banking 用例层：业务规则，纯逻辑可单测。
+// Package service is the core-banking use case layer: business rules, pure logic can be tested individually.
 package service
 
 import (
@@ -9,27 +9,27 @@ import (
 	"bank/internal/platform/pg"
 )
 
-// ErrUnbalanced 借贷不平——复式记账核心不变量被违反。
+// ErrUnbalanced - The core invariants of double-entry accounting are violated.
 var ErrUnbalanced = fmt.Errorf("ledger: 借贷不平")
 
-// LedgerStore service 依赖的持久化接口（依赖倒置：repo 实现它）。
+// The persistence interface that the LedgerStore service depends on (dependency inversion: repo implements it).
 type LedgerStore interface {
 	InsertTxns(ctx context.Context, q pg.DBTX, txns []domain.Txn) error
 	ApplyBalanceDeltas(ctx context.Context, q pg.DBTX, bizDate string, deltas []domain.BalanceDelta) error
 	UpsertGL(ctx context.Context, q pg.DBTX, gl domain.GLBalance) error
 	EnsureBalanceRow(ctx context.Context, q pg.DBTX, accountNo, bizDate, subjectCode string) (domain.Balance, error)
 	GetTxnsByVoucher(ctx context.Context, q pg.DBTX, voucherNo string) ([]domain.Txn, error)
-	// LockTxnsByVoucher 冲正专用：SELECT ... FOR UPDATE 锁本凭证流水行（串行化并发冲正）。
+	// LockTxnsByVoucher is specially used for reversal: SELECT ... FOR UPDATE to lock the voucher (serialized concurrent reversal).
 	LockTxnsByVoucher(ctx context.Context, q pg.DBTX, voucherNo string) ([]domain.Txn, error)
-	// HasReversal 红冲去重：是否已有 ref_txn_id=$refTxnID 的反向分录。
+	// HasReversal Red flush to remove duplicates: Whether there is a reverse entry for ref_txn_id=$refTxnID.
 	HasReversal(ctx context.Context, q pg.DBTX, refTxnID string) (bool, error)
 	UpdateTxnStatus(ctx context.Context, q pg.DBTX, voucherNo string, status domain.TxnStatus) error
 	SetTxnSummary(ctx context.Context, q pg.DBTX, voucherNo, summary string) error
-	// GetBizDate 读 sys_param.biz_date（B-2：记账 biz_date 来源）。
+	// GetBizDate reads sys_param.biz_date (B-2: Accounting biz_date source).
 	GetBizDate(ctx context.Context) (string, error)
 }
 
-// LedgerService 复式记账用例。
+// LedgerService double-entry accounting use case.
 type LedgerService struct {
 	store LedgerStore
 }
@@ -38,8 +38,8 @@ func NewLedgerService(store LedgerStore) *LedgerService {
 	return &LedgerService{store: store}
 }
 
-// ValidateBalance 校验复式记账平衡，返回借/贷合计。不平返回 ErrUnbalanced。
-// 纯函数，无副作用，是验收 #7 的核心。
+// ValidateBalance verifies the double-entry accounting balance and returns the debit/credit total. Unbalanced returns ErrUnbalanced.
+// Pure functions, with no side effects, are the core of Acceptance #7.
 func ValidateBalance(entries []domain.Entry) (debit, credit domain.Money, err error) {
 	for _, e := range entries {
 		switch e.DCFlag {
@@ -57,10 +57,10 @@ func ValidateBalance(entries []domain.Entry) (debit, credit domain.Money, err er
 	return debit, credit, nil
 }
 
-// Post 过账：校验平衡 → 汇总分录 → 写流水 → 累加分户账余额 → 更新总账。
-// q 为事务（或连接池）执行器，调用方负责事务边界（见 txn_service）。
-// voucherNo 标记本笔凭证；refTxnID 非空表示本笔是冲正（关联原流水）。
-// 不平则拒绝且绝不调用 store（验收 #7）。返回生成的流水（含回填的 TxnID）。
+// Post posting: check balance → summary entries → write journal entries → accumulate sub-account balances → update the general ledger.
+// q is the transaction (or connection pool) executor, and the caller is responsible for transaction boundaries (see txn_service).
+// voucherNo marks this voucher; refTxnID non-empty indicates that this transaction is corrected (associated with the original transaction).
+// If not, reject and never call store (Acceptance #7). Returns the generated pipeline (including backfilled TxnID).
 func (s *LedgerService) Post(ctx context.Context, q pg.DBTX, entries []domain.Entry, bizDate, ccy, voucherNo, refTxnID string) ([]domain.Txn, error) {
 	if _, _, err := ValidateBalance(entries); err != nil {
 		return nil, err

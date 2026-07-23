@@ -1,16 +1,16 @@
-// Package domain 是 reward 服务的纯领域模型，零 DB/框架依赖（最内层）。
+// Package domain is a pure domain model of the reward service, with zero DB/framework dependencies (innermost layer).
 package domain
 
-// PointsAcct 对应 points_acct 表。
+// PointsAcct corresponds to the points_acct table.
 type PointsAcct struct {
-	CustID         string
-	PointsBalance  int
-	FrozenPoints   int
-	MemberLevel    string
-	UpdateBizDate  string
+	CustID        string
+	PointsBalance int
+	FrozenPoints  int
+	MemberLevel   string
+	UpdateBizDate string
 }
 
-// PointsTxn 对应 points_txn 表。
+// PointsTxn corresponds to the points_txn table.
 type PointsTxn struct {
 	TxnID      string
 	CustID     string
@@ -22,7 +22,7 @@ type PointsTxn struct {
 	Summary    string
 }
 
-// Coupon 对应 coupon 表（face_value/min_spend 为金额 int64 分）。
+// Coupon corresponds to the coupon table (face_value/min_spend is the amount int64 points).
 type Coupon struct {
 	CouponID     string
 	CustID       string
@@ -34,19 +34,19 @@ type Coupon struct {
 	ExpireDate   string
 }
 
-// Campaign 对应 campaign 表（budget/used_budget 为金额）。
+// Campaign corresponds to the campaign table (budget/used_budget is the amount).
 type Campaign struct {
-	CampaignID    string
-	Name          string
-	Type          string
-	StartBizDate  string
-	EndBizDate    string
-	Budget        Money
-	UsedBudget    Money
-	Status        string
+	CampaignID   string
+	Name         string
+	Type         string
+	StartBizDate string
+	EndBizDate   string
+	Budget       Money
+	UsedBudget   Money
+	Status       string
 }
 
-// MemberLevel 对应 member_level 表。
+// MemberLevel corresponds to the member_level table.
 type MemberLevel struct {
 	LevelCode       string
 	LevelName       string
@@ -54,7 +54,7 @@ type MemberLevel struct {
 	BenefitsJSON    string
 }
 
-// RewardProfile 是联邦查询结果（points_acct JOIN ext_cust_db_cust_info）。
+// RewardProfile is a points profile aggregated by reward and customer services.
 type RewardProfile struct {
 	CustID        string
 	PointsBalance int

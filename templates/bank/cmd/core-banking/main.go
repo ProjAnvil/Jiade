@@ -1,4 +1,4 @@
-// Package main 是 core-banking API 服务入口（只读查询 + B-3 记账/冲正写接口）。
+// Package main is the core-banking API service entrance (read-only query + B-3 accounting/rewriting interface).
 package main
 
 import (
@@ -24,7 +24,7 @@ func main() {
 	}
 	defer db.Close()
 
-	// 启动重试：core_db 可能尚未就绪（seed 未跑完）
+	// Start retry: core_db may not be ready yet (seed has not finished running)
 	if err := waitForDB(db, 5, time.Second); err != nil {
 		log.Fatalf("连 %s 失败: %v（请先 make up 再 make seed）", dbName, err)
 	}

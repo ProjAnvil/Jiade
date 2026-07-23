@@ -15,7 +15,7 @@ func TestNew_DiscoversBank(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("bank 未在模板列表: %v", names)
+		t.Errorf("bank is missing from the template list: %v", names)
 	}
 }
 
@@ -28,7 +28,7 @@ func TestManifest_Bank(t *testing.T) {
 	if m.Name != "bank" {
 		t.Errorf("name=%q want bank", m.Name)
 	}
-	// Spec B-4b：7 服务（+loan:18085 / wealth:18086）。
+	// Spec B-4b: 7 services (+loan:18085 / wealth:18086).
 	if len(m.Services) != 7 {
 		t.Fatalf("services=%+v want 7", m.Services)
 	}
@@ -38,7 +38,7 @@ func TestManifest_Bank(t *testing.T) {
 			t.Errorf("service %+v not in %v", s, wantSvc)
 		}
 	}
-	// Spec B-4b：7 库（+loan_db / wealth_db）。
+	// Spec B-4b: 7 libraries (+loan_db/wealth_db).
 	if len(m.Databases) != 7 {
 		t.Fatalf("databases=%+v want 7", m.Databases)
 	}

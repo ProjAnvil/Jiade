@@ -54,10 +54,9 @@ func TestWealthRepo_Lists(t *testing.T) {
 	}
 }
 
-func TestWealthRepo_GetHoldingProfile_FDWJoin(t *testing.T) {
+func TestWealthRepo_GetHoldingProfile_NotFound(t *testing.T) {
 	db := setupWealthDB(t)
 	defer db.Close()
-	// 联邦 JOIN 不报错即可（依赖 seed 数据 + setup_fdw）
 	_, err := repo.NewWealthRepo(db).GetHoldingProfile(context.Background(), "WP-HD-NOPE")
 	if err == nil {
 		t.Error("不存在的持仓应返回错误")

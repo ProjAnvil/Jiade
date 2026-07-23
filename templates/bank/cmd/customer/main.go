@@ -1,4 +1,4 @@
-// Package main 是 customer 只读 API 服务入口。
+// Package main is the customer read-only API service entry.
 package main
 
 import (
@@ -24,7 +24,7 @@ func main() {
 	}
 	defer db.Close()
 
-	// 启动重试：cust_db 可能尚未就绪（seed 未跑完）
+	// Start retry: cust_db may not be ready yet (seed has not finished running)
 	if err := waitForDB(db, 5, time.Second); err != nil {
 		log.Fatalf("连 %s 失败: %v（请先 make up 再 make seed）", dbName, err)
 	}

@@ -21,26 +21,26 @@ func (f fakeCmd) Output(_ context.Context, name string, args ...string) ([]byte,
 
 func TestProbe_AllPresent(t *testing.T) {
 	cmd := fakeCmd{ok: map[string]bool{
-		"docker --version":     true,
+		"docker --version":       true,
 		"docker compose version": true,
-		"docker info":          true,
+		"docker info":            true,
 	}}
 	r := ProbeWith(context.Background(), cmd)
 	if !r.OK() {
-		t.Errorf("应 OK, got %+v hint=%q", r, r.Hint())
+		t.Errorf("expected OK, got %+v hint=%q", r, r.Hint())
 	}
 }
 
 func TestProbe_NoDocker(t *testing.T) {
 	r := ProbeWith(context.Background(), fakeCmd{ok: map[string]bool{}})
 	if r.HasDocker {
-		t.Error("不应有 docker")
+		t.Error("Docker should not be available")
 	}
 	if r.OK() {
-		t.Error("无 docker 不应 OK")
+		t.Error("the result should not be OK without Docker")
 	}
-	if !strings.Contains(r.Hint(), "安装") {
-		t.Errorf("无 docker 提示应含'安装', got %q", r.Hint())
+	if !strings.Contains(r.Hint(), "install") {
+		t.Errorf("the missing-Docker hint should contain 'install', got %q", r.Hint())
 	}
 }
 
@@ -51,9 +51,9 @@ func TestProbe_DaemonDown(t *testing.T) {
 	}}
 	r := ProbeWith(context.Background(), cmd)
 	if r.DaemonRunning {
-		t.Error("daemon 不应运行")
+		t.Error("the daemon should not be running")
 	}
 	if !strings.Contains(r.Hint(), "Docker Desktop") {
-		t.Errorf("daemon 未运行提示应含'Docker Desktop', got %q", r.Hint())
+		t.Errorf("the stopped-daemon hint should contain 'Docker Desktop', got %q", r.Hint())
 	}
 }

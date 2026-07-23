@@ -94,7 +94,7 @@ func TestGetAccount_NotFound(t *testing.T) {
 }
 
 func TestGetBalance(t *testing.T) {
-	// 只读路径：写依赖 db/accounts/ledger/store 用 nil（Record 不触发），仅注入 read
+	// Read-only path: Use nil to write dependencies db/accounts/ledger/store (Record is not triggered), and only inject read
 	h := &Handlers{TxnSvc: service.NewTxnService(nil, nil, nil, nil).WithReader(fakeTxnStore{bal: &domain.Balance{
 		AccountNo: "D1", BizDate: "2026-07-15", Balance: domain.NewMoneyFromCents(123456),
 		AvailableBalance: domain.NewMoneyFromCents(123456),
@@ -128,7 +128,7 @@ func postJSON(t *testing.T, h http.Handler, path, body string) (int, string) {
 	return resp.StatusCode, strings.TrimSpace(string(b))
 }
 
-// newRecordSvc 构造一个用 recordingAPIStore fake 的真 TxnService（db=nil 单测路径）。
+// newRecordSvc constructs a real TxnService using recordingAPIStore fake (db=nil single test path).
 func newRecordSvc() *service.TxnService {
 	store := &recordingAPIStore{}
 	return service.NewTxnService(nil, apiAccountsRdr{m: map[string]domain.DemandAccount{
@@ -136,7 +136,7 @@ func newRecordSvc() *service.TxnService {
 	}}, service.NewLedgerService(store), store)
 }
 
-// newRecordSvcWithVoucher 同 newRecordSvc，但 store 预置一组原凭证流水（蓝冲/红冲 reversal 用）。
+// newRecordSvcWithVoucher is the same as newRecordSvc, but the store is preset with a set of original voucher flows (for blue flush/red flush reversal).
 func newRecordSvcWithVoucher(voucherNo string) (*service.TxnService, *recordingAPIStore) {
 	store := &recordingAPIStore{voucherTxns: balancedVoucherTxns(voucherNo)}
 	svc := service.NewTxnService(nil, apiAccountsRdr{m: map[string]domain.DemandAccount{
@@ -145,7 +145,7 @@ func newRecordSvcWithVoucher(voucherNo string) (*service.TxnService, *recordingA
 	return svc, store
 }
 
-// balancedVoucherTxns 构造一对平衡的原流水（一借一贷，同金额同 voucher），供冲正回滚。
+// balancedVoucherTxns constructs a pair of balanced original vouchers (one debit and one loan, the same amount and the same voucher) for offset and rollback.
 func balancedVoucherTxns(voucherNo string) []domain.Txn {
 	amt := domain.NewMoneyFromCents(10000)
 	return []domain.Txn{
@@ -154,8 +154,10 @@ func balancedVoucherTxns(voucherNo string) []domain.Txn {
 	}
 }
 
-// apiAccountsRdr 记账用的账户只读 fake（实现 service.AccountReader）。
-type apiAccountsRdr struct{ m map[string]domain.DemandAccount }
+// apiAccountsRdr Accounts used for accounting are read-only fake (implement service.AccountReader).
+type apiAccountsRdr struct {
+	m map[string]domain.DemandAccount
+}
 
 func (a apiAccountsRdr) GetDemand(_ context.Context, no string) (domain.DemandAccount, error) {
 	if v, ok := a.m[no]; ok {
@@ -164,10 +166,10 @@ func (a apiAccountsRdr) GetDemand(_ context.Context, no string) (domain.DemandAc
 	return domain.DemandAccount{}, sql.ErrNoRows
 }
 
-// recordingAPIStore 最小 LedgerStore fake：InsertTxns 回填假 ID，EnsureBalanceRow 给大余额（防透支）。
-// voucherTxns 供 LockTxnsByVoucher/GetTxnsByVoucher 返回原凭证流水（冲正 handler 测试用）。
+// recordingAPIStore minimum LedgerStore fake: InsertTxns backfills fake ID, EnsureBalanceRow gives large balance (anti-overdraft).
+// voucherTxns is used by LockTxnsByVoucher/GetTxnsByVoucher to return the original voucher flow (for correction handler testing).
 type recordingAPIStore struct {
-	voucherTxns []domain.Txn // LockTxnsByVoucher / GetTxnsByVoucher 返回
+	voucherTxns []domain.Txn // LockTxnsByVoucher / GetTxnsByVoucher Return
 }
 
 func (s *recordingAPIStore) InsertTxns(_ context.Context, _ pg.DBTX, txns []domain.Txn) error {
@@ -196,7 +198,7 @@ func (*recordingAPIStore) UpdateTxnStatus(context.Context, pg.DBTX, string, doma
 	return nil
 }
 func (*recordingAPIStore) SetTxnSummary(context.Context, pg.DBTX, string, string) error { return nil }
-func (*recordingAPIStore) GetBizDate(context.Context) (string, error) { return "2026-07-13", nil }
+func (*recordingAPIStore) GetBizDate(context.Context) (string, error)                   { return "2026-07-13", nil }
 
 func TestPostTxn_Deposit_201(t *testing.T) {
 	h := &Handlers{TxnSvc: newRecordSvc()}
@@ -226,7 +228,7 @@ func TestPostTxn_AccountNotFound_404(t *testing.T) {
 
 // --- B-3 reverse handler tests ---
 
-// TestReverseVoucher_InvalidMode_400 冲正非法 mode（green）应在 handler 层 400，不触达 service。
+// TestReverseVoucher_InvalidMode_400 corrects the illegal mode (green) should be 400 in the handler layer and does not touch the service.
 func TestReverseVoucher_InvalidMode_400(t *testing.T) {
 	h := &Handlers{TxnSvc: newRecordSvc()}
 	code, body := postJSON(t, NewRouter(h), "/api/v1/vouchers/V1/reverse?mode=green", "")
@@ -235,7 +237,7 @@ func TestReverseVoucher_InvalidMode_400(t *testing.T) {
 	}
 }
 
-// TestReverseVoucher_BlueDefault_200 不传 mode 默认蓝冲，返回 200 + mode=blue + status=reversed。
+// TestReverseVoucher_BlueDefault_200 does not pass mode and defaults to blue reversing, returning 200 + mode=blue + status=reversed.
 func TestReverseVoucher_BlueDefault_200(t *testing.T) {
 	svc, _ := newRecordSvcWithVoucher("V1")
 	h := &Handlers{TxnSvc: svc}
@@ -248,12 +250,12 @@ func TestReverseVoucher_BlueDefault_200(t *testing.T) {
 	}
 }
 
-// TestStatusFor_Deadlock_409 固定 spec §8.3：Postgres 死锁 SQLSTATE 40P01 → 409 Conflict。
+// TestStatusFor_Deadlock_409 fixed spec §8.3: Postgres deadlock SQLSTATE 40P01 → 409 Conflict.
 func TestStatusFor_Deadlock_409(t *testing.T) {
 	if got := statusFor(&pgconn.PgError{Code: "40P01"}); got != http.StatusConflict {
 		t.Errorf("40P01 死锁应映射 409, got %d", got)
 	}
-	// 其他 SQLSTATE 不应误判为死锁 409
+	// Other SQLSTATE should not be mistaken for deadlock 409
 	if got := statusFor(&pgconn.PgError{Code: "23505"}); got == http.StatusConflict {
 		t.Errorf("非 40P01 不应 409, got %d", got)
 	}

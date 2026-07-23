@@ -1,4 +1,4 @@
-// Package docker 探测 docker/compose/daemon 环境（up 命令前置）。
+// Package docker detects the docker/compose/daemon environment (prefixed to the up command).
 package docker
 
 import (
@@ -6,7 +6,7 @@ import (
 	"os/exec"
 )
 
-// Commander 执行命令的抽象（单测注入假实现）。
+// Commander abstraction for executing commands (single test injects fake implementation).
 type Commander interface {
 	Output(ctx context.Context, name string, args ...string) ([]byte, error)
 }
@@ -17,19 +17,19 @@ func (realCommander) Output(ctx context.Context, name string, args ...string) ([
 	return exec.CommandContext(ctx, name, args...).Output()
 }
 
-// ProbeResult docker 环境探测结果。
+// ProbeResult Docker environment detection result.
 type ProbeResult struct {
 	HasDocker     bool
-	HasCompose    bool // docker compose 子命令可用
+	HasCompose    bool // docker compose subcommand is available
 	DaemonRunning bool
 }
 
-// Probe 用真 exec 探测。
+// Probe probes with true exec.
 func Probe(ctx context.Context) ProbeResult {
 	return ProbeWith(ctx, realCommander{})
 }
 
-// ProbeWith 用注入的 commander 探测（可单测）。
+// ProbeWith probes with the injected commander (single testable).
 func ProbeWith(ctx context.Context, cmd Commander) ProbeResult {
 	res := ProbeResult{}
 	if _, err := cmd.Output(ctx, "docker", "--version"); err != nil {
@@ -45,20 +45,20 @@ func ProbeWith(ctx context.Context, cmd Commander) ProbeResult {
 	return res
 }
 
-// OK up 前置：docker + compose + daemon 皆就绪。
+// OK up prerequisites: docker + compose + daemon are all ready.
 func (p ProbeResult) OK() bool {
 	return p.HasDocker && p.HasCompose && p.DaemonRunning
 }
 
-// Hint 失败时的人类可读提示。
+// Hint Human-readable hint on failure.
 func (p ProbeResult) Hint() string {
 	switch {
 	case !p.HasDocker:
-		return "未检测到 docker，请先安装 Docker"
+		return "Docker was not detected; install Docker first"
 	case !p.HasCompose:
-		return "未检测到 docker compose 子命令，请升级 Docker"
+		return "The docker compose subcommand was not detected; upgrade Docker"
 	case !p.DaemonRunning:
-		return "docker daemon 未运行，请先启动 Docker Desktop"
+		return "The Docker daemon is not running; start Docker Desktop first"
 	default:
 		return ""
 	}

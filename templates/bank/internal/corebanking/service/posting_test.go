@@ -18,7 +18,7 @@ func TestBuildEntries_Deposit(t *testing.T) {
 	if len(es) != 2 {
 		t.Fatalf("应 2 条分录, got %d", len(es))
 	}
-	// 借 1001 现金 / 贷 D1 活期
+	// Borrow 1001 cash / loan D1 current
 	if es[0].AccountNo != domain.CashSubject || es[0].DCFlag != domain.DCDebit || es[0].SubjectCode != "1001" {
 		t.Errorf("借方分录不对: %+v", es[0])
 	}
@@ -29,7 +29,7 @@ func TestBuildEntries_Deposit(t *testing.T) {
 
 func TestBuildEntries_Withdraw(t *testing.T) {
 	es, _ := BuildEntries(domain.ActionWithdraw, acct("D1", "2011"), nil, domain.NewMoneyFromCents(10000))
-	// 借 D1 活期 / 贷 1001 现金
+	// Borrow D1 current / loan 1001 cash
 	if es[0].AccountNo != "D1" || es[0].DCFlag != domain.DCDebit {
 		t.Errorf("借方应 D1 借: %+v", es[0])
 	}
@@ -41,7 +41,7 @@ func TestBuildEntries_Withdraw(t *testing.T) {
 func TestBuildEntries_Transfer(t *testing.T) {
 	to := acct("D2", "2011")
 	es, _ := BuildEntries(domain.ActionTransfer, acct("D1", "2011"), &to, domain.NewMoneyFromCents(5000))
-	// 借 D1 / 贷 D2
+	// Debit D1 / Loan D2
 	if es[0].AccountNo != "D1" || es[0].DCFlag != domain.DCDebit {
 		t.Errorf("借方应 D1: %+v", es[0])
 	}

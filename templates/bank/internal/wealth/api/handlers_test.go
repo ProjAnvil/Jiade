@@ -16,7 +16,7 @@ import (
 type fakeWealthRepo struct {
 	holding *domain.WealthHolding
 	profile *domain.WealthProfile
-	// 记录最近一次 ListHoldings 参数
+	// Record the latest ListHoldings parameter
 	gotCustID string
 	gotOffset int
 	gotLimit  int

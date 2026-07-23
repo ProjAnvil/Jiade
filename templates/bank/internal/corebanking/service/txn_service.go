@@ -11,7 +11,7 @@ import (
 	"bank/internal/platform/pg"
 )
 
-// 记账/冲正错误。
+// Bookkeeping/reversal errors.
 var (
 	ErrAccountNotFound     = fmt.Errorf("账户不存在")
 	ErrAccountNotActive    = fmt.Errorf("账户非 active 状态")
@@ -21,12 +21,12 @@ var (
 	ErrAlreadyReversed     = fmt.Errorf("凭证已冲正")
 )
 
-// AccountReader 记账用的账户只读查询（repo.AccountRepo 实现）。
+// AccountReader Account read-only query for accounting (implemented by repo.AccountRepo).
 type AccountReader interface {
 	GetDemand(ctx context.Context, accountNo string) (domain.DemandAccount, error)
 }
 
-// TxnStore 流水/余额查询接口（只读，repo 实现）—— 保留原有只读能力。
+// TxnStore flow/balance query interface (read-only, repo implementation) - retains the original read-only capability.
 type TxnStore interface {
 	ListTxns(ctx context.Context, accountNo, from, to string) ([]domain.Txn, error)
 	GetLatestBalance(ctx context.Context, accountNo string) (domain.Balance, error)
@@ -37,18 +37,18 @@ type TxnService struct {
 	accounts AccountReader
 	ledger   *LedgerService
 	store    LedgerStore
-	read     TxnStore // 可选：只读查询沿用（与写依赖解耦）
+	read     TxnStore // Optional: read-only query inheritance (decoupled from write dependencies)
 }
 
-// NewTxnService 构造记账服务：db 为事务边界；accounts 读取账户；ledger 过账；store 落库（含 SetTxnSummary）。
+// NewTxnService constructs an accounting service: db is the transaction boundary; accounts read accounts; ledger posts; store stores (including SetTxnSummary).
 func NewTxnService(db *sql.DB, accounts AccountReader, ledger *LedgerService, store LedgerStore) *TxnService {
 	return &TxnService{db: db, accounts: accounts, ledger: ledger, store: store}
 }
 
-// WithReader 注入只读 store（ListTxns/GetBalance 供 api 只读 handler 复用）。
+// WithReader injects the read-only store (ListTxns/GetBalance is reused by the api read-only handler).
 func (s *TxnService) WithReader(read TxnStore) *TxnService { s.read = read; return s }
 
-// RecordInput 记账请求。deposit/withdraw 用 AccountNo；transfer 用 FromAccount/ToAccount。
+// RecordInput accounting request. Use AccountNo for deposit/withdraw; use FromAccount/ToAccount for transfer.
 type RecordInput struct {
 	Action                            domain.Action
 	AccountNo, FromAccount, ToAccount string
@@ -56,11 +56,11 @@ type RecordInput struct {
 	Ccy, Summary                      string
 }
 
-// Record 记账：业务意图 → 复式分录 → 事务内原子过账。
-// 事务内：锁账户余额行(EnsureBalanceRow) → 校验(active/ccy/透支) → BuildEntries → Post → 落 summary。
-// transfer 按 account_no 升序锁两账户（防 AB-BA 死锁）。
-// 返回 domain.Booking（voucherNo + 复式流水）。
-// 生产路径 db 非 nil → pg.RunInTx 包裹；db==nil（仅单元测试用 fake store）→ 直接以 q=nil 执行 fn。
+// Record accounting: business intent → double entry → atomic posting within transaction.
+// Within the transaction: Lock account balance row (EnsureBalanceRow) → Verify (active/ccy/overdraft) → BuildEntries → Post → drop summary.
+// transfer locks two accounts in ascending order of account_no (to prevent AB-BA deadlock).
+// Return domain.Booking(voucherNo + duplex voucher).
+// Production path db non-nil → pg.RunInTx package; db==nil (only fake store for unit testing) → execute fn directly with q=nil.
 func (s *TxnService) Record(ctx context.Context, in RecordInput) (domain.Booking, error) {
 	bizDate, err := s.store.GetBizDate(ctx)
 	if err != nil {
@@ -74,11 +74,11 @@ func (s *TxnService) Record(ctx context.Context, in RecordInput) (domain.Booking
 
 	run := pg.RunInTx
 	if s.db == nil {
-		// 单测路径：fake store 忽略 q，直接执行 fn（事务原子性由集成测试覆盖）
+		// Single test path: fake store ignores q and directly executes fn (transaction atomicity is covered by integration tests)
 		run = func(_ context.Context, _ *sql.DB, fn func(pg.DBTX) error) error { return fn(nil) }
 	}
 	err = run(ctx, s.db, func(q pg.DBTX) error {
-		// 解析主账户（单一获取，避免冗余二次查询）
+		// Parse the main account (single acquisition to avoid redundant secondary queries)
 		primaryNo := in.AccountNo
 		if in.Action == domain.ActionTransfer {
 			primaryNo = in.FromAccount
@@ -95,7 +95,7 @@ func (s *TxnService) Record(ctx context.Context, in RecordInput) (domain.Booking
 		}
 		ccy := acct.Ccy
 
-		// transfer 取对手账户（贷方）
+		// Transfer takes the counterparty account (credit)
 		var counterparty *domain.DemandAccount
 		if in.Action == domain.ActionTransfer {
 			toAcct, err := s.accounts.GetDemand(ctx, in.ToAccount)
@@ -113,8 +113,8 @@ func (s *TxnService) Record(ctx context.Context, in RecordInput) (domain.Booking
 			return err
 		}
 
-		// 锁账户余额行（按 account_no 升序，防 AB-BA 死锁）+ 透支检查
-		// 透支：withdraw/transfer 的付款方（acct.AccountNo）余额不足则拒绝
+		// Lock account balance rows (in ascending order by account_no to prevent AB-BA deadlock) + overdraft check
+		// Overdraft: If the payer (acct.AccountNo) of withdraw/transfer has insufficient balance, it will be rejected.
 		lockAccounts := lockedAccountList(in)
 		for _, no := range lockAccounts {
 			subject := acct.SubjectCode
@@ -125,7 +125,7 @@ func (s *TxnService) Record(ctx context.Context, in RecordInput) (domain.Booking
 			if err != nil {
 				return err
 			}
-			// 仅对付款方做透支检查（acct.AccountNo）。deposit 不检查。
+			// Only do overdraft checks on the payer (acct.AccountNo). deposit is not checked.
 			if no == acct.AccountNo && (in.Action == domain.ActionWithdraw || in.Action == domain.ActionTransfer) {
 				if in.Amount > bal.AvailableBalance {
 					return ErrInsufficientBalance
@@ -133,12 +133,12 @@ func (s *TxnService) Record(ctx context.Context, in RecordInput) (domain.Booking
 			}
 		}
 
-		// 过账（Post 不填 summary，summary 在 Post 后单独 UPDATE 落库）
+		// Post (Post does not fill in summary, summary will be stored separately in UPDATE after Post)
 		txns, err := s.ledger.Post(ctx, q, entries, bizDate, ccy, voucherNo, "")
 		if err != nil {
 			return err
 		}
-		// summary 落库（DB UPDATE，非内存赋值）
+		// summary drop database (DB UPDATE, non-memory assignment)
 		if in.Summary != "" {
 			if err := s.store.SetTxnSummary(ctx, q, voucherNo, in.Summary); err != nil {
 				return err
@@ -156,36 +156,36 @@ func (s *TxnService) Record(ctx context.Context, in RecordInput) (domain.Booking
 	return booking, nil
 }
 
-// ReverseResult 冲正结果。
+// ReverseResult Reverse result.
 type ReverseResult struct {
 	VoucherNo         string
 	Mode              string
-	Status            string // 蓝冲: reversed；红冲: 原 normal（不变）
-	ReversedVoucherNo string // 红冲产生的反向凭证号；蓝冲为空
+	Status            string // Blue rush: reversed; red rush: original normal (unchanged)
+	ReversedVoucherNo string // The reverse voucher number generated by the red flush; the blue flush is empty.
 	Txns              []domain.Txn
 }
 
-// Reverse 冲正：blue=改状态+逆向delta回滚(不新增流水)；red=反向分录走Post(新增反向流水)。
-// 一凭证只能冲一次。冲正本身不可再冲正。
+// Reverse: blue = change status + reverse delta rollback (no new transaction will be added); red = reverse entry will be Posted (reverse transaction will be added).
+// One voucher can only be used once. The correction itself cannot be corrected again.
 //
-// 并发安全（final review Important #1 修复）：
-//   - 事务内先用 LockTxnsByVoucher（SELECT ... FOR UPDATE）锁本凭证所有流水行，串行化
-//     对同一凭证的并发冲正。两个并发 Reverse 在此排队，第二个拿到锁时第一个已 commit。
-//   - 蓝冲：先 HasReversal 拦截"红后蓝"（红冲不改 txn_status，normal 守卫拦不住）；
-//     再 UpdateTxnStatus（WHERE 带 txn_status='normal' 守卫）拦"蓝蓝并发"。首笔把 normal→reversed
-//     提交后，次笔 UPDATE 只剩 reversed 行可匹配 → RowsAffected=0 → sql.ErrNoRows →
-//     ErrAlreadyReversed。即使忽略锁，这两层守卫也足以防止双回滚。
-//   - 红冲：不改 txn_status（spec §7.3 红冲原流水 txn_status 不变）。改用 HasReversal(ref_txn_id)
-//     判断首笔红冲反向分录是否已落库；首笔 Post 提交的 reverse entries 带 ref_txn_id，次笔拿到锁
-//     后 HasReversal=true → ErrAlreadyReversed。
+// Concurrency safety (final review Important #1 fix):
+// - First use LockTxnsByVoucher (SELECT ... FOR UPDATE) within the transaction to lock all pipeline lines of this voucher and serialize it
+// Concurrent reversal of the same voucher. Two concurrent reverses are queued here, and the first one has been committed when the second one gets the lock.
+// - Blue rush: first intercept "red and then blue" with HasReversal (red rush does not change txn_status, normal guard cannot stop it);
+// Then UpdateTxnStatus (WHERE with txn_status='normal' guard) blocks "blue-blue concurrency". The first stroke is normal→reversed
+// After submission, only reversed rows are left to match for this UPDATE → RowsAffected=0 → sql.ErrNoRows →
+// ErrAlreadyReversed. Even ignoring locks, these two layers of guards are enough to prevent double rollbacks.
+// - Red flush: txn_status does not change (spec §7.3 Red flush original running water txn_status remains unchanged). Use HasReversal(ref_txn_id) instead
+// Determine whether the first red flush reverse entry has been deposited; the reverse entries submitted by the first Post have ref_txn_id, and the second one is locked
+// After HasReversal=true → ErrAlreadyReversed.
 //
-// 四种冲正顺序组合均有守卫（B-3 fix2 闭合"红后蓝"）：
-//   - 蓝蓝：UpdateTxnStatus normal 守卫拒绝次笔 ✓
-//   - 蓝红：`any TxnStatus==reversed` 检查拒绝 ✓
-//   - 红红：HasReversal 拒绝 ✓
-//   - 红蓝：蓝冲入口新增的 HasReversal 拒绝 ✓
+// The four flush sequence combinations all have guards (B-3 fix2 closes "red and then blue"):
+// - Lanlan: UpdateTxnStatus normal guard rejects the second pen ✓
+// - Blue-red: `any TxnStatus==reversed` check rejected ✓
+// - Red: HasReversal rejected ✓
+// - Red and Blue: New HasReversal rejection for Blue Chong entrance ✓
 //
-// 生产路径 db 非 nil → pg.RunInTx 包裹；db==nil（单测）→ 直接以 q=nil 执行 fn。
+// Production path db non-nil → pg.RunInTx package; db==nil (single test) → execute fn directly with q=nil.
 func (s *TxnService) Reverse(ctx context.Context, voucherNo string, mode domain.ReverseMode) (ReverseResult, error) {
 	bizDate, err := s.store.GetBizDate(ctx)
 	if err != nil {
@@ -201,7 +201,7 @@ func (s *TxnService) Reverse(ctx context.Context, voucherNo string, mode domain.
 		run = func(_ context.Context, _ *sql.DB, fn func(pg.DBTX) error) error { return fn(nil) }
 	}
 	err = run(ctx, s.db, func(q pg.DBTX) error {
-		// 锁本凭证所有流水行（FOR UPDATE），串行化并发冲正。
+		// Lock all pipeline lines of this certificate (FOR UPDATE), serialize and correct concurrently.
 		origs, err := s.store.LockTxnsByVoucher(ctx, q, voucherNo)
 		if err != nil {
 			return err
@@ -209,7 +209,7 @@ func (s *TxnService) Reverse(ctx context.Context, voucherNo string, mode domain.
 		if len(origs) == 0 {
 			return ErrVoucherNotFound
 		}
-		// 防重复：原凭证任一流水已 reversed → 拒绝（此检查在行锁内，对并发蓝冲有效）。
+		// Anti-duplication: Any flow of the original certificate has been reversed → rejected (this check is within the row lock and is effective for concurrent blue flushes).
 		for _, t := range origs {
 			if t.TxnStatus == domain.TxnStatusReversed {
 				return ErrAlreadyReversed
@@ -219,22 +219,22 @@ func (s *TxnService) Reverse(ctx context.Context, voucherNo string, mode domain.
 
 		switch mode {
 		case domain.ReverseBlue:
-			// 红冲不改 txn_status（spec §7.3），normal 守卫拦不住"红后蓝"——用 HasReversal 兜底。
-			// 蓝蓝并发由下面的 UpdateTxnStatus normal 守卫兜底；红蓝/红红由 HasReversal 兜底。
+			// Red rush does not change txn_status (spec §7.3), normal guard cannot stop "red behind blue" - use HasReversal to cover up.
+			// Blue-blue concurrency is guarded by the following UpdateTxnStatus normal; red-blue/red-red is guarded by HasReversal.
 			if has, err := s.store.HasReversal(ctx, q, origs[0].TxnID); err != nil {
 				return err
 			} else if has {
 				return ErrAlreadyReversed
 			}
-			// 原子 normal→reversed 守卫：并发蓝冲只有一个改到行。
+			// Atomic normal→reversed guard: only one of the concurrent blue rushes is changed to the line.
 			if err := s.store.UpdateTxnStatus(ctx, q, voucherNo, domain.TxnStatusReversed); err != nil {
-				// RowsAffected=0（所有行已 reversed）→ sql.ErrNoRows → 视作已冲正。
+				// RowsAffected=0 (all rows reversed) → sql.ErrNoRows → treated as reversed.
 				if errors.Is(err, sql.ErrNoRows) {
 					return ErrAlreadyReversed
 				}
 				return err
 			}
-			// 逆向 delta 回滚余额/总账（原 delta 的镜像：贷→借翻转符号）
+			// Reverse delta rollback balance/general ledger (mirror of original delta: credit → debit flip symbol)
 			deltas, gl := reverseRollback(origs, bizDate)
 			if err := s.store.ApplyBalanceDeltas(ctx, q, bizDate, deltas); err != nil {
 				return err
@@ -245,7 +245,7 @@ func (s *TxnService) Reverse(ctx context.Context, voucherNo string, mode domain.
 			res = ReverseResult{VoucherNo: voucherNo, Mode: string(mode), Status: string(domain.TxnStatusReversed)}
 
 		case domain.ReverseRed:
-			// 红冲不改 txn_status（spec §7.3）；用 HasReversal 判首笔红冲反向分录是否已落库。
+			// The red flush does not change txn_status (spec §7.3); use HasReversal to determine whether the first red flush reverse entry has been dropped.
 			ref := origs[0].TxnID
 			hasRev, err := s.store.HasReversal(ctx, q, ref)
 			if err != nil {
@@ -274,19 +274,19 @@ func (s *TxnService) Reverse(ctx context.Context, voucherNo string, mode domain.
 	return res, nil
 }
 
-// reverseRollback 由原流水算逆向 BalanceDelta（原贷+→逆向-，原借-→逆向+）与镜像总账。
-// 注意 byAcct（净值）与 gl（发生额）符号语义不同：发生额回滚一律用 Sub。
+// reverseRollback calculates the reverse BalanceDelta from the original flow (original loan + → reverse -, original debit - → reverse +) and the mirrored general ledger.
+// Note that the symbolic semantics of byAcct (net value) and gl (balance) are different: Sub is always used for balance rollback.
 func reverseRollback(txns []domain.Txn, bizDate string) ([]domain.BalanceDelta, domain.GLBalance) {
 	byAcct := map[string]domain.Money{}
 	subj := map[string]string{}
 	glDC, glCC := domain.Money(0), domain.Money(0)
 	for _, t := range txns {
 		if t.DCFlag == domain.DCCredit {
-			byAcct[t.AccountNo] = byAcct[t.AccountNo].Sub(t.Amount) // 原贷+ → 逆向-
-			glCC = glCC.Sub(t.Amount)                                // 发生额回滚：减
+			byAcct[t.AccountNo] = byAcct[t.AccountNo].Sub(t.Amount) // Original loan + → Reverse -
+			glCC = glCC.Sub(t.Amount)                               // Balance rollback: minus
 		} else {
-			byAcct[t.AccountNo] = byAcct[t.AccountNo].Add(t.Amount) // 原借- → 逆向+
-			glDC = glDC.Sub(t.Amount)                                // 发生额回滚：减（不是 Add！）
+			byAcct[t.AccountNo] = byAcct[t.AccountNo].Add(t.Amount) // Original borrow- → reverse +
+			glDC = glDC.Sub(t.Amount)                               // Balance rollback: Subtract (not Add!)
 		}
 		subj[t.AccountNo] = t.SubjectCode
 	}
@@ -301,7 +301,7 @@ func reverseRollback(txns []domain.Txn, bizDate string) ([]domain.BalanceDelta, 
 	return deltas, gl
 }
 
-// reverseEntries 由原流水构造反向分录（dc_flag 翻转，金额不变）——红冲用，走 Post。
+// reverseEntries is a reverse entry constructed from the original flow structure (dc_flag is flipped, the amount remains unchanged) - used for red flushing and Post.
 func reverseEntries(txns []domain.Txn) []domain.Entry {
 	es := make([]domain.Entry, 0, len(txns))
 	for _, t := range txns {
@@ -314,8 +314,8 @@ func reverseEntries(txns []domain.Txn) []domain.Entry {
 	return es
 }
 
-// lockedAccountList 返回按 account_no 升序排列的待锁账户列表（防 AB-BA 死锁）。
-// deposit/withdraw：仅 AccountNo。transfer：FromAccount+ToAccount。
+// lockedAccountList returns a list of accounts to be locked in ascending order by account_no (to prevent AB-BA deadlock).
+// deposit/withdraw: AccountNo only. transfer: FromAccount+ToAccount.
 func lockedAccountList(in RecordInput) []string {
 	var list []string
 	if in.Action == domain.ActionTransfer {
@@ -327,9 +327,9 @@ func lockedAccountList(in RecordInput) []string {
 	return list
 }
 
-// --- 只读（保留 Spec A 原有能力，供 api handler 复用）---
+// --- Read-only (retain the original capabilities of Spec A for reuse by the api handler) ---
 
-// ListTxns 查流水（from/to 为 YYYY-MM-DD，空表示不限）。
+// ListTxns Check the running water (from/to is YYYY-MM-DD, empty means no limit).
 func (s *TxnService) ListTxns(ctx context.Context, accountNo, from, to string) ([]domain.Txn, error) {
 	if s.read == nil {
 		return nil, fmt.Errorf("txn: 未注入只读 store")
@@ -337,7 +337,7 @@ func (s *TxnService) ListTxns(ctx context.Context, accountNo, from, to string) (
 	return s.read.ListTxns(ctx, accountNo, from, to)
 }
 
-// GetBalance 取最新 biz_date 的账户余额。
+// GetBalance gets the account balance of the latest biz_date.
 func (s *TxnService) GetBalance(ctx context.Context, accountNo string) (domain.Balance, error) {
 	if s.read == nil {
 		return domain.Balance{}, fmt.Errorf("txn: 未注入只读 store")

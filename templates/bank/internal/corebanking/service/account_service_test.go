@@ -35,7 +35,7 @@ func TestOpenDemand_DefaultsActive(t *testing.T) {
 func TestClose_EnforcesStateMachine(t *testing.T) {
 	store := &recordingAccountStore{}
 	svc := NewAccountService(store)
-	// frozen 不能直接销户：状态机应拒绝
+	// Frozen cannot cancel the account directly: the state machine should reject it
 	if err := svc.Close(context.Background(), "D1", domain.AccountStatusFrozen); err == nil {
 		t.Error("frozen 状态不应能直接销户")
 	}

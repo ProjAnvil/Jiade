@@ -17,7 +17,7 @@ func TestGenCustomers_Deterministic(t *testing.T) {
 	if len(a) != 20 || a[0].CustID != "C0000001" {
 		t.Errorf("首行 cust_id=%s len=%d", a[0].CustID, len(a))
 	}
-	// 20% 对公：j%5==0 → 第 0 个对公
+	// 20% Public: j%5==0 → 0th public
 	if a[0].CustType != "对公" {
 		t.Errorf("j=0 应对公，got %s", a[0].CustType)
 	}

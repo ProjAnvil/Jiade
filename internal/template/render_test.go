@@ -24,7 +24,7 @@ func TestCopy_CreatesFullProject(t *testing.T) {
 	}
 	for _, p := range must {
 		if _, err := os.Stat(filepath.Join(dir, p)); err != nil {
-			t.Errorf("拷贝后缺失 %s: %v", p, err)
+			t.Errorf("%s is missing after copy: %v", p, err)
 		}
 	}
 }
@@ -36,7 +36,7 @@ func TestCopy_RejectsNonEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := Copy("bank", r, dir, false); err != ErrDirNotEmpty {
-		t.Errorf("非空应返回 ErrDirNotEmpty, got %v", err)
+		t.Errorf("a non-empty directory should return ErrDirNotEmpty, got %v", err)
 	}
 }
 
@@ -47,7 +47,7 @@ func TestCopy_ForceAllowsNonEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := Copy("bank", r, dir, true); err != nil {
-		t.Errorf("force 应允许非空目录: %v", err)
+		t.Errorf("force should allow a non-empty directory: %v", err)
 	}
 }
 
@@ -66,6 +66,6 @@ func TestCopy_IsVerbatim(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(got) != string(want) {
-		t.Error("拷贝应逐字一致")
+		t.Error("the copied content should be byte-identical")
 	}
 }

@@ -73,7 +73,7 @@ func TestMoneyAddSub(t *testing.T) {
 	}
 }
 
-// 禁 float 守卫：源码不得出现 float32/float64 关键字（防回归）。
+// Prohibited float guard: The float32/float64 keyword must not appear in the source code (anti-regression).
 func TestSourceHasNoFloat(t *testing.T) {
 	src, err := readFile("money.go")
 	if err != nil {

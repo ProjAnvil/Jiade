@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS ccy (
 CREATE TABLE IF NOT EXISTS chart_of_acct (
     subject_code   TEXT PRIMARY KEY,
     subject_name   TEXT NOT NULL,
-    dc_attr        TEXT NOT NULL,            -- 借/贷
+    dc_attr        TEXT NOT NULL,            -- borrow/loan
     level          INTEGER,
     parent_subject TEXT,
     status         TEXT DEFAULT 'active'
@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS acct_txn (
     biz_date      DATE NOT NULL,
     txn_ts        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     account_no    TEXT NOT NULL,
-    dc_flag       TEXT NOT NULL,             -- 借/贷
+    dc_flag       TEXT NOT NULL,             -- borrow/loan
     amount        NUMERIC(18,2) NOT NULL,
     ccy           TEXT NOT NULL,
     subject_code  TEXT NOT NULL,

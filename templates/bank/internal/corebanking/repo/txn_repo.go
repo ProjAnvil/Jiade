@@ -8,14 +8,14 @@ import (
 	"bank/internal/corebanking/domain"
 )
 
-// TxnRepo 流水/余额仓储。实现 service.TxnStore。
+// TxnRepo flow/balance storage. Implement service.TxnStore.
 type TxnRepo struct {
 	db *sql.DB
 }
 
 func NewTxnRepo(db *sql.DB) *TxnRepo { return &TxnRepo{db: db} }
 
-// ListTxns 实现 service.TxnStore.ListTxns（from/to 为 YYYY-MM-DD，空表示不限）。
+// ListTxns implements service.TxnStore.ListTxns (from/to is YYYY-MM-DD, empty means no limit).
 func (r *TxnRepo) ListTxns(ctx context.Context, accountNo, from, to string) ([]domain.Txn, error) {
 	q := `SELECT txn_id,biz_date::text,txn_ts::text,account_no,dc_flag,amount::text,ccy,subject_code,
 		COALESCE(opp_account,''),COALESCE(ref_txn_id,''),COALESCE(channel,''),COALESCE(summary,'')
@@ -58,7 +58,7 @@ func (r *TxnRepo) ListTxns(ctx context.Context, accountNo, from, to string) ([]d
 	return out, rows.Err()
 }
 
-// GetLatestBalance 实现 service.TxnStore.GetLatestBalance（取最新 biz_date 快照）。
+// GetLatestBalance implements service.TxnStore.GetLatestBalance (gets the latest biz_date snapshot).
 func (r *TxnRepo) GetLatestBalance(ctx context.Context, accountNo string) (domain.Balance, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT account_no,biz_date::text,balance::text,available_balance::text,
 		frozen_amount::text,subject_code FROM account_balance

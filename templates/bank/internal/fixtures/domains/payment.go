@@ -9,7 +9,7 @@ import (
 	"bank/internal/payment/domain"
 )
 
-// GenMerchants 生成 n 个商户（M%05d）。rng 偏移 +20。
+// GenMerchants generates n merchants (M%05d). rng offset +20.
 func GenMerchants(cfg fixtures.Config, n int) []domain.Merchant {
 	rng := fixtures.NewRNG(cfg.Seed + 20)
 	out := make([]domain.Merchant, n)
@@ -26,8 +26,8 @@ func GenMerchants(cfg fixtures.Config, n int) []domain.Merchant {
 	return out
 }
 
-// GenTransfers 用 core 的活期账户生成转账。金额 int64 分（[1,999] → cents）。
-// rng 偏移 +21。B-1 不做切日滚存，biz_date 散布在范围内（快照式）。
+// GenTransfers uses core's current account to generate transfers. Amount int64 cents ([1,999] → cents).
+// rng offset +21. B-1 does not perform date rollover, biz_date is scattered within the range (snapshot style).
 func GenTransfers(cfg fixtures.Config, demandNos []string, n int) []domain.Transfer {
 	if len(demandNos) == 0 {
 		return nil
@@ -43,7 +43,7 @@ func GenTransfers(cfg fixtures.Config, demandNos []string, n int) []domain.Trans
 			InAccount:   rng.Choice(demandNos),
 			Amount:      amt,
 			Ccy:         "CNY",
-			Fee:         domain.NewMoneyFromCents(amt.Cents() / 1000), // 0.1% 手续费
+			Fee:         domain.NewMoneyFromCents(amt.Cents() / 1000), // 0.1% handling fee
 			Channel:     rng.Choice(fixtures.Channels),
 			CounterBank: rng.Choice(fixtures.CounterBanks),
 			Status:      "success",
@@ -53,7 +53,7 @@ func GenTransfers(cfg fixtures.Config, demandNos []string, n int) []domain.Trans
 	return out
 }
 
-// GenConsumptions 用 core 账户 + 商户生成消费。rng 偏移 +22。
+// GenConsumptions uses core account + merchant to generate consumption. rng offset +22.
 func GenConsumptions(cfg fixtures.Config, demandNos []string, merchantIDs []string, n int) []domain.Consumption {
 	if len(demandNos) == 0 {
 		return nil
@@ -77,8 +77,8 @@ func GenConsumptions(cfg fixtures.Config, demandNos []string, merchantIDs []stri
 	return out
 }
 
-// WritePayments 幂等写 merchant + transfer_txn + consumption_txn（先 DELETE 后 INSERT）。
-// 删除顺序保证消费 → 转账 → 商户（消费引用商户，最后删商户）。
+// WritePayments is idempotent to write merchant + transfer_txn + consumption_txn (DELETE first and then INSERT).
+// The deletion sequence ensures consumption → transfer → merchant (the merchant is referenced for consumption, and the merchant is deleted last).
 func WritePayments(ctx context.Context, db *sql.DB,
 	merchants []domain.Merchant, transfers []domain.Transfer, consumptions []domain.Consumption) error {
 	for _, t := range []string{"consumption_txn", "transfer_txn", "merchant"} {

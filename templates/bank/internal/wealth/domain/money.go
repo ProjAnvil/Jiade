@@ -6,12 +6,12 @@ import (
 	"strings"
 )
 
-// Money 用 int64 分表示金额。金融禁浮点，杜绝精度损失。构造仅经 NewMoneyFromCents 或 ParseCents。
+// Money represents an amount in int64 cents. Binary fractional arithmetic is prohibited to prevent precision loss. Construct values only with NewMoneyFromCents or ParseCents.
 type Money int64
 
 func NewMoneyFromCents(cents int64) Money { return Money(cents) }
 
-// ParseCents 把 NUMERIC(18,2) 字符串解析为分。纯整数运算，杜绝浮点。
+// ParseCents parses a NUMERIC(18,2) string into cents using integer-only arithmetic.
 func ParseCents(s string) (Money, error) {
 	s = strings.TrimSpace(s)
 	neg := false
@@ -46,7 +46,7 @@ func (m Money) Add(o Money) Money { return m + o }
 func (m Money) Sub(o Money) Money { return m - o }
 func (m Money) Cents() int64      { return int64(m) }
 
-// String 返回 NUMERIC(18,2) 风格字符串（写 DB 用）。
+// String returns NUMERIC(18,2) style string (for writing to DB).
 func (m Money) String() string {
 	n := int64(m)
 	neg := n < 0

@@ -11,7 +11,7 @@ import (
 	"bank/internal/risk/domain"
 )
 
-// risk 规则。field/op/threshold 编进 condition_json。
+// risk rules. field/op/threshold is compiled into condition_json.
 var riskRules = []struct {
 	ID, Name, Field string
 	Threshold       int
@@ -24,13 +24,13 @@ var riskRules = []struct {
 	{"R005", "黑名单命中", "blacklist", 1, "拦截"},
 }
 
-// RiskStatic 静态表行集合。
+// RiskStatic static table row collection.
 type RiskStatic struct {
 	Rules      []domain.RiskRule
 	Blacklists []domain.Blacklist
 }
 
-// GenRiskStatic 生成 risk_rule + blacklist。rng 偏移 +32。
+// GenRiskStatic generates risk_rule + blacklist. rng offset +32.
 func GenRiskStatic(cfg fixtures.Config, custIDs []string) RiskStatic {
 	rng := fixtures.NewRNG(cfg.Seed + 32)
 	sf := fixtures.ScaleFactor(cfg.Scale)
@@ -57,7 +57,7 @@ func GenRiskStatic(cfg fixtures.Config, custIDs []string) RiskStatic {
 	return RiskStatic{Rules: rules, Blacklists: blacklists}
 }
 
-// WriteRiskStatic 幂等写 risk_rule + blacklist（先 DELETE 后 INSERT）。
+// WriteRiskStatic writes risk_rule + blacklist idempotently (DELETE first and then INSERT).
 func WriteRiskStatic(ctx context.Context, db *sql.DB, s RiskStatic) error {
 	for _, t := range []string{"blacklist", "risk_rule"} {
 		if _, err := db.ExecContext(ctx, "DELETE FROM "+t); err != nil {
@@ -81,7 +81,7 @@ func WriteRiskStatic(ctx context.Context, db *sql.DB, s RiskStatic) error {
 	return nil
 }
 
-// RunRisk 按 bizDate 推进生成 risk_event（逐日三因子 + 每日独立 rng seed+33+ordinal）。
+// RunRisk advances by bizDate to generate risk_event (daily three factors + daily independent rng seed+33+ordinal).
 func RunRisk(ctx context.Context, db *sql.DB, cfg fixtures.Config, custIDs, accountNos []string) error {
 	days, err := bizDateRange(cfg.StartBizDate, cfg.EndBizDate)
 	if err != nil {
@@ -107,15 +107,15 @@ func RunRisk(ctx context.Context, db *sql.DB, cfg fixtures.Config, custIDs, acco
 		compact := dateCompact(d)
 		events := make([]domain.RiskEvent, 0, n)
 		for i := 0; i < n; i++ {
-			ruleID := pickStr(rng, ruleIDs) // 同一 rule id 复用于 RuleID 与 Summary，避免文案/规则错配
+			ruleID := pickStr(rng, ruleIDs) // The same rule id is reused for RuleID and Summary to avoid copywriting/rule mismatch
 			events = append(events, domain.RiskEvent{
 				EventID: fmt.Sprintf("RS-EV-%s-%05d", compact, i), BizDate: dateStr,
 				CustID: pickStr(rng, custIDs), AccountNo: pickStr(rng, accountNos),
-				RuleID: ruleID,
-				RiskScore: fmt.Sprintf("%.2f", 0.3+rng.Float64()*0.65),
+				RuleID:      ruleID,
+				RiskScore:   fmt.Sprintf("%.2f", 0.3+rng.Float64()*0.65),
 				ActionTaken: rng.Choice(fixtures.RiskActions),
-				TxnRef:  fmt.Sprintf("RS-TX-%s-%05d", compact, i),
-				Summary: "触发规则 " + ruleID,
+				TxnRef:      fmt.Sprintf("RS-TX-%s-%05d", compact, i),
+				Summary:     "触发规则 " + ruleID,
 			})
 		}
 		if err := pg.RunInTx(ctx, db, func(q pg.DBTX) error {
@@ -130,7 +130,7 @@ func RunRisk(ctx context.Context, db *sql.DB, cfg fixtures.Config, custIDs, acco
 	return nil
 }
 
-// bulkInsertRiskEvents 批量插 risk_event（9 列；cust/account/rule/txn_ref/summary nullable）。
+// bulkInsertRiskEvents Bulk insert risk_event (9 columns; cust/account/rule/txn_ref/summary nullable).
 func bulkInsertRiskEvents(ctx context.Context, q pg.DBTX, rows []domain.RiskEvent) error {
 	if len(rows) == 0 {
 		return nil
@@ -156,7 +156,7 @@ func bulkInsertRiskEvents(ctx context.Context, q pg.DBTX, rows []domain.RiskEven
 	return nil
 }
 
-// pickStr 从 list 随机选一个（空 list 返回 ""）。
+// pickStr picks a random item from the list (returns "" for an empty list).
 func pickStr(rng *fixtures.RNG, list []string) string {
 	if len(list) == 0 {
 		return ""

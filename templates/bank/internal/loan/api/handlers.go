@@ -1,4 +1,4 @@
-// Package api 是 loan 服务的传输层：http handlers + chi router。
+// Package api is the transport layer of loan service: http handlers + chi router.
 package api
 
 import (
@@ -14,18 +14,18 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// Handlers 持有 loan 只读服务。生产由 Svc 代理 repo；单测用
-// service.NewLoanService(fakeLoanRepo) 注入。
+// Handlers hold loan read-only services. Production is done by Svc proxy repo; for single testing
+// service.NewLoanService(fakeLoanRepo) injection.
 type Handlers struct {
 	Svc *service.LoanService
 }
 
-// Healthz 存活检查。
+// Healthz Survival Check.
 func (h *Handlers) Healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// ListProducts 列贷款产品。
+// ListProducts lists loan products.
 func (h *Handlers) ListProducts(w http.ResponseWriter, r *http.Request) {
 	list, err := h.Svc.ListProducts(r.Context())
 	if err != nil {
@@ -43,7 +43,7 @@ func (h *Handlers) ListProducts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"products": out})
 }
 
-// ListAccounts 按产品/状态筛选借据（query: product_code/status/offset/limit）。
+// ListAccounts filters IOUs by product/status (query: product_code/status/offset/limit).
 func (h *Handlers) ListAccounts(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	offset, _ := strconv.Atoi(q.Get("offset"))
@@ -60,7 +60,7 @@ func (h *Handlers) ListAccounts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": out})
 }
 
-// GetAccount 查单个借据。不存在返回 404。
+// GetAccount checks a single IOU. Does not exist and returns 404.
 func (h *Handlers) GetAccount(w http.ResponseWriter, r *http.Request) {
 	no := chi.URLParam(r, "loan_no")
 	a, err := h.Svc.GetAccount(r.Context(), no)
@@ -75,7 +75,7 @@ func (h *Handlers) GetAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, accountRespOf(a))
 }
 
-// ListBalances 按日期范围查逐日余额快照（query: from/to/loan_no/offset/limit）。
+// ListBalances checks daily balance snapshots by date range (query: from/to/loan_no/offset/limit).
 func (h *Handlers) ListBalances(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	offset, _ := strconv.Atoi(q.Get("offset"))
@@ -95,7 +95,7 @@ func (h *Handlers) ListBalances(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"balances": out})
 }
 
-// ListOverdue 按五级分类/日期范围查逾期（query: overdue_class/from/to/offset/limit）。
+// ListOverdue checks overdue items by five-level classification/date range (query: overdue_class/from/to/offset/limit).
 func (h *Handlers) ListOverdue(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	offset, _ := strconv.Atoi(q.Get("offset"))
@@ -115,7 +115,7 @@ func (h *Handlers) ListOverdue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"overdues": out})
 }
 
-// GetProfile 查借据档案（跨库联邦 JOIN）。
+// GetProfile checks the IOU file (cross-database federated JOIN).
 func (h *Handlers) GetProfile(w http.ResponseWriter, r *http.Request) {
 	no := chi.URLParam(r, "loan_no")
 	p, err := h.Svc.Profile(r.Context(), no)
@@ -134,7 +134,7 @@ func (h *Handlers) GetProfile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// accountRespOf 借据 → DTO。
+// accountRespOf IOU → DTO.
 func accountRespOf(a domain.LoanAccount) loanAccountResp {
 	return loanAccountResp{
 		LoanNo: a.LoanNo, CustID: a.CustID, ProductCode: a.ProductCode, Ccy: a.Ccy,

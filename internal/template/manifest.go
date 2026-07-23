@@ -1,7 +1,7 @@
-// Package template 发现内嵌模板、解析清单、逐字渲染（解压 tar）。
+// Package template discovers embedded templates, parses manifests, and renders verbatim (unpacked tar).
 package template
 
-// Manifest template.yaml 清单（设计文档 §6）。随工程拷贝，被 list/up/seed 读。
+// Manifest template.yaml Manifest (Design Document §6). Copied with the project and read by list/up/seed.
 type Manifest struct {
 	Name        string     `yaml:"name"`
 	Description string     `yaml:"description"`
@@ -11,20 +11,20 @@ type Manifest struct {
 	Seed        Seed       `yaml:"seed"`
 }
 
-// Database 某业务库及其迁移 SQL。
+// Database A business database and its migration SQL.
 type Database struct {
 	Name    string `yaml:"name"`
 	Migrate string `yaml:"migrate"`
 }
 
-// Service 某服务及其端口、所属库。
+// Service A service, its port, and its affiliated library.
 type Service struct {
 	Name string `yaml:"name"`
 	Port int    `yaml:"port"`
 	DB   string `yaml:"db"`
 }
 
-// Seed fixture 生成器入口与规模。
+// Seed fixture generator entry and scale.
 type Seed struct {
 	Entrypoint string   `yaml:"entrypoint"`
 	Scales     []string `yaml:"scales"`

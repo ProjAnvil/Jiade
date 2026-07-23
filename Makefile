@@ -1,20 +1,20 @@
 .PHONY: generate test bank-test e2e clean
 
-# 打包 templates/bank → templates.tar（go:embed 需要；改模板后重跑）
+# Pack templates/bank → templates.tar (required by go:embed; rerun after changing the template)
 generate:
 	go generate ./internal/template
 
-# jiade 自身（不含 templates/bank——它是独立 module）
+# jiade itself (without templates/bank - it is an independent module)
 test: generate
 	go build ./...
 	go test ./...
 
-# bank 模板作为独立 module 验证（验收 #2）
+# bank template as standalone module verification (acceptance #2)
 bank-test:
 	cd templates/bank && go build ./... && go test ./...
 
-# 端到端冒烟（需 docker；验收 #4/#5）
-# 两阶段启动：先 postgres → seed 建 3 库 + setup_fdw → 再 3 服务，消除启动竞态
+# End-to-end smoke (requires docker; acceptance #4/#5)
+# Two-stage startup: postgres → seed → then start the service to eliminate startup race conditions
 e2e: generate
 	rm -rf /tmp/jiade-e2e
 	go run ./cmd/jiade init --template bank --dir /tmp/jiade-e2e --force
@@ -22,14 +22,14 @@ e2e: generate
 	@until docker compose -f /tmp/jiade-e2e/docker-compose.yaml exec -T postgres pg_isready -U bank >/dev/null 2>&1; do sleep 1; done
 	cd /tmp/jiade-e2e && go run ./cmd/seed --scale=dev --reset
 	cd /tmp/jiade-e2e && docker compose up -d --build core-banking customer payment
-	# 三服务 healthz（验收 #4）
+	# Three services healthz (Acceptance #4)
 	curl -sf --retry 10 --retry-connrefused --retry-delay 2 localhost:18080/healthz
 	curl -sf --retry 10 --retry-connrefused --retry-delay 2 localhost:18081/healthz
 	curl -sf --retry 10 --retry-connrefused --retry-delay 2 localhost:18082/healthz
-	# core-banking 只读（Spec A）
+	# core-banking read-only (Spec A)
 	curl -sf localhost:18080/api/v1/accounts/D0000000001
 	curl -sf "localhost:18080/api/v1/accounts/D0000000001/balance"
-	# 2 个跨库 FDW JOIN 端点（验收 #5）
+	# 2 cross-service HTTP aggregation endpoints (Acceptance #5)
 	curl -sf localhost:18081/api/v1/customers/C0000001/accounts
 	curl -sf localhost:18082/api/v1/payments/transfers/PT000000000001/parties
 	@echo "E2E OK"

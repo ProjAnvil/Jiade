@@ -8,15 +8,15 @@ Think of it as scaffolding for *whole systems*, not just code: what you get is a
 
 ## What you get (the `bank` template)
 
-A miniature core-banking system — **7 Go microservices + 7 PostgreSQL databases** (single instance), wired together with `postgres_fdw` cross-database federation:
+A miniature core-banking system — **7 Go microservices + 7 PostgreSQL databases** (single instance). Each service owns its database and cross-domain reads use HTTP APIs:
 
 | Service | Port | Database | Contents |
 |---------|------|----------|----------|
 | core-banking | 18080 | core_db | Demand/fixed accounts, double-entry ledger, daily balances, write API (post/reverse) |
-| customer | 18081 | cust_db | Customer info, account relationships (read-only + FDW join) |
-| payment | 18082 | pay_db | Merchants, transfers, consumption txns (read-only + FDW join) |
-| reward | 18083 | reward_db | Points accounts/txns, coupons, campaigns (read-only + FDW join) |
-| risk | 18084 | risk_db | Risk rules, events, blacklist (read-only + FDW join) |
+| customer | 18081 | cust_db | Customer info, account relationships |
+| payment | 18082 | pay_db | Merchants, transfers, consumption txns |
+| reward | 18083 | reward_db | Points accounts/txns, coupons, campaigns |
+| risk | 18084 | risk_db | Risk rules, events, blacklist |
 | loan | 18085 | loan_db | Loan accounts, disbursements, monthly repayment, 5-class overdue, **daily balance snapshots** |
 | wealth | 18086 | wealth_db | Wealth products, **daily NAV walk**, holdings, orders, daily interest |
 
@@ -24,7 +24,7 @@ Every service follows the same four-layer vertical slice (`api → service → r
 
 - **Deterministic fixtures**: same seed + scale → byte-identical rows. Reproducible IDs (no UUIDs), per-day RNG (`seed + offset + dayOrdinal`).
 - **Two data shapes**: three-factor event streams (`trend × seasonal × cyclical` — weekend volume < weekday) and path-dependent **daily rolling snapshots** (account balances, loan balances, NAV walk).
-- **Real cross-db federation**: each service queries its own database and joins `cust_db.cust_info` over `postgres_fdw` (e.g. `GET /api/v1/loan/accounts/{loan_no}/profile`).
+- **Database-per-service ownership**: a service queries only its own database and obtains cross-domain data over HTTP (e.g. loan calls customer for `GET /api/v1/loan/accounts/{loan_no}/profile`).
 - **Money is int64 cents**, never float. Rates/NAV/shares (non-monetary decimals) are stored as NUMERIC text.
 - **Self-contained output**: the generated project builds and runs without jiade installed — only Docker and Go are needed.
 
@@ -62,7 +62,7 @@ jiade seed    # go run ./cmd/seed --scale=dev --reset
 curl localhost:18085/healthz                                          # loan
 curl localhost:18086/healthz                                          # wealth
 curl localhost:18085/api/v1/loan/accounts                             # loan list
-curl localhost:18085/api/v1/loan/accounts/LN0000001/profile           # FDW: loan ⋈ customer
+curl localhost:18085/api/v1/loan/accounts/LN0000001/profile           # loan calls customer
 curl 'localhost:18086/api/v1/wealth/nav?product_code=WP-FIX1'         # daily NAV series
 curl 'localhost:18085/api/v1/loan/overdue?overdue_class=可疑'          # 5-class overdue
 
@@ -78,7 +78,7 @@ Seed scales: `--scale=dev` (~1/4 volume, default) or `--scale=full`. Re-running 
 
 - jiade embeds the template as a tar (`internal/template/templates.tar`, rebuilt with `go generate ./internal/template`) and copies it out verbatim — zero templating/substitution, what you see in `templates/bank/` is what you get.
 - `jiade up/down` wraps `docker compose up -d` / `down` in the target directory (with a docker/compose/daemon probe first).
-- `jiade seed` runs the generated project's own seeder: create 7 databases → run 7 migrations → seed each domain in dependency order (core → customer → payment → reward → risk → loan → wealth) → set up FDW foreign tables. 10 idempotent steps.
+- `jiade seed` runs the generated project's own seeder: create 7 databases → run 7 migrations → seed each domain in dependency order (core → customer → payment → reward → risk → loan → wealth). 9 idempotent steps.
 
 ## Repository layout
 

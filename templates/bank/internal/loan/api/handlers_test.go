@@ -17,7 +17,7 @@ type fakeLoanRepo struct {
 	account  *domain.LoanAccount
 	profile  *domain.LoanProfile
 	products []domain.LoanProduct
-	// 记录最近一次 ListAccounts 参数
+	// Record the latest ListAccounts parameter
 	gotProductCode string
 	gotStatus      string
 	gotOffset      int

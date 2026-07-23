@@ -1,4 +1,4 @@
-// Package pg 提供 PostgreSQL 连接构造与事务封装。
+// Package pg provides PostgreSQL connection construction and transaction encapsulation.
 package pg
 
 import (
@@ -6,15 +6,15 @@ import (
 	"database/sql"
 )
 
-// DBTX 是 *sql.DB 与 *sql.Tx 共同满足的最小接口，用于在事务内外复用同一套 repo 方法。
+// DBTX is the minimum interface that *sql.DB and *sql.Tx jointly satisfy, and is used to reuse the same set of repo methods inside and outside transactions.
 type DBTX interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// RunInTx 在一个 DB 事务内执行 fn：fn 返回 nil 则 Commit，否则 Rollback 并透出原错误。
-// panic 时 Rollback 后重新 panic。fn 内的 DB 操作应使用传入的 q（即 *sql.Tx）。
+// RunInTx executes fn within a DB transaction: Commit if fn returns nil, otherwise Rollback and reveal the original error.
+// When panicking, rollback and then panic again. DB operations within fn should use the passed in q (i.e. *sql.Tx).
 func RunInTx(ctx context.Context, db *sql.DB, fn func(DBTX) error) (err error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {

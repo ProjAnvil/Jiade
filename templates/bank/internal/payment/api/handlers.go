@@ -1,4 +1,4 @@
-// Package api 是 payment 服务的传输层：http handlers + chi router。
+// Package api is the transport layer of payment service: http handlers + chi router.
 package api
 
 import (
@@ -14,18 +14,18 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// Handlers 持有 payment 只读服务。生产由 Svc 代理 repo；单测用
-// service.NewPaymentService(fakePayRepo) 注入。
+// Handlers hold the payment read-only service. Production is done by Svc proxy repo; for single testing
+// service.NewPaymentService(fakePayRepo) injection.
 type Handlers struct {
 	Svc *service.PaymentService
 }
 
-// Healthz 存活检查。
+// Healthz Survival Check.
 func (h *Handlers) Healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// ListTransfers 按账户/日期筛选并分页（query: account_no/from/to/limit/offset）。
+// ListTransfers filter and paginate by account/date (query: account_no/from/to/limit/offset).
 func (h *Handlers) ListTransfers(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
@@ -42,7 +42,7 @@ func (h *Handlers) ListTransfers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"transfers": out})
 }
 
-// GetTransfer 查单笔转账。不存在返回 404。
+// GetTransfer checks a single transfer. Does not exist and returns 404.
 func (h *Handlers) GetTransfer(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "txn_id")
 	t, err := h.Svc.GetTransfer(r.Context(), id)
@@ -57,7 +57,7 @@ func (h *Handlers) GetTransfer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toTransferResp(t))
 }
 
-// GetTransferParties 查转账双方（跨库联邦 JOIN）。
+// GetTransferParties checks the transfer parties (cross-database federated JOIN).
 func (h *Handlers) GetTransferParties(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "txn_id")
 	p, err := h.Svc.GetParties(r.Context(), id)
@@ -76,7 +76,7 @@ func (h *Handlers) GetTransferParties(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GetMerchant 查商户。不存在返回 404。
+// GetMerchant Check merchants. Does not exist and returns 404.
 func (h *Handlers) GetMerchant(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "merchant_id")
 	m, err := h.Svc.GetMerchant(r.Context(), id)
@@ -128,7 +128,7 @@ type merchantResp struct {
 	CreateBizDate string `json:"create_biz_date"`
 }
 
-// toTransferResp 将 domain.Transfer 转为 DTO；金额经 Money.String() 序列化为 NUMERIC 文本。
+// toTransferResp Convert domain.Transfer to DTO; amount serialized to NUMERIC text via Money.String().
 func toTransferResp(t domain.Transfer) transferResp {
 	return transferResp{
 		TxnID: t.TxnID, BizDate: t.BizDate, OutAccount: t.OutAccount, InAccount: t.InAccount,

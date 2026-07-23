@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS wealth_product (
     product_code     TEXT PRIMARY KEY,
     product_name     TEXT NOT NULL,
-    product_type     TEXT NOT NULL,          -- 固收/权益/混合/货币/基金
+    product_type     TEXT NOT NULL,          -- Fixed income/Equity/Hybrid/Currency/Fund
     risk_level       TEXT,
     expected_return  NUMERIC(10,6),
     min_amount       NUMERIC(18,2),
@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS wealth_order (
     cust_id     TEXT NOT NULL,
     product_code TEXT NOT NULL,
     account_no  TEXT NOT NULL,
-    order_type  TEXT NOT NULL,               -- 申购/赎回
+    order_type  TEXT NOT NULL,               -- Subscription/Redemption
     amount      NUMERIC(18,2),
     share       NUMERIC(18,4),
     nav         NUMERIC(12,6),
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS wealth_income (
     income_id   TEXT PRIMARY KEY,
     biz_date    DATE NOT NULL,
     holding_id  TEXT NOT NULL,
-    income_type TEXT,                        -- 利息/分红
+    income_type TEXT,                        -- Interest/dividends
     amount      NUMERIC(18,2) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_wealth_income_bizdate ON wealth_income(biz_date);

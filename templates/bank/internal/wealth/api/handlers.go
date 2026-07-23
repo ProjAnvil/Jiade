@@ -1,4 +1,4 @@
-// Package api 是 wealth 服务的传输层：http handlers + chi router。
+// Package api is the transport layer of wealth service: http handlers + chi router.
 package api
 
 import (
@@ -14,18 +14,18 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// Handlers 持有 wealth 只读服务。生产由 Svc 代理 repo；单测用
-// service.NewWealthService(fakeWealthRepo) 注入。
+// Handlers hold wealth read-only services. Production is done by Svc proxy repo; for single testing
+// service.NewWealthService(fakeWealthRepo) injection.
 type Handlers struct {
 	Svc *service.WealthService
 }
 
-// Healthz 存活检查。
+// Healthz Survival Check.
 func (h *Handlers) Healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// ListProducts 列理财产品。
+// ListProducts lists financial products.
 func (h *Handlers) ListProducts(w http.ResponseWriter, r *http.Request) {
 	list, err := h.Svc.ListProducts(r.Context())
 	if err != nil {
@@ -43,7 +43,7 @@ func (h *Handlers) ListProducts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"products": out})
 }
 
-// ListNav 按产品/日期范围查每日净值（query: product_code/from/to）。
+// ListNav checks the daily net value by product/date range (query: product_code/from/to).
 func (h *Handlers) ListNav(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	list, err := h.Svc.ListNav(r.Context(), q.Get("product_code"), q.Get("from"), q.Get("to"))
@@ -60,7 +60,7 @@ func (h *Handlers) ListNav(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"navs": out})
 }
 
-// ListHoldings 按客户筛选持仓（query: cust_id/offset/limit）。
+// ListHoldings filters holdings by customer (query: cust_id/offset/limit).
 func (h *Handlers) ListHoldings(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	offset, _ := strconv.Atoi(q.Get("offset"))
@@ -77,7 +77,7 @@ func (h *Handlers) ListHoldings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"holdings": out})
 }
 
-// ListOrders 按客户/产品/日期范围查订单（query: cust_id/product_code/from/to/offset/limit）。
+// ListOrders queries orders by customer/product/date range (query: cust_id/product_code/from/to/offset/limit).
 func (h *Handlers) ListOrders(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	offset, _ := strconv.Atoi(q.Get("offset"))
@@ -98,7 +98,7 @@ func (h *Handlers) ListOrders(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"orders": out})
 }
 
-// ListIncomes 按持仓/日期范围查收益（query: holding_id/from/to/offset/limit）。
+// ListIncomes checks the income by holding position/date range (query: holding_id/from/to/offset/limit).
 func (h *Handlers) ListIncomes(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	offset, _ := strconv.Atoi(q.Get("offset"))
@@ -118,7 +118,7 @@ func (h *Handlers) ListIncomes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"incomes": out})
 }
 
-// GetHoldingProfile 查持仓档案（跨库联邦 JOIN）。不存在返回 404。
+// GetHoldingProfile checks the holding profile (cross-database federation JOIN). Does not exist and returns 404.
 func (h *Handlers) GetHoldingProfile(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "holding_id")
 	p, err := h.Svc.HoldingProfile(r.Context(), id)
@@ -137,7 +137,7 @@ func (h *Handlers) GetHoldingProfile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// holdingRespOf 持仓 → DTO。
+// holdingRespOf holding → DTO.
 func holdingRespOf(hd domain.WealthHolding) wealthHoldingResp {
 	return wealthHoldingResp{
 		HoldingID: hd.HoldingID, CustID: hd.CustID, AccountNo: hd.AccountNo, ProductCode: hd.ProductCode,

@@ -17,7 +17,7 @@ func TestMoneyRoundTrip(t *testing.T) {
 	}
 }
 
-// TestSourceHasNoFloat 守卫 money.go 源码不含 float（金融禁 float）。
+// TestSourceHasNoFloat guards that the money.go source code does not contain float (float is prohibited in finance).
 func TestSourceHasNoFloat(t *testing.T) {
 	b, err := os.ReadFile("money.go")
 	if err != nil {

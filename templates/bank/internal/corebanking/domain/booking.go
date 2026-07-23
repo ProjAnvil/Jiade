@@ -5,24 +5,24 @@ import (
 	"encoding/hex"
 )
 
-// Action 记账业务动作。
+// Action Accounting business action.
 type Action string
 
 const (
-	ActionDeposit  Action = "deposit"  // 存入
-	ActionWithdraw Action = "withdraw" // 支取
-	ActionTransfer Action = "transfer" // 转账
+	ActionDeposit  Action = "deposit"  // Deposit
+	ActionWithdraw Action = "withdraw" // Withdraw
+	ActionTransfer Action = "transfer" // transfer
 )
 
-// ReverseMode 冲正模式。
+// ReverseMode Reverse mode.
 type ReverseMode string
 
 const (
-	ReverseBlue ReverseMode = "blue" // 蓝冲：改状态 + 逆向 delta 回滚，不新增流水
-	ReverseRed  ReverseMode = "red"  // 红冲：反向分录走 Post，新增反向流水
+	ReverseBlue ReverseMode = "blue" // Blue rush: change status + reverse delta rollback, no new turnover
+	ReverseRed  ReverseMode = "red"  // Red flush: Reverse entry goes to Post, new reverse flow is added
 )
 
-// TxnStatus 流水状态。
+// TxnStatus Pipeline status.
 type TxnStatus string
 
 const (
@@ -30,17 +30,17 @@ const (
 	TxnStatusReversed TxnStatus = "reversed"
 )
 
-// CashSubject 库存现金科目（存款/取款的对方科目）。
+// CashSubject Inventory cash account (counterparty account for deposits/withdrawals).
 const CashSubject = "1001"
 
-// Booking 一笔记账的结果（一张凭证）：凭证号 + 其下所有复式流水。
+// The result of Booking's accounting (one voucher): voucher number + all double-entry statements under it.
 type Booking struct {
 	VoucherNo string
 	BizDate   string
 	Txns      []Txn
 }
 
-// NewVoucherNo 生成凭证号：V + bizDate(去横线) + 16位随机 hex。bizDate 形如 "2026-07-16"。
+// NewVoucherNo generates a voucher number: V + bizDate (remove horizontal lines) + 16-digit random hex. bizDate is in the form of "2026-07-16".
 func NewVoucherNo(bizDate string) string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)

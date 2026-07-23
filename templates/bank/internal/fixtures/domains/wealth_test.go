@@ -41,8 +41,8 @@ func TestGenWealthStatic_Deterministic(t *testing.T) {
 }
 
 func TestWealthOrderVolume_WeekendLower(t *testing.T) {
-	sat := parseDate("2025-06-07") // 周六
-	mon := parseDate("2025-06-09") // 周一
+	sat := parseDate("2025-06-07") // Saturday
+	mon := parseDate("2025-06-09") // on Monday
 	if sat.Weekday().String() != "Saturday" || mon.Weekday().String() != "Monday" {
 		t.Fatalf("测试日期星期错: %s %s", sat.Weekday(), mon.Weekday())
 	}

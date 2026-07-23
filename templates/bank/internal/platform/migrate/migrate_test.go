@@ -26,7 +26,7 @@ func TestSplitStatements_Empty(t *testing.T) {
 
 func TestSplitStatements_CustPaySchemas(t *testing.T) {
 	for _, name := range []string{"cust_db.sql", "pay_db.sql"} {
-		// 3 级回到 templates/bank/（go test 的 CWD 是包目录 internal/platform/migrate/）。
+		// Level 3 returns to templates/bank/ (the CWD of go test is the package directory internal/platform/migrate/).
 		sql, err := os.ReadFile("../../../db/migrations/" + name)
 		if err != nil {
 			t.Fatalf("读 %s 失败: %v", name, err)
@@ -45,7 +45,7 @@ func TestSplitStatements_CustPaySchemas(t *testing.T) {
 
 func TestSplitStatements_RewardRiskSchemas(t *testing.T) {
 	for _, name := range []string{"reward_db.sql", "risk_db.sql"} {
-		// 3 级回到 templates/bank/（go test 的 CWD 是包目录 internal/platform/migrate/）。
+		// Level 3 returns to templates/bank/ (the CWD of go test is the package directory internal/platform/migrate/).
 		sql, err := os.ReadFile("../../../db/migrations/" + name)
 		if err != nil {
 			t.Fatalf("读 %s 失败: %v", name, err)
@@ -64,7 +64,7 @@ func TestSplitStatements_RewardRiskSchemas(t *testing.T) {
 
 func TestSplitStatements_LoanWealthSchemas(t *testing.T) {
 	for _, name := range []string{"loan_db.sql", "wealth_db.sql"} {
-		// 3 级回到 templates/bank/（go test 的 CWD 是包目录 internal/platform/migrate/）。
+		// Level 3 returns to templates/bank/ (the CWD of go test is the package directory internal/platform/migrate/).
 		sql, err := os.ReadFile("../../../db/migrations/" + name)
 		if err != nil {
 			t.Fatalf("读 %s 失败: %v", name, err)

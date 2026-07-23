@@ -54,10 +54,9 @@ func TestLoanRepo_ListsAndDetail(t *testing.T) {
 	}
 }
 
-func TestLoanRepo_GetProfile_FDWJoin(t *testing.T) {
+func TestLoanRepo_GetProfile_NotFound(t *testing.T) {
 	db := setupLoanDB(t)
 	defer db.Close()
-	// 联邦 JOIN 不报错即可（依赖 seed 数据 + setup_fdw）
 	_, err := repo.NewLoanRepo(db).GetProfile(context.Background(), "LN-NOPE")
 	if err == nil {
 		t.Error("不存在的借据应返回错误")

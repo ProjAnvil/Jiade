@@ -1,7 +1,7 @@
-// Package fixtures 是 bank 工程的确定性 fixture 生成器。
+// Package fixtures are deterministic fixture generators for bank projects.
 package fixtures
 
-// Scale 规模。
+// Scale scale.
 type Scale string
 
 const (
@@ -9,7 +9,7 @@ const (
 	ScaleFull Scale = "full"
 )
 
-// Counts 各实体的目标量级。
+// Counts Target magnitude for each entity.
 type Counts struct {
 	Customers      int
 	DemandAccounts int
@@ -18,13 +18,13 @@ type Counts struct {
 	DailyTxnHi     int
 }
 
-// DEV 约为 FULL 的 1/4。
+// DEV is about 1/4 of FULL.
 var targetCounts = map[Scale]Counts{
 	ScaleDev:  {Customers: 1250, DemandAccounts: 2000, FixedAccounts: 500, DailyTxnLo: 500, DailyTxnHi: 1250},
 	ScaleFull: {Customers: 5000, DemandAccounts: 8000, FixedAccounts: 2000, DailyTxnLo: 2000, DailyTxnHi: 5000},
 }
 
-// Config fixture 配置。
+// Config fixture configuration.
 type Config struct {
 	StartBizDate string // YYYY-MM-DD
 	EndBizDate   string
@@ -32,12 +32,12 @@ type Config struct {
 	Seed         int64
 }
 
-// DefaultConfig 按规模给默认（start 2025-06-01, end 2026-07-13, seed 42）。
+// DefaultConfig gives the default value based on scale (start 2025-06-01, end 2026-07-13, seed 42).
 func DefaultConfig(scale Scale) Config {
 	return Config{StartBizDate: "2025-06-01", EndBizDate: "2026-07-13", Scale: scale, Seed: 42}
 }
 
-// TargetCounts 返回当前规模的目标量级。
+// TargetCounts Returns the target magnitudes for the current scale.
 func (c Config) TargetCounts() Counts {
 	if tc, ok := targetCounts[c.Scale]; ok {
 		return tc
@@ -45,8 +45,8 @@ func (c Config) TargetCounts() Counts {
 	return targetCounts[ScaleDev]
 }
 
-// ScaleFactor 返回规模缩放（full=1.0, dev=0.25）。
-// reward/risk/loan/wealth 的每日量 = base × ScaleFactor × factor。
+// ScaleFactor Returns the scale scale (full=1.0, dev=0.25).
+// Daily amount of reward/risk/loan/wealth = base × ScaleFactor × factor.
 func ScaleFactor(s Scale) float64 {
 	if s == ScaleFull {
 		return 1.0

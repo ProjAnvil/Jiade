@@ -14,7 +14,7 @@ import (
 	"bank/internal/platform/pg"
 )
 
-// setupCoreDB 重建 core_db 并建表（破坏性：DROP core_db）。无 pg 则 skip。
+// setupCoreDB rebuilds core_db and creates tables (destructive: DROP core_db). If there is no pg, skip.
 func setupCoreDB(t *testing.T) *sql.DB {
 	t.Helper()
 	ctx := context.Background()
@@ -37,7 +37,7 @@ func setupCoreDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ddl, err := os.ReadFile("../../../db/migrations/core_db.sql") // domains → bank 根 3 级上溯
+	ddl, err := os.ReadFile("../../../db/migrations/core_db.sql") // domains → bank root 3 levels up
 	if err != nil {
 		t.Skipf("读 core_db.sql 失败（cwd?）: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestRunBizDate_WritesAllDaysAndCutsSysParam(t *testing.T) {
 	if bal != 30*20 {
 		t.Errorf("account_balance 行=%d want %d", bal, 30*20)
 	}
-	// 幂等：二次跑，天数不变（逐日 DELETE+INSERT）
+	// Idempotent: Run twice, the number of days remains unchanged (DELETE+INSERT daily)
 	if err := RunBizDate(ctx, db, cfg, nos); err != nil {
 		t.Fatalf("二次 RunBizDate: %v", err)
 	}

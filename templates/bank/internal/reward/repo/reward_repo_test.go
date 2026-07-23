@@ -59,12 +59,12 @@ func TestRewardRepo_ListCoupons(t *testing.T) {
 	}
 }
 
-func TestRewardRepo_GetProfile_FDWJoin(t *testing.T) {
+func TestRewardRepo_GetProfile_ServiceCall(t *testing.T) {
 	db := setupRewardDB(t)
 	defer db.Close()
-	// 联邦 JOIN 不报错即可（依赖 seed 数据 + setup_fdw）
+	// Cross-service aggregation only requires no error reporting (depending on seed data and customer services).
 	_, err := repo.NewRewardRepo(db).GetProfile(context.Background(), "C0000001")
 	if err != nil {
-		t.Errorf("GetProfile FDW JOIN 失败（外部表未建？先 make seed）: %v", err)
+		t.Errorf("GetProfile 跨服务聚合失败（先 make up）: %v", err)
 	}
 }

@@ -1,4 +1,4 @@
-// Package api 是 reward 服务的传输层：http handlers + chi router。
+// Package api is the transport layer of reward service: http handlers + chi router.
 package api
 
 import (
@@ -13,18 +13,18 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// Handlers 持有 reward 只读服务。生产由 Svc 代理 repo；单测用
-// service.NewRewardService(fakeRewardRepo) 注入。
+// Handlers hold reward read-only services. Production is done by Svc proxy repo; for single testing
+// service.NewRewardService(fakeRewardRepo) injection.
 type Handlers struct {
 	Svc *service.RewardService
 }
 
-// Healthz 存活检查。
+// Healthz Survival Check.
 func (h *Handlers) Healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// GetPointsAcct 查单个积分账户。不存在返回 404。
+// GetPointsAcct checks a single points account. Does not exist and returns 404.
 func (h *Handlers) GetPointsAcct(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "cust_id")
 	a, err := h.Svc.GetPointsAcct(r.Context(), id)
@@ -42,7 +42,7 @@ func (h *Handlers) GetPointsAcct(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListPointsAccts 按会员等级筛选并分页（query: member_level/offset/limit）。
+// ListPointsAccts filters and paging by member level (query: member_level/offset/limit).
 func (h *Handlers) ListPointsAccts(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	offset, _ := strconv.Atoi(q.Get("offset"))
@@ -62,7 +62,7 @@ func (h *Handlers) ListPointsAccts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"points_accounts": out})
 }
 
-// ListCoupons 查客户优惠券（query: status/offset/limit）。
+// ListCoupons Check customer coupons (query: status/offset/limit).
 func (h *Handlers) ListCoupons(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	offset, _ := strconv.Atoi(q.Get("offset"))
@@ -84,7 +84,7 @@ func (h *Handlers) ListCoupons(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"coupons": out})
 }
 
-// GetProfile 查积分档案（跨库联邦 JOIN）。
+// GetProfile checks the points file (cross-database federated JOIN).
 func (h *Handlers) GetProfile(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "cust_id")
 	p, err := h.Svc.Profile(r.Context(), id)

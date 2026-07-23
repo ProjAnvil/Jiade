@@ -1,4 +1,4 @@
-// Package api 是 customer 服务的传输层：http handlers + chi router。
+// Package api is the transport layer of customer service: http handlers + chi router.
 package api
 
 import (
@@ -13,18 +13,18 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// Handlers 持有 customer 只读服务。生产由 Svc 代理 repo；单测用
-// service.NewCustomerService(fakeStore) 注入。
+// Handlers hold the customer read-only service. Production is done by Svc proxy repo; for single testing
+// service.NewCustomerService(fakeStore) injection.
 type Handlers struct {
 	Svc *service.CustomerService
 }
 
-// Healthz 存活检查。
+// Healthz Survival Check.
 func (h *Handlers) Healthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// GetCustomer 查单个客户。不存在返回 404。
+// GetCustomer checks a single customer. Does not exist and returns 404.
 func (h *Handlers) GetCustomer(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "cust_id")
 	c, err := h.Svc.Get(r.Context(), id)
@@ -44,7 +44,7 @@ func (h *Handlers) GetCustomer(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListCustomers 按类型/kyc 筛选并分页（query: type/kyc_status/offset/limit）。
+// ListCustomers filter and page by type/kyc (query: type/kyc_status/offset/limit).
 func (h *Handlers) ListCustomers(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	offset, _ := strconv.Atoi(q.Get("offset"))
@@ -64,7 +64,7 @@ func (h *Handlers) ListCustomers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"customers": out})
 }
 
-// GetCustAccounts 查客户关联账户（跨库联邦查询）。
+// GetCustAccounts checks customer related accounts (cross-database federated query).
 func (h *Handlers) GetCustAccounts(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "cust_id")
 	accts, err := h.Svc.Accounts(r.Context(), id)

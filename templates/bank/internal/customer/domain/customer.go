@@ -1,7 +1,7 @@
-// Package domain 是 customer 服务的纯领域模型，零 DB/框架依赖（最内层）。
+// Package domain is a pure domain model of customer service, with zero DB/framework dependencies (innermost layer).
 package domain
 
-// CustType 客户类型。
+// CustType Customer type.
 type CustType string
 
 const (
@@ -9,31 +9,31 @@ const (
 	CustTypeOrg      CustType = "对公"
 )
 
-// Customer 对应 cust_info 表。
+// Customer corresponds to the cust_info table.
 type Customer struct {
 	CustID        string
 	CustType      CustType
 	Name          string
 	CertType      string
 	CertNo        string
-	Gender        string // M/F；对公为空
-	Birthday      string // YYYY-MM-DD；对公为空
+	Gender        string // M/F; empty for public
+	Birthday      string // YYYY-MM-DD; empty for public
 	Nationality   string
 	RiskLevel     string // low/medium
 	KYCStatus     string // passed
 	CreateBizDate string
 }
 
-// AccountRel 对应 cust_account_rel 表（客户-账户关系）。
+// AccountRel corresponds to the cust_account_rel table (customer-account relationship).
 type AccountRel struct {
 	RelID     string
 	CustID    string
 	AccountNo string
-	Role      string // 主/共
-	RelType   string // 户主
+	Role      string // Master/Co-owner
+	RelType   string // Head of household
 }
 
-// CustAccount 是跨库联邦查询结果（cust_account_rel JOIN ext_core_db_demand_account）。
+// CustAccount is the aggregation of the customer relationship and core-banking account information.
 type CustAccount struct {
 	AccountNo   string
 	Ccy         string

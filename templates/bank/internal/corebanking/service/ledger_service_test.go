@@ -74,9 +74,9 @@ type recordingLedgerStore struct {
 	txns        []domain.Txn
 	deltas      []domain.BalanceDelta
 	gl          *domain.GLBalance
-	voucherTxns []domain.Txn // GetTxnsByVoucher / LockTxnsByVoucher 返回
-	statusLog   []string     // 记录 UpdateTxnStatus 调用
-	hasReversal bool         // HasReversal 返回值（默认 false）
+	voucherTxns []domain.Txn // GetTxnsByVoucher / LockTxnsByVoucher Return
+	statusLog   []string     // Logging UpdateTxnStatus calls
+	hasReversal bool         // HasReversal return value (default false)
 
 	summaryCalls       int
 	lastSummaryVoucher string
@@ -85,7 +85,7 @@ type recordingLedgerStore struct {
 
 func (f *recordingLedgerStore) InsertTxns(_ context.Context, _ pg.DBTX, txns []domain.Txn) error {
 	f.calls++
-	// 模拟 repo 回填 TxnID
+	// Simulate repo backfill TxnID
 	for i := range txns {
 		if txns[i].TxnID == "" {
 			txns[i].TxnID = "T-fake"

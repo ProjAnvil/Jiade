@@ -29,11 +29,11 @@ func TestGenTransfers_UsesCoreAccounts(t *testing.T) {
 	if ts[0].OutAccount != "D0000000001" && ts[0].OutAccount != "D0000000002" {
 		t.Errorf("out_account 不在 core 账户集: %s", ts[0].OutAccount)
 	}
-	// 金额 int64 分（整数 * 100）
+	// Amount int64 points (integer * 100)
 	if ts[0].Amount.Cents()%100 != 0 && ts[0].Amount.Cents() < 0 {
 		t.Errorf("amount 异常: %d", ts[0].Amount.Cents())
 	}
-	// 确定性：相同配置 → 相同序列
+	// Deterministic: same configuration → same sequence
 	ts2 := GenTransfers(cfg, accts, 5)
 	if !reflect.DeepEqual(ts, ts2) {
 		t.Error("GenTransfers 不确定性")

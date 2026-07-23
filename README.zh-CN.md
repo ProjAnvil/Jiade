@@ -8,15 +8,15 @@
 
 ## 生成物（`bank` 模板）
 
-一个微缩银行核心系统——**7 个 Go 微服务 + 7 个 PostgreSQL 库**（单实例），跨库查询走 `postgres_fdw` 联邦：
+一个微缩银行核心系统——**7 个 Go 微服务 + 7 个 PostgreSQL 库**（单实例）。每个服务独占自己的库，跨域读取走 HTTP API：
 
 | 服务 | 端口 | 库 | 内容 |
 |------|------|----|------|
 | core-banking | 18080 | core_db | 活期/定存账户、复式记账总账、逐日余额、写接口（过账/冲正） |
-| customer | 18081 | cust_db | 客户信息、账户关系（只读 + FDW JOIN） |
-| payment | 18082 | pay_db | 商户、转账、消费流水（只读 + FDW JOIN） |
-| reward | 18083 | reward_db | 积分账户/流水、优惠券、活动（只读 + FDW JOIN） |
-| risk | 18084 | risk_db | 风控规则、事件、黑名单（只读 + FDW JOIN） |
+| customer | 18081 | cust_db | 客户信息、账户关系 |
+| payment | 18082 | pay_db | 商户、转账、消费流水 |
+| reward | 18083 | reward_db | 积分账户/流水、优惠券、活动 |
+| risk | 18084 | risk_db | 风控规则、事件、黑名单 |
 | loan | 18085 | loan_db | 借据、放款、月度还款、五级分类逾期、**逐日余额快照** |
 | wealth | 18086 | wealth_db | 理财产品、**逐日净值游走**、持仓、申赎订单、每日利息 |
 
@@ -24,7 +24,7 @@
 
 - **确定性 fixture**：同 seed + scale → 完全相同的行。确定性 ID（无 UUID），逐日独立 rng（`seed + 偏移 + 日序`）。
 - **两种数据形态**：三因子事件流（`趋势 × 季节 × 周期`——周末单量 < 工作日）与路径依赖的**逐日滚存快照**（账户余额、借据余额、净值游走）。
-- **真跨库联邦**：每个服务查自己的库，并经 `postgres_fdw` JOIN `cust_db.cust_info`（如 `GET /api/v1/loan/accounts/{loan_no}/profile`）。
+- **数据库按服务隔离**：每个服务只查自己的库，跨域数据通过 HTTP 获取（如 loan 调 customer 完成 `GET /api/v1/loan/accounts/{loan_no}/profile`）。
 - **金额 int64 分，禁 float**；利率/净值/份额等非货币小数按 NUMERIC 文本直存。
 - **生成物自包含**：离开 jiade 也能构建运行——只需 Docker 和 Go。
 
@@ -62,7 +62,7 @@ jiade seed    # go run ./cmd/seed --scale=dev --reset
 curl localhost:18085/healthz                                          # loan
 curl localhost:18086/healthz                                          # wealth
 curl localhost:18085/api/v1/loan/accounts                             # 借据列表
-curl localhost:18085/api/v1/loan/accounts/LN0000001/profile           # 联邦：借据 ⋈ 客户
+curl localhost:18085/api/v1/loan/accounts/LN0000001/profile           # loan 调用 customer
 curl 'localhost:18086/api/v1/wealth/nav?product_code=WP-FIX1'         # 逐日净值序列
 curl 'localhost:18085/api/v1/loan/overdue?overdue_class=可疑'          # 五级分类逾期
 
@@ -78,7 +78,7 @@ jiade down
 
 - jiade 把模板打成 tar 内嵌（`internal/template/templates.tar`，改动后用 `go generate ./internal/template` 重打包），`init` 逐字拷出——零模板替换，`templates/bank/` 里是什么样，生成物就是什么样。
 - `jiade up/down` 在目标目录包装 `docker compose up -d` / `down`（先探测 docker/compose/daemon）。
-- `jiade seed` 运行生成物自带的灌数器：建 7 库 → 跑 7 套迁移 → 按依赖序灌各域（core → customer → payment → reward → risk → loan → wealth）→ 建 FDW 外部表。10 个幂等步骤。
+- `jiade seed` 运行生成物自带的灌数器：建 7 库 → 跑 7 套迁移 → 按依赖序灌各域（core → customer → payment → reward → risk → loan → wealth）。9 个幂等步骤。
 
 ## 仓库结构
 

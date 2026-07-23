@@ -13,14 +13,14 @@ import (
 	"bank/internal/platform/pg"
 )
 
-// LoanStatic 静态表行集合（一次性生成）。
+// LoanStatic static table row collection (generated once).
 type LoanStatic struct {
 	Products      []domain.LoanProduct
 	Accounts      []domain.LoanAccount
 	Disbursements []domain.LoanDisbursement
 }
 
-// GenLoanStatic 生成贷款产品/借据/放款（rng seed+40；产品固定 4 行，借据数从 custIDs 派生，零 Counts 改动）。
+// GenLoanStatic generates loan products/IOUs/loans (rng seed+40; fixed 4 rows for products, IOU numbers derived from custIDs, zero Counts changes).
 func GenLoanStatic(cfg fixtures.Config, custIDs []string) LoanStatic {
 	rng := fixtures.NewRNG(cfg.Seed + 40)
 	products := make([]domain.LoanProduct, len(fixtures.LoanProducts))
@@ -36,18 +36,18 @@ func GenLoanStatic(cfg fixtures.Config, custIDs []string) LoanStatic {
 	accounts := make([]domain.LoanAccount, 0, nLoans)
 	disbs := make([]domain.LoanDisbursement, 0, nLoans)
 	for i := 0; i < nLoans; i++ {
-		cid := pickStr(rng, custIDs) // 抽签顺序固定：cust → product → principal → rate → term → start → guarantee/branch → to_account
+		cid := pickStr(rng, custIDs) // The order of drawing lots is fixed: cust → product → principal → rate → term → start → guarantee/branch → to_account
 		p := fixtures.LoanProducts[rng.IntRange(0, len(fixtures.LoanProducts)-1)]
-		// 公式：IntRange(0,99999)×(maxAmtYuan/100000) 元，clamp 到 [10000, maxAmtYuan]（纯整数）
+		// Formula: IntRange(0,99999)×(maxAmtYuan/100000) yuan, clamp to [10000, maxAmtYuan] (pure integer)
 		principalYuan := rng.IntRange(0, 99999) * (p.MaxAmountYuan / 100000)
 		principalYuan = maxInt(10000, minInt(principalYuan, p.MaxAmountYuan))
 		principal := domain.NewMoneyFromCents(int64(principalYuan) * 100)
-		rate := p.MinRate + rng.Float64()*(p.MaxRate-p.MinRate) // 比率（非金额），float 可接受
+		rate := p.MinRate + rng.Float64()*(p.MaxRate-p.MinRate) // Ratio (not amount), float acceptable
 		term := []int{12, 24}[rng.IntRange(0, 1)]
 		if p.MaxTerm >= 36 {
 			term = []int{12, 24, 36}[rng.IntRange(0, 2)]
 		}
-		start := fixtures.RandomDate(rng, cfg.StartBizDate, maxDateStr(cfg.StartBizDate, addMonths(cfg.EndBizDate, -1))) // 短区间守卫
+		start := fixtures.RandomDate(rng, cfg.StartBizDate, maxDateStr(cfg.StartBizDate, addMonths(cfg.EndBizDate, -1))) // short range guard
 		loanNo := fmt.Sprintf("LN%07d", i)
 		accounts = append(accounts, domain.LoanAccount{
 			LoanNo: loanNo, CustID: cid, ProductCode: p.Code, Ccy: "CNY",
@@ -64,7 +64,7 @@ func GenLoanStatic(cfg fixtures.Config, custIDs []string) LoanStatic {
 	return LoanStatic{Products: products, Accounts: accounts, Disbursements: disbs}
 }
 
-// WriteLoanStatic 幂等写 loan_product/loan_account/loan_disbursement（先 DELETE 后 INSERT）。
+// WriteLoanStatic writes loan_product/loan_account/loan_disbursement idempotently (DELETE first and then INSERT).
 func WriteLoanStatic(ctx context.Context, db *sql.DB, s LoanStatic) error {
 	for _, t := range []string{"loan_disbursement", "loan_account", "loan_product"} {
 		if _, err := db.ExecContext(ctx, "DELETE FROM "+t); err != nil {
@@ -97,17 +97,17 @@ func WriteLoanStatic(ctx context.Context, db *sql.DB, s LoanStatic) error {
 	return nil
 }
 
-// loanState 借据滚存状态（内存；balance 跨日滚存，路径依赖）。
+// loanState IOU rollover status (memory; balance rollover across days, path dependent).
 type loanState struct {
 	balance          domain.Money
 	overdueDays      int
-	overdueStart     string // 空 = 不逾期
+	overdueStart     string // Empty = not expired
 	monthlyPrincipal domain.Money
 	rateFloat        float64
 }
 
-// RunLoan 按 bizDate 推进：月初还款计划 + 逾期五级分类滑落 + 每日全量余额快照。
-// rng seed+41 单次（无逐日随机）；每业务日一个 pg.RunInTx。全量重放确定。
+// RunLoan advances according to bizDate: monthly repayment plan + overdue five-level classification slip + daily full balance snapshot.
+// rng seed+41 single time (no daily randomization); one pg.RunInTx per business day. Full replay confirmed.
 func RunLoan(ctx context.Context, db *sql.DB, cfg fixtures.Config, accounts []domain.LoanAccount) error {
 	if len(accounts) == 0 {
 		return fmt.Errorf("loan: 无借据")
@@ -126,7 +126,7 @@ func RunLoan(ctx context.Context, db *sql.DB, cfg fixtures.Config, accounts []do
 			rateFloat:        rateF,
 		}
 	}
-	// 逾期选择：~8%（random_int(1,12)==1 口径），overdue_start ∈ [start, max(start, end-2月)]
+	// Overdue selection: ~8% (random_int(1,12)==1 caliber), overdue_start ∈ [start, max(start, end-2 months)]
 	for _, a := range accounts {
 		if rng.IntRange(1, 12) == 1 {
 			state[a.LoanNo].overdueStart = fixtures.RandomDate(rng, cfg.StartBizDate, maxDateStr(cfg.StartBizDate, addMonths(cfg.EndBizDate, -2)))
@@ -136,7 +136,7 @@ func RunLoan(ctx context.Context, db *sql.DB, cfg fixtures.Config, accounts []do
 	for _, d := range days {
 		dateStr := d.Format("2006-01-02")
 		compact := dateCompact(d)
-		// 月初（月份翻转）：对 balance>0 借据造当月还款计划
+		// At the beginning of the month (month rollover): Create a monthly repayment plan for balance>0 IOUs
 		var repays []domain.LoanRepay
 		monthStart := d.Month() != lastMonth
 		if monthStart {
@@ -154,7 +154,7 @@ func RunLoan(ctx context.Context, db *sql.DB, cfg fixtures.Config, accounts []do
 					PrincipalAmt: principalAmt, InterestAmt: interestAmt,
 				}
 				if st.overdueStart != "" && dateStr >= st.overdueStart {
-					r.Status = "overdue" // 逾期不扣款，余额不动
+					r.Status = "overdue" // Overdue payment will not be deducted and the balance will not be changed
 				} else {
 					st.balance = st.balance.Sub(principalAmt)
 					if st.balance < 0 {
@@ -166,14 +166,14 @@ func RunLoan(ctx context.Context, db *sql.DB, cfg fixtures.Config, accounts []do
 				repays = append(repays, r)
 			}
 		}
-		// 累计逾期天数（ISO 日期字典序可比较）
+		// Cumulative number of overdue days (ISO date dictionary order is comparable)
 		for _, a := range accounts {
 			st := state[a.LoanNo]
 			if st.overdueStart != "" && dateStr > st.overdueStart {
 				st.overdueDays = int(dayOrdinal(d, parseDate(st.overdueStart)))
 			}
 		}
-		// 当日全量快照 + 逾期滑落
+		// Full snapshot of the day + overdue slide
 		var balances []domain.LoanBalance
 		var overdues []domain.LoanOverdue
 		for _, a := range accounts {
@@ -218,7 +218,7 @@ func RunLoan(ctx context.Context, db *sql.DB, cfg fixtures.Config, accounts []do
 	return nil
 }
 
-// bulkInsertLoanRepays 批量插 loan_repay（9 列）。
+// bulkInsertLoanRepays bulk inserts loan_repay (9 columns).
 func bulkInsertLoanRepays(ctx context.Context, q pg.DBTX, rows []domain.LoanRepay) error {
 	if len(rows) == 0 {
 		return nil
@@ -244,7 +244,7 @@ func bulkInsertLoanRepays(ctx context.Context, q pg.DBTX, rows []domain.LoanRepa
 	return nil
 }
 
-// bulkInsertLoanBalances 批量插 loan_balance（4 列）。
+// bulkInsertLoanBalances bulk inserts loan_balance (4 columns).
 func bulkInsertLoanBalances(ctx context.Context, q pg.DBTX, rows []domain.LoanBalance) error {
 	if len(rows) == 0 {
 		return nil
@@ -268,7 +268,7 @@ func bulkInsertLoanBalances(ctx context.Context, q pg.DBTX, rows []domain.LoanBa
 	return nil
 }
 
-// bulkInsertLoanOverdues 批量插 loan_overdue（6 列）。
+// bulkInsertLoanOverdues Bulk insert loan_overdue (6 columns).
 func bulkInsertLoanOverdues(ctx context.Context, q pg.DBTX, rows []domain.LoanOverdue) error {
 	if len(rows) == 0 {
 		return nil
@@ -292,7 +292,7 @@ func bulkInsertLoanOverdues(ctx context.Context, q pg.DBTX, rows []domain.LoanOv
 	return nil
 }
 
-// overdueClass 按逾期天数划五级分类。
+// overdueClass is divided into five levels according to the number of overdue days.
 func overdueClass(days int) string {
 	cls := "正常"
 	for _, oc := range fixtures.OverdueClasses {
@@ -303,12 +303,12 @@ func overdueClass(days int) string {
 	return cls
 }
 
-// roundDiv 四舍五入整数除法（a/b，a 非负）。
+// roundDiv Rounds integer division (a/b, a is non-negative).
 func roundDiv(a, b int64) int64 {
 	return (a + b/2) / b
 }
 
-// minMoney 较小金额。
+// minMoney Smaller amount.
 func minMoney(a, b domain.Money) domain.Money {
 	if a < b {
 		return a
@@ -316,7 +316,7 @@ func minMoney(a, b domain.Money) domain.Money {
 	return b
 }
 
-// maxDateStr 返回两个 YYYY-MM-DD 中较大者（ISO 字典序即时间序）。
+// maxDateStr returns the larger of the two YYYY-MM-DD (ISO lexicographic order).
 func maxDateStr(a, b string) string {
 	if b > a {
 		return b

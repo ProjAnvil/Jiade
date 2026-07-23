@@ -15,34 +15,34 @@ func TestFactor_Trend(t *testing.T) {
 	if trendFactor(base) != 1.0 {
 		t.Errorf("base 月因子应 1.0, got %v", trendFactor(base))
 	}
-	// 3 个月后：1.0+0.02*3=1.06
+	// After 3 months: 1.0+0.02*3=1.06
 	if got := trendFactor(parseDate("2025-09-15")); got != 1.06 {
 		t.Errorf("9 月因子应 1.06, got %v", got)
 	}
 }
 
 func TestFactor_Seasonal(t *testing.T) {
-	// 普通日
+	// Ordinary day
 	if got := seasonalFactor(parseDate("2025-06-12")); got != 1.0 {
 		t.Errorf("普通日应 1.0, got %v", got)
 	}
-	// 季末日（6 月 28）×1.35
+	// Season end (June 28) ×1.35
 	if got := seasonalFactor(parseDate("2025-06-28")); got != 1.35 {
 		t.Errorf("季末日应 1.35, got %v", got)
 	}
-	// 发薪日 ×1.40
+	// Payday ×1.40
 	if got := seasonalFactor(parseDate("2025-07-10")); got != 1.40 {
 		t.Errorf("发薪日应 1.40, got %v", got)
 	}
-	// 节假日（国庆）×1.30
+	// Holidays (National Day)×1.30
 	if got := seasonalFactor(parseDate("2025-10-01")); got != 1.30 {
 		t.Errorf("国庆应 1.30, got %v", got)
 	}
-	// 年末 12-25 ×1.50（季末需 day≥28，故 25 号仅年末 spike）
+	// Year-end 12-25 ×1.50 (the end of the quarter requires day≥28, so the 25th is only the year-end spike)
 	if got := seasonalFactor(parseDate("2025-12-25")); got != 1.50 {
 		t.Errorf("年末 12-25 应 1.50, got %v", got)
 	}
-	// 12-28 季末×1.35 × 年末×1.50（叠加；用运行时乘法避免常量折叠精度差异）
+	// 12-28 End of quarter × 1.35 × End of year × 1.50 (overlay; use runtime multiplication to avoid constant folding accuracy differences)
 	qEnd, yearEnd := 1.35, 1.50
 	wantDec28 := qEnd * yearEnd
 	if got := seasonalFactor(parseDate("2025-12-28")); got != wantDec28 {
@@ -51,11 +51,11 @@ func TestFactor_Seasonal(t *testing.T) {
 }
 
 func TestFactor_Cyclical(t *testing.T) {
-	// 2025-06-01 是周日
+	// 2025-06-01 is Sunday
 	if got := cyclicalFactor(parseDate("2025-06-01")); got != 0.60 {
 		t.Errorf("周日应 0.60, got %v", got)
 	}
-	// 2025-06-02 周一
+	// 2025-06-02 Monday
 	if got := cyclicalFactor(parseDate("2025-06-02")); got != 1.0 {
 		t.Errorf("工作日应 1.0, got %v", got)
 	}
@@ -75,9 +75,9 @@ func TestVolumeForDay_Deterministic(t *testing.T) {
 
 func TestVolumeForDay_WeekendDampened(t *testing.T) {
 	cfg := fixtures.DefaultConfig(fixtures.ScaleDev)
-	// 同一周：周三 vs 周日（cyclical 压周末，量级上界应周日更小）
-	wd := volumeForDay(cfg, parseDate("2025-07-16")) // 周三
-	wk := volumeForDay(cfg, parseDate("2025-07-20")) // 周日
+	// The same week: Wednesday vs Sunday (cyclical is higher than the weekend, and the upper limit of magnitude should be smaller on Sunday)
+	wd := volumeForDay(cfg, parseDate("2025-07-16")) // Wednesday
+	wk := volumeForDay(cfg, parseDate("2025-07-20")) // Sunday
 	if wk >= wd {
 		t.Errorf("周末 volume(%d) 应 < 工作日(%d)", wk, wd)
 	}
@@ -96,7 +96,7 @@ func TestDateHelpers(t *testing.T) {
 	}
 }
 
-func init() {} // 占位（保留 package-level init 钩子，无副作用）
+func init() {} // Placeholder (retains package-level init hook, no side effects)
 
 func TestGenDay_Deterministic(t *testing.T) {
 	cfg := fixtures.DefaultConfig(fixtures.ScaleDev)
@@ -130,7 +130,7 @@ func TestGenDay_TxnIDUniqueAndFormatted(t *testing.T) {
 }
 
 func TestGenDay_DcWeighting(t *testing.T) {
-	// 多账户 + 多日累计，贷:借 应近似 2:1（容差大）
+	// Multiple accounts + multi-day accumulation, credit:debit should be approximately 2:1 (large tolerance)
 	cfg := fixtures.DefaultConfig(fixtures.ScaleDev)
 	nos := make([]string, 50)
 	for i := range nos {
@@ -154,16 +154,16 @@ func TestGenDay_DcWeighting(t *testing.T) {
 }
 
 func TestDayState_RollForward(t *testing.T) {
-	// 脚本化：贷加、借 clamp 0
+	// Scripting: credit plus, borrow clamp 0
 	cfg := fixtures.DefaultConfig(fixtures.ScaleDev)
 	nos := []string{"D1"}
 	st := &DayState{Bal: map[string]domain.Money{"D1": domain.NewMoneyFromCents(50000)}} // 500.00
-	// 手动模拟：GenDay 内部对 st.Bal 的推进规则
+	// Manual simulation: GenDay internal advancement rules for st.Bal
 	st.Bal["D1"] = st.Bal["D1"].Add(domain.NewMoneyFromCents(30000)) // +300 → 800
 	if got := st.Bal["D1"].Cents(); got != 80000 {
 		t.Fatalf("贷后余额错: %d", got)
 	}
-	b := st.Bal["D1"].Sub(domain.NewMoneyFromCents(200000)) // -2000 → 负
+	b := st.Bal["D1"].Sub(domain.NewMoneyFromCents(200000)) // -2000 → negative
 	if b < 0 {
 		b = domain.NewMoneyFromCents(0)
 	}
@@ -171,7 +171,7 @@ func TestDayState_RollForward(t *testing.T) {
 	if got := st.Bal["D1"].Cents(); got != 0 {
 		t.Fatalf("借 clamp 0 错: %d", got)
 	}
-	// GenDay 余额快照覆盖全部账户
+	// GenDay balance snapshot covers all accounts
 	_, bals := GenDay(cfg, parseDate("2025-07-15"), nos, newDayState(cfg, nos))
 	if len(bals) != 1 || bals[0].AccountNo != "D1" {
 		t.Errorf("快照应覆盖全部账户, got %+v", bals)

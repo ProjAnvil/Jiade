@@ -1,21 +1,28 @@
-// Package repo 是 customer 服务的仓储层：pgx raw SQL（本库 + 跨库 FDW JOIN）。
+// Package repo is the data access layer of the customer service: this library SQL + core-banking HTTP API.
 package repo
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 
 	"bank/internal/customer/domain"
+	"bank/internal/platform/serviceclient"
 )
 
-// CustomerRepo 客户仓储。本库 cust_info / cust_account_rel 查询，并经 FDW 跨库 JOIN core_db。
-type CustomerRepo struct{ db *sql.DB }
+// CustomerRepo Customer repository. This library only queries cust_info / cust_account_rel.
+type CustomerRepo struct {
+	db   *sql.DB
+	core *serviceclient.Client
+}
 
-// NewCustomerRepo 构造 CustomerRepo。
-func NewCustomerRepo(db *sql.DB) *CustomerRepo { return &CustomerRepo{db: db} }
+// NewCustomerRepo Constructs CustomerRepo.
+func NewCustomerRepo(db *sql.DB) *CustomerRepo {
+	return &CustomerRepo{db: db, core: serviceclient.New(getenv("CORE_BANKING_URL", "http://localhost:18080"))}
+}
 
-// GetCustomer 查单个客户。不存在返回包装的 sql.ErrNoRows。
+// GetCustomer checks a single customer. There is no return wrapped sql.ErrNoRows.
 func (r *CustomerRepo) GetCustomer(ctx context.Context, custID string) (domain.Customer, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT cust_id,cust_type,name,cert_type,cert_no,gender,birthday,
 		nationality,risk_level,kyc_status,create_biz_date FROM cust_info WHERE cust_id=$1`, custID)
@@ -31,7 +38,7 @@ func (r *CustomerRepo) GetCustomer(ctx context.Context, custID string) (domain.C
 	return c, nil
 }
 
-// ListCustomers 按客户类型/kyc 筛选（空则不限），分页。limit<=0 时取 50。
+// ListCustomers Filter by customer type/kyc (no limit if empty), paging. When limit<=0, take 50.
 func (r *CustomerRepo) ListCustomers(ctx context.Context, custType, kycStatus string, offset, limit int) ([]domain.Customer, error) {
 	if limit <= 0 {
 		limit = 50
@@ -62,30 +69,44 @@ func (r *CustomerRepo) ListCustomers(ctx context.Context, custType, kycStatus st
 	return out, nil
 }
 
-// GetCustAccounts 跨库联邦查询：cust_account_rel JOIN ext_core_db_demand_account（FDW）。
-// ext_core_db_demand_account 由 platform/fdw 在 seed 阶段于 cust_db 建立，映射 core_db.demand_account。
+// GetCustAccounts first checks the database relationship, and then obtains the account information through the core-banking API.
 func (r *CustomerRepo) GetCustAccounts(ctx context.Context, custID string) ([]domain.CustAccount, error) {
-	q := `SELECT a.account_no, a.ccy, a.acct_status, a.open_biz_date, a.branch_code, rel.role
-		FROM cust_account_rel rel
-		JOIN ext_core_db_demand_account a ON rel.account_no = a.account_no
-		WHERE rel.cust_id=$1 ORDER BY a.account_no`
-	rows, err := r.db.QueryContext(ctx, q, custID)
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT account_no,role FROM cust_account_rel WHERE cust_id=$1 ORDER BY account_no`, custID)
 	if err != nil {
-		return nil, fmt.Errorf("repo: 联邦查客户账户 %s: %w", custID, err)
+		return nil, fmt.Errorf("repo: 查客户账户关系 %s: %w", custID, err)
 	}
 	defer rows.Close()
 	var out []domain.CustAccount
 	for rows.Next() {
-		var a domain.CustAccount
-		var branch sql.NullString
-		if err := rows.Scan(&a.AccountNo, &a.Ccy, &a.Status, &a.OpenBizDate, &branch, &a.Role); err != nil {
-			return nil, fmt.Errorf("repo: 联邦查客户账户 %s scan: %w", custID, err)
+		var accountNo, role string
+		if err := rows.Scan(&accountNo, &role); err != nil {
+			return nil, fmt.Errorf("repo: 查客户账户关系 %s scan: %w", custID, err)
 		}
-		a.BranchCode = branch.String
-		out = append(out, a)
+		var account struct {
+			AccountNo   string `json:"account_no"`
+			Ccy         string `json:"ccy"`
+			Status      string `json:"status"`
+			OpenBizDate string `json:"open_biz_date"`
+			BranchCode  string `json:"branch_code"`
+		}
+		if err := r.core.Get(ctx, "/api/v1/accounts/"+serviceclient.EscapePath(accountNo), &account); err != nil {
+			return nil, fmt.Errorf("repo: 从 core-banking 查账户 %s: %w", accountNo, err)
+		}
+		out = append(out, domain.CustAccount{
+			AccountNo: account.AccountNo, Ccy: account.Ccy, Status: account.Status,
+			OpenBizDate: account.OpenBizDate, BranchCode: account.BranchCode, Role: role,
+		})
 	}
 	if err := rows.Err(); err != nil {
-		return out, fmt.Errorf("repo: 联邦查客户账户 %s: %w", custID, err)
+		return out, fmt.Errorf("repo: 查客户账户关系 %s: %w", custID, err)
 	}
 	return out, nil
+}
+
+func getenv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

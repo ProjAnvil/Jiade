@@ -1,4 +1,4 @@
-// Package migrate 把 DDL 文本应用到已存在的数据库。
+// Package migrate applies DDL text to an existing database.
 package migrate
 
 import (
@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// Run 执行 DDL 文本（按分号切分语句，逐条执行）。
+// Run executes the DDL text (statements are separated by semicolons and executed one by one).
 func Run(ctx context.Context, db *sql.DB, ddl string) error {
 	for _, stmt := range SplitStatements(ddl) {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
@@ -18,7 +18,7 @@ func Run(ctx context.Context, db *sql.DB, ddl string) error {
 	return nil
 }
 
-// SplitStatements 按分号切分 SQL 语句（core_db.sql 无嵌套分号，安全）。
+// SplitStatements splits SQL statements by semicolons (core_db.sql has no nested semicolons, safe).
 func SplitStatements(sqlText string) []string {
 	var out []string
 	for _, s := range strings.Split(sqlText, ";") {

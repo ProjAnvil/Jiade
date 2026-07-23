@@ -1,5 +1,5 @@
 name: bank
-description: 简化版银行核心系统（core/customer/payment/reward/risk/loan/wealth 服务，Spec B-4b）
+description: A compact core-banking system with core, customer, payment, reward, risk, loan, and wealth services
 version: 0.4.0
 databases:
   - name: core_db

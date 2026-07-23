@@ -10,11 +10,11 @@ import (
 	"strings"
 )
 
-// ErrDirNotEmpty 目标目录非空且未 --force。
-var ErrDirNotEmpty = fmt.Errorf("目标目录非空（用 --force 覆盖）")
+// ErrDirNotEmpty The target directory is not empty and is not --forced.
+var ErrDirNotEmpty = fmt.Errorf("target directory is not empty (use --force to overwrite it)")
 
-// Copy 把 tar 中模板 name 逐字解压到 dir（文件直接落在 dir/ 下，零替换）。
-// 第二个参数保留 *Registry 以兼容调用方签名，内部直接读全局 templatesTar。
+// Copy extracts the template name in tar to dir verbatim (the file falls directly under dir/, zero replacement).
+// The second parameter retains *Registry to be compatible with the caller signature, and the global templatesTar is read directly internally.
 func Copy(name string, _ *Registry, dir string, force bool) error {
 	if err := checkTarget(dir, force); err != nil {
 		return err
@@ -27,7 +27,7 @@ func Copy(name string, _ *Registry, dir string, force bool) error {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("template: 读 tar: %w", err)
+			return fmt.Errorf("template: read tar: %w", err)
 		}
 		if !strings.HasPrefix(hdr.Name, prefix) {
 			continue

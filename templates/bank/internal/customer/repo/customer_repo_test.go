@@ -50,17 +50,16 @@ func TestCustomerRepo_GetAndList(t *testing.T) {
 	}
 }
 
-func TestCustomerRepo_GetCustAccounts_FDWJoin(t *testing.T) {
+func TestCustomerRepo_GetCustAccounts_ServiceCall(t *testing.T) {
 	db := setupCustDB(t)
 	defer db.Close()
 	ctx := context.Background()
 	r := repo.NewCustomerRepo(db)
-	// 依赖 seed 已建 ext_core_db_demand_account 外部表 + cust_account_rel + core demand_account 数据
-	// 取 seed 出的第一个客户的账户（若无数据则跳过）
+	// Depends on seed data and started core-banking service.
 	accts, err := r.GetCustAccounts(ctx, "C0000001")
 	if err != nil {
-		t.Fatalf("FDW JOIN 查询失败（外部表未建？先 make seed + setup_fdw）: %v", err)
+		t.Fatalf("跨服务账户查询失败（先 make up）: %v", err)
 	}
-	// 不强断言行数（取决于 seed 数据是否已灌），只断言查询不报错
+	// Do not forcefully assert the number of rows (depends on whether the seed data has been filled), only assert that the query does not report an error
 	_ = accts
 }

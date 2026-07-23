@@ -1,4 +1,4 @@
-// Package main 是 risk 只读 API 服务入口。
+// Package main is the risk read-only API service entry.
 package main
 
 import (

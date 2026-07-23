@@ -1,4 +1,4 @@
-// Package service 是 reward 服务的用例层（查询编排，纯逻辑可单测）。
+// Package service is the use case layer of reward service (query orchestration, pure logic can be tested individually).
 package service
 
 import (
@@ -7,7 +7,7 @@ import (
 	"bank/internal/reward/domain"
 )
 
-// RewardStore reward 查询接口（repo 实现）。
+// RewardStore reward query interface (repo implementation).
 type RewardStore interface {
 	GetPointsAcct(ctx context.Context, custID string) (domain.PointsAcct, error)
 	ListPointsAccts(ctx context.Context, memberLevel string, offset, limit int) ([]domain.PointsAcct, error)
@@ -15,28 +15,28 @@ type RewardStore interface {
 	GetProfile(ctx context.Context, custID string) (domain.RewardProfile, error)
 }
 
-// RewardService reward 只读服务，包装 RewardStore 做查询编排。
+// RewardService reward is a read-only service that wraps RewardStore for query orchestration.
 type RewardService struct{ store RewardStore }
 
-// NewRewardService 构造 RewardService。
+// NewRewardService constructs RewardService.
 func NewRewardService(store RewardStore) *RewardService { return &RewardService{store: store} }
 
-// GetPointsAcct 查单个积分账户。
+// GetPointsAcct checks a single points account.
 func (s *RewardService) GetPointsAcct(ctx context.Context, custID string) (domain.PointsAcct, error) {
 	return s.store.GetPointsAcct(ctx, custID)
 }
 
-// ListPointsAccts 按会员等级筛选并分页。
+// ListPointsAccts Filter and paginate by membership level.
 func (s *RewardService) ListPointsAccts(ctx context.Context, memberLevel string, offset, limit int) ([]domain.PointsAcct, error) {
 	return s.store.ListPointsAccts(ctx, memberLevel, offset, limit)
 }
 
-// ListCoupons 查客户优惠券。
+// ListCoupons Check customer coupons.
 func (s *RewardService) ListCoupons(ctx context.Context, custID, status string, offset, limit int) ([]domain.Coupon, error) {
 	return s.store.ListCoupons(ctx, custID, status, offset, limit)
 }
 
-// Profile 查积分档案（跨库联邦）。
+// Profile checks the points file (aggregated through the customer service).
 func (s *RewardService) Profile(ctx context.Context, custID string) (domain.RewardProfile, error) {
 	return s.store.GetProfile(ctx, custID)
 }

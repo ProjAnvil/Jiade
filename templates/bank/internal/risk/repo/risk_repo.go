@@ -1,21 +1,31 @@
-// Package repo 是 risk 服务的仓储层：pgx raw SQL（本库 + 跨库 FDW JOIN）。
+// Package repo is the data access layer of risk service: this library SQL + customer HTTP API.
 package repo
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 
+	"bank/internal/platform/serviceclient"
 	"bank/internal/risk/domain"
 )
 
-// RiskRepo risk 仓储。本库 risk_event/risk_rule/blacklist 查询，并经 FDW 跨库 JOIN cust_db.cust_info。
-type RiskRepo struct{ db *sql.DB }
+// RiskRepo risk warehousing. This library only queries risk_event/risk_rule/blacklist.
+type RiskRepo struct {
+	db       *sql.DB
+	customer *serviceclient.Client
+}
 
-// NewRiskRepo 构造 RiskRepo。
-func NewRiskRepo(db *sql.DB) *RiskRepo { return &RiskRepo{db: db} }
+// NewRiskRepo constructs RiskRepo.
+func NewRiskRepo(db *sql.DB) *RiskRepo {
+	return &RiskRepo{
+		db:       db,
+		customer: serviceclient.New(getenv("CUSTOMER_URL", "http://localhost:18081")),
+	}
+}
 
-// ListEvents 按日期/规则/action 筛选（空则不限），分页。
+// ListEvents filter by date/rule/action (no limit if empty), pagination.
 func (r *RiskRepo) ListEvents(ctx context.Context, from, to, ruleID, action string, offset, limit int) ([]domain.RiskEvent, error) {
 	if limit <= 0 {
 		limit = 50
@@ -44,25 +54,33 @@ func (r *RiskRepo) ListEvents(ctx context.Context, from, to, ruleID, action stri
 	return out, nil
 }
 
-// GetEvent 跨库联邦：risk_event JOIN ext_cust_db_cust_info → 事件详情 + 客户姓名/类型。
+// GetEvent checks the library event, and then calls customer to obtain the customer name/type.
 func (r *RiskRepo) GetEvent(ctx context.Context, eventID string) (domain.RiskEventDetail, error) {
-	q := `SELECT e.event_id,e.biz_date,e.cust_id,e.account_no,e.rule_id,e.risk_score,e.action_taken,e.txn_ref,e.summary,ci.name,ci.cust_type
-		FROM risk_event e
-		LEFT JOIN ext_cust_db_cust_info ci ON e.cust_id=ci.cust_id
-		WHERE e.event_id=$1`
+	q := `SELECT event_id,biz_date,cust_id,account_no,rule_id,risk_score,action_taken,txn_ref,summary
+		FROM risk_event WHERE event_id=$1`
 	var d domain.RiskEventDetail
-	var cust, acct, rule, score, action, txnRef, summary, name, ctype sql.NullString
+	var cust, acct, rule, score, action, txnRef, summary sql.NullString
 	err := r.db.QueryRowContext(ctx, q, eventID).Scan(
-		&d.EventID, &d.BizDate, &cust, &acct, &rule, &score, &action, &txnRef, &summary, &name, &ctype)
+		&d.EventID, &d.BizDate, &cust, &acct, &rule, &score, &action, &txnRef, &summary)
 	if err != nil {
-		return domain.RiskEventDetail{}, fmt.Errorf("repo: 联邦查风控事件 %s: %w", eventID, err)
+		return domain.RiskEventDetail{}, fmt.Errorf("repo: 查风控事件 %s: %w", eventID, err)
 	}
 	d.CustID, d.AccountNo, d.RuleID, d.RiskScore = cust.String, acct.String, rule.String, score.String
-	d.ActionTaken, d.TxnRef, d.Summary, d.CustName, d.CustType = action.String, txnRef.String, summary.String, name.String, ctype.String
+	d.ActionTaken, d.TxnRef, d.Summary = action.String, txnRef.String, summary.String
+	if d.CustID != "" {
+		var customer struct {
+			Name     string `json:"name"`
+			CustType string `json:"cust_type"`
+		}
+		if err := r.customer.Get(ctx, "/api/v1/customers/"+serviceclient.EscapePath(d.CustID), &customer); err != nil {
+			return domain.RiskEventDetail{}, fmt.Errorf("repo: 从 customer 查客户 %s: %w", d.CustID, err)
+		}
+		d.CustName, d.CustType = customer.Name, customer.CustType
+	}
 	return d, nil
 }
 
-// ListRules 列风控规则（静态）。
+// ListRules lists risk control rules (static).
 func (r *RiskRepo) ListRules(ctx context.Context) ([]domain.RiskRule, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT rule_id,rule_name,rule_type,condition_json,threshold,action,status FROM risk_rule ORDER BY rule_id`)
@@ -86,7 +104,7 @@ func (r *RiskRepo) ListRules(ctx context.Context) ([]domain.RiskRule, error) {
 	return out, nil
 }
 
-// ListBlacklists 按客户筛选（空则不限），分页。
+// ListBlacklists Filter by customer (no limit if empty), paging.
 func (r *RiskRepo) ListBlacklists(ctx context.Context, custID string, offset, limit int) ([]domain.Blacklist, error) {
 	if limit <= 0 {
 		limit = 50
@@ -114,7 +132,7 @@ func (r *RiskRepo) ListBlacklists(ctx context.Context, custID string, offset, li
 	return out, nil
 }
 
-// scanEvent 扫描单行 risk_event（scan 函数由 QueryRow 或 Rows 注入）。
+// scanEvent scans a single row risk_event (scan function is injected by QueryRow or Rows).
 func scanEvent(scan func(dest ...any) error) (domain.RiskEvent, error) {
 	var e domain.RiskEvent
 	var cust, acct, rule, score, action, txnRef, summary sql.NullString
@@ -124,4 +142,11 @@ func scanEvent(scan func(dest ...any) error) (domain.RiskEvent, error) {
 	e.CustID, e.AccountNo, e.RuleID, e.RiskScore = cust.String, acct.String, rule.String, score.String
 	e.ActionTaken, e.TxnRef, e.Summary = action.String, txnRef.String, summary.String
 	return e, nil
+}
+
+func getenv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

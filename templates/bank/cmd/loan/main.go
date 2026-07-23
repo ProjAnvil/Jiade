@@ -1,4 +1,4 @@
-// Package main 是 loan 只读 API 服务入口。
+// Package main is the loan read-only API service entrance.
 package main
 
 import (

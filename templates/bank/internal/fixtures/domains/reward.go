@@ -11,7 +11,7 @@ import (
 	"bank/internal/reward/domain"
 )
 
-// reward 会员等级。
+// reward membership level.
 var rewardLevels = []struct {
 	Code, Name string
 	Threshold  int
@@ -20,20 +20,20 @@ var rewardLevels = []struct {
 	{"L4", "白金", 200000}, {"L5", "钻石", 1000000},
 }
 
-// coupon 面额/门槛候选（元 → 分）。
+// Coupon denomination/threshold candidate (yuan → cent).
 var (
 	couponFaceCents = []int{1000, 2000, 5000, 10000}
 	couponMinCents  = []int{0, 5000, 10000}
 )
 
-// RewardStatic 静态表行集合（一次性生成）。
+// RewardStatic static table row collection (generated once).
 type RewardStatic struct {
 	MemberLevels []domain.MemberLevel
 	Campaigns    []domain.Campaign
 	PointsAccts  []domain.PointsAcct
 }
 
-// GenRewardStatic 生成 member_level/campaign/points_acct。rng 偏移 +30。
+// GenRewardStatic generates member_level/campaign/points_acct. rng offset +30.
 func GenRewardStatic(cfg fixtures.Config, custIDs []string) RewardStatic {
 	rng := fixtures.NewRNG(cfg.Seed + 30)
 	sf := fixtures.ScaleFactor(cfg.Scale)
@@ -70,7 +70,7 @@ func GenRewardStatic(cfg fixtures.Config, custIDs []string) RewardStatic {
 	return RewardStatic{MemberLevels: levels, Campaigns: campaigns, PointsAccts: accts}
 }
 
-// WriteRewardStatic 幂等写 member_level/campaign/points_acct（先 DELETE 后 INSERT）。
+// WriteRewardStatic writes member_level/campaign/points_acct idempotently (DELETE first and then INSERT).
 func WriteRewardStatic(ctx context.Context, db *sql.DB, s RewardStatic) error {
 	for _, t := range []string{"points_acct", "campaign", "member_level"} {
 		if _, err := db.ExecContext(ctx, "DELETE FROM "+t); err != nil {
@@ -101,8 +101,8 @@ func WriteRewardStatic(ctx context.Context, db *sql.DB, s RewardStatic) error {
 	return nil
 }
 
-// RunReward 按 bizDate 推进生成 points_txn + coupon（逐日三因子 + 每日独立 rng seed+31+ordinal）。
-// balances 内存滚存自静态 points_acct 初始余额（redeem 不超余额）。逐日不回写 points_acct。
+// RunReward advances by bizDate to generate points_txn + coupon (daily three factors + daily independent rng seed+31+ordinal).
+// The balances memory is rolled over from the static points_acct initial balance (redeem does not exceed the balance). Points_acct is not written back daily.
 func RunReward(ctx context.Context, db *sql.DB, cfg fixtures.Config, accts []domain.PointsAcct, campaignIDs []string) error {
 	if len(accts) == 0 {
 		return fmt.Errorf("reward: 无积分账户")
@@ -144,13 +144,13 @@ func RunReward(ctx context.Context, db *sql.DB, cfg fixtures.Config, accts []dom
 				TxnID: fmt.Sprintf("RW-PT-%s-%05d", compact, i), CustID: cid, BizDate: dateStr,
 				Points: pts, Direction: direction, SourceType: rng.Choice(fixtures.PointSources),
 			})
-			if rng.IntRange(1, 20) == 1 { // 5% 发券
+			if rng.IntRange(1, 20) == 1 { // 5% coupons issued
 				coupons = append(coupons, domain.Coupon{
 					CouponID: fmt.Sprintf("RW-CP-%s-%05d", compact, i), CustID: cid,
 					CampaignID: rng.Choice(campaignIDs),
 					FaceValue:  domain.NewMoneyFromCents(int64(couponFaceCents[rng.IntRange(0, len(couponFaceCents)-1)])),
 					MinSpend:   domain.NewMoneyFromCents(int64(couponMinCents[rng.IntRange(0, len(couponMinCents)-1)])),
-					Status:     "issued", IssueBizDate: dateStr, ExpireDate: dateStr, // 有意如此：同日发放即同日过期（短期券），非 bug
+					Status:     "issued", IssueBizDate: dateStr, ExpireDate: dateStr, // This is intentional: if it is issued on the same day, it will expire on the same day (short-term coupon), not a bug
 				})
 			}
 		}
@@ -172,7 +172,7 @@ func RunReward(ctx context.Context, db *sql.DB, cfg fixtures.Config, accts []dom
 	return nil
 }
 
-// bulkInsertPointsTxns 批量插 points_txn（8 列；ref_txn_id/summary nullable）。
+// bulkInsertPointsTxns Bulk insert points_txn (8 columns; ref_txn_id/summary nullable).
 func bulkInsertPointsTxns(ctx context.Context, q pg.DBTX, rows []domain.PointsTxn) error {
 	if len(rows) == 0 {
 		return nil
@@ -197,7 +197,7 @@ func bulkInsertPointsTxns(ctx context.Context, q pg.DBTX, rows []domain.PointsTx
 	return nil
 }
 
-// bulkInsertCoupons 批量插 coupon（8 列）。空切片跳过。
+// bulkInsertCoupons inserts coupons in batches (8 columns). Empty slices are skipped.
 func bulkInsertCoupons(ctx context.Context, q pg.DBTX, rows []domain.Coupon) error {
 	if len(rows) == 0 {
 		return nil
@@ -222,7 +222,7 @@ func bulkInsertCoupons(ctx context.Context, q pg.DBTX, rows []domain.Coupon) err
 	return nil
 }
 
-// addDays 把 YYYY-MM-DD 加 n 天（n 可正可负）。
+// addDays adds n days to YYYY-MM-DD (n can be positive or negative).
 func addDays(dateStr string, n int) string {
 	t, err := parseDate2(dateStr)
 	if err != nil {

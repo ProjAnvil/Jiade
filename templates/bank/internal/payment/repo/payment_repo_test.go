@@ -49,10 +49,10 @@ func TestPaymentRepo_TransfersAndParties(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTransfers 失败: %v", err)
 	}
-	// 联邦 JOIN 不报错即可（依赖 seed 数据 + setup_fdw）
+	// Cross-service aggregation only requires no error reporting (depending on seed data and core-banking/customer services).
 	_, err = r.GetTransferParties(ctx, "PT000000000001")
 	if err != nil {
-		t.Errorf("GetTransferParties FDW JOIN 失败（外部表未建？）: %v", err)
+		t.Errorf("GetTransferParties 跨服务聚合失败（先 make up）: %v", err)
 	}
 }
 

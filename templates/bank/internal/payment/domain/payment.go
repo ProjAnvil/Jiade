@@ -70,7 +70,7 @@ type Settlement struct {
 	Status    string
 }
 
-// TransferParty is a federated JOIN result from transfer_txn (account + customer name).
+// TransferParty is the transfer party information aggregated by payment, core-banking, and customer services.
 type TransferParty struct {
 	TxnID       string
 	Amount      Money

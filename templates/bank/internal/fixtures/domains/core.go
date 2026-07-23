@@ -1,4 +1,4 @@
-// Package domains 是 fixture 的各业务域生成器。core = 核心账务。
+// Package domains are generators of each business domain of the fixture. core = core accounting.
 package domains
 
 import (
@@ -10,9 +10,9 @@ import (
 	"bank/internal/fixtures"
 )
 
-// ---- 静态主数据（确定性）----
+// ----Static master data (deterministic)----
 
-// StaticData 5 张主数据表的行集合。
+// StaticData A collection of rows from 5 main data tables.
 type StaticData struct {
 	SysParams [][2]string // {key, value}
 	Ccys      [][4]string // {code, name, decimal_digits, status}
@@ -21,7 +21,7 @@ type StaticData struct {
 	Rates     [][5]string // {rate_id, acct_type, ccy, rate_value, effective_date}
 }
 
-// GenStaticData 生成静态主数据（固定值 + cfg 的起始日）。
+// GenStaticData generates static master data (fixed value + start day of cfg).
 func GenStaticData(cfg fixtures.Config) StaticData {
 	return StaticData{
 		SysParams: [][2]string{
@@ -56,7 +56,7 @@ func GenStaticData(cfg fixtures.Config) StaticData {
 	}
 }
 
-// GenAccountRows 生成活期/定期账户。cust_id 自生成（core-banking 自包含）。
+// GenAccountRows Generates current/term accounts. cust_id is self-generated (core-banking self-contained).
 func GenAccountRows(cfg fixtures.Config) ([]domain.DemandAccount, []domain.FixedAccount) {
 	rng := fixtures.NewRNG(cfg.Seed + 1)
 	tc := cfg.TargetCounts()
@@ -77,7 +77,7 @@ func GenAccountRows(cfg fixtures.Config) ([]domain.DemandAccount, []domain.Fixed
 			ProductCode: "DEMAND-CNY", SubjectCode: "2011",
 		})
 	}
-	// 定期：约 DemandAccounts/4 个
+	// Recurring: Approx. DemandAccounts/4
 	nFixed := tc.DemandAccounts / 4
 	for i := 0; i < nFixed; i++ {
 		term := terms[rng.IntRange(0, 2)]
@@ -96,11 +96,11 @@ func GenAccountRows(cfg fixtures.Config) ([]domain.DemandAccount, []domain.Fixed
 	return demand, fixed
 }
 
-// GenBalanceRows / GenTxnRows 已由 Spec B-2 多日切日引擎（bizdate.go RunBizDate）取代，删除。
+// GenBalanceRows / GenTxnRows have been replaced by the Spec B-2 multi-date cutter engine (bizdate.go RunBizDate), removed.
 
-// ---- 落库 writer（幂等：先 DELETE 后 INSERT）----
+// ---- Drop-in writer (idempotent: DELETE first and then INSERT)----
 
-// WriteStatic 写 5 张主数据表。
+// WriteStatic writes 5 master data tables.
 func WriteStatic(ctx context.Context, db *sql.DB, data StaticData) error {
 	for _, t := range []string{"sys_param", "ccy", "branch", "chart_of_acct", "interest_rate"} {
 		if _, err := db.ExecContext(ctx, "DELETE FROM "+t); err != nil {
@@ -143,7 +143,7 @@ func WriteStatic(ctx context.Context, db *sql.DB, data StaticData) error {
 	return nil
 }
 
-// WriteAccounts 写活期/定期账户（先清后插）。
+// WriteAccounts writes current/term accounts (clear first and then insert).
 func WriteAccounts(ctx context.Context, db *sql.DB, demand []domain.DemandAccount, fixed []domain.FixedAccount) error {
 	if _, err := db.ExecContext(ctx, "DELETE FROM demand_account"); err != nil {
 		return err
@@ -172,7 +172,7 @@ func WriteAccounts(ctx context.Context, db *sql.DB, demand []domain.DemandAccoun
 	return nil
 }
 
-// WriteBalances / WriteTxns 已由 Spec B-2 多日切日引擎（bizdate.go bulkInsert*）取代，删除。
+// WriteBalances/WriteTxns has been replaced by the Spec B-2 multi-date insert engine (bizdate.go bulkInsert*), removed.
 
 // ---- helpers ----
 

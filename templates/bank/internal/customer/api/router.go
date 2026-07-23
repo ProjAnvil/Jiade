@@ -7,7 +7,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-// NewRouter 装配 customer 只读路由。
+// NewRouter assembles the customer read-only route.
 func NewRouter(h *Handlers) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, middleware.Logger, middleware.Recoverer)

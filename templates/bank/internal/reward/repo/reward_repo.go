@@ -1,21 +1,31 @@
-// Package repo 是 reward 服务的仓储层：pgx raw SQL（本库 + 跨库 FDW JOIN）。
+// Package repo is the data access layer of reward service: this library SQL + customer HTTP API.
 package repo
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 
+	"bank/internal/platform/serviceclient"
 	"bank/internal/reward/domain"
 )
 
-// RewardRepo reward 仓储。本库 points_acct/coupon 查询，并经 FDW 跨库 JOIN cust_db.cust_info。
-type RewardRepo struct{ db *sql.DB }
+// RewardRepo reward warehousing. This library only queries points_acct/coupon.
+type RewardRepo struct {
+	db       *sql.DB
+	customer *serviceclient.Client
+}
 
-// NewRewardRepo 构造 RewardRepo。
-func NewRewardRepo(db *sql.DB) *RewardRepo { return &RewardRepo{db: db} }
+// NewRewardRepo constructs RewardRepo.
+func NewRewardRepo(db *sql.DB) *RewardRepo {
+	return &RewardRepo{
+		db:       db,
+		customer: serviceclient.New(getenv("CUSTOMER_URL", "http://localhost:18081")),
+	}
+}
 
-// GetPointsAcct 查单个积分账户。不存在返回包装的 sql.ErrNoRows。
+// GetPointsAcct checks a single points account. There is no return wrapped sql.ErrNoRows.
 func (r *RewardRepo) GetPointsAcct(ctx context.Context, custID string) (domain.PointsAcct, error) {
 	var a domain.PointsAcct
 	var level sql.NullString
@@ -29,7 +39,7 @@ func (r *RewardRepo) GetPointsAcct(ctx context.Context, custID string) (domain.P
 	return a, nil
 }
 
-// ListPointsAccts 按 member_level 筛选（空则不限），分页。limit<=0 取 50。
+// ListPointsAccts is filtered by member_level (no limit if empty) and paging. limit<=0 takes 50.
 func (r *RewardRepo) ListPointsAccts(ctx context.Context, memberLevel string, offset, limit int) ([]domain.PointsAcct, error) {
 	if limit <= 0 {
 		limit = 50
@@ -57,7 +67,7 @@ func (r *RewardRepo) ListPointsAccts(ctx context.Context, memberLevel string, of
 	return out, nil
 }
 
-// ListCoupons 查客户优惠券（status 空则不限），分页。
+// ListCoupons Check customer coupons (if status is empty, no limit), pagination.
 func (r *RewardRepo) ListCoupons(ctx context.Context, custID, status string, offset, limit int) ([]domain.Coupon, error) {
 	if limit <= 0 {
 		limit = 50
@@ -73,20 +83,24 @@ func (r *RewardRepo) ListCoupons(ctx context.Context, custID, status string, off
 	return scanCoupons(rows)
 }
 
-// GetProfile 跨库联邦：points_acct JOIN ext_cust_db_cust_info → 积分余额 + 会员等级 + 客户姓名/类型。
+// GetProfile checks the library points account, and then calls customer to obtain the customer name/type.
 func (r *RewardRepo) GetProfile(ctx context.Context, custID string) (domain.RewardProfile, error) {
 	var p domain.RewardProfile
-	var level, name, ctype sql.NullString
+	var level sql.NullString
 	err := r.db.QueryRowContext(ctx,
-		`SELECT pa.cust_id, pa.points_balance, pa.member_level, ci.name, ci.cust_type
-		FROM points_acct pa
-		LEFT JOIN ext_cust_db_cust_info ci ON pa.cust_id=ci.cust_id
-		WHERE pa.cust_id=$1`, custID).
-		Scan(&p.CustID, &p.PointsBalance, &level, &name, &ctype)
+		`SELECT cust_id,points_balance,member_level FROM points_acct WHERE cust_id=$1`, custID).
+		Scan(&p.CustID, &p.PointsBalance, &level)
 	if err != nil {
-		return domain.RewardProfile{}, fmt.Errorf("repo: 联邦查积分档案 %s: %w", custID, err)
+		return domain.RewardProfile{}, fmt.Errorf("repo: 查积分档案 %s: %w", custID, err)
 	}
-	p.MemberLevel, p.CustName, p.CustType = level.String, name.String, ctype.String
+	var customer struct {
+		Name     string `json:"name"`
+		CustType string `json:"cust_type"`
+	}
+	if err := r.customer.Get(ctx, "/api/v1/customers/"+serviceclient.EscapePath(custID), &customer); err != nil {
+		return domain.RewardProfile{}, fmt.Errorf("repo: 从 customer 查客户 %s: %w", custID, err)
+	}
+	p.MemberLevel, p.CustName, p.CustType = level.String, customer.Name, customer.CustType
 	return p, nil
 }
 
@@ -114,4 +128,11 @@ func scanCoupons(rows *sql.Rows) ([]domain.Coupon, error) {
 		return out, fmt.Errorf("repo: 列优惠券: %w", err)
 	}
 	return out, nil
+}
+
+func getenv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

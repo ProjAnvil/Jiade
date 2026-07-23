@@ -1,21 +1,21 @@
-// Package domain 是 loan 服务的纯领域模型，零 DB/框架依赖（最内层）。
-// 金额字段用 Money（int64 分）；rate/min_rate/max_rate 是 NUMERIC(10,6) 比率（非金额），文本直存。
+// Package domain is a pure domain model of the loan service, with zero DB/framework dependencies (innermost layer).
+// The amount field uses Money (int64 points); rate/min_rate/max_rate is a NUMERIC(10,6) ratio (not an amount), and the text is stored directly.
 package domain
 
-// LoanProduct 对应 loan_product 表。
+// LoanProduct corresponds to the loan_product table.
 type LoanProduct struct {
 	ProductCode string
 	ProductName string
 	LoanType    string
 	RateType    string
-	MinRate     string // NUMERIC(10,6) 文本（比率，非金额）
+	MinRate     string // NUMERIC(10,6) text (ratio, not amount)
 	MaxRate     string
 	MaxTerm     int
 	MaxAmount   Money
 	Status      string
 }
 
-// LoanAccount 对应 loan_account 表。
+// LoanAccount corresponds to the loan_account table.
 type LoanAccount struct {
 	LoanNo        string
 	CustID        string
@@ -23,7 +23,7 @@ type LoanAccount struct {
 	Ccy           string
 	Principal     Money
 	Balance       Money
-	Rate          string // NUMERIC(10,6) 文本（比率，非金额）
+	Rate          string // NUMERIC(10,6) text (ratio, not amount)
 	StartBizDate  string
 	MatureDate    string
 	TermMonths    int
@@ -32,7 +32,7 @@ type LoanAccount struct {
 	BranchCode    string
 }
 
-// LoanDisbursement 对应 loan_disbursement 表。
+// LoanDisbursement corresponds to the loan_disbursement table.
 type LoanDisbursement struct {
 	DisbID    string
 	BizDate   string
@@ -41,7 +41,7 @@ type LoanDisbursement struct {
 	ToAccount string
 }
 
-// LoanRepay 对应 loan_repay 表。
+// LoanRepay corresponds to the loan_repay table.
 type LoanRepay struct {
 	RepayID       string
 	BizDate       string
@@ -54,7 +54,7 @@ type LoanRepay struct {
 	Status        string
 }
 
-// LoanOverdue 对应 loan_overdue 表。
+// LoanOverdue corresponds to the loan_overdue table.
 type LoanOverdue struct {
 	OverdueID     string
 	BizDate       string
@@ -64,7 +64,7 @@ type LoanOverdue struct {
 	OverdueAmount Money
 }
 
-// LoanBalance 对应 loan_balance 表（逐日全量快照）。
+// LoanBalance corresponds to the loan_balance table (full daily snapshot).
 type LoanBalance struct {
 	LoanNo             string
 	BizDate            string
@@ -72,7 +72,7 @@ type LoanBalance struct {
 	InterestReceivable Money
 }
 
-// LoanProfile 是联邦查询结果（loan_account JOIN ext_cust_db_cust_info）。
+// LoanProfile is the IOU file aggregated by the loan and customer services.
 type LoanProfile struct {
 	LoanNo    string
 	CustID    string

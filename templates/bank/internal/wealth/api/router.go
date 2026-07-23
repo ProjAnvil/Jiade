@@ -7,7 +7,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-// NewRouter 装配 wealth 只读路由。
+// NewRouter assembles wealth read-only routes.
 func NewRouter(h *Handlers) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, middleware.Logger, middleware.Recoverer)
