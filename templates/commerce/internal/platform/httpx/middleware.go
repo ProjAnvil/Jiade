@@ -37,15 +37,18 @@ func serviceInstance(instance string, next http.Handler) http.Handler {
 	})
 }
 
-func recoverPanic(next http.Handler) http.Handler {
+func recoverPanic(logger *slog.Logger, service string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buffer := &responseBuffer{header: make(http.Header), status: http.StatusOK}
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				slog.Error("panic while serving HTTP request", "panic", recovered, "request_id", RequestID(r.Context()))
+				logger.Error("panic while serving HTTP request", "service", service, "panic", recovered, "request_id", RequestID(r.Context()))
 				WriteProblem(w, Problem{Status: http.StatusInternalServerError, Code: "internal_error"})
+				return
 			}
+			buffer.flush(w)
 		}()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(buffer, r)
 	})
 }
 
@@ -58,12 +61,12 @@ func limitBody(limit int64, next http.Handler) http.Handler {
 	})
 }
 
-func accessLog(next http.Handler) http.Handler {
+func accessLog(logger *slog.Logger, service string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		recorder := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
-		slog.Info("http request", "method", r.Method, "path", r.URL.Path, "status", recorder.status,
+		logger.Info("http request", "service", service, "method", r.Method, "path", r.URL.Path, "status", recorder.status,
 			"bytes", recorder.bytes, "duration", time.Since(started), "request_id", RequestID(r.Context()))
 	})
 }
@@ -72,6 +75,39 @@ type responseRecorder struct {
 	http.ResponseWriter
 	status int
 	bytes  int
+}
+
+type responseBuffer struct {
+	header      http.Header
+	status      int
+	body        []byte
+	wroteHeader bool
+}
+
+func (w *responseBuffer) Header() http.Header { return w.header }
+
+func (w *responseBuffer) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.status = status
+	w.wroteHeader = true
+}
+
+func (w *responseBuffer) Write(body []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	w.body = append(w.body, body...)
+	return len(body), nil
+}
+
+func (w *responseBuffer) flush(destination http.ResponseWriter) {
+	for key, values := range w.header {
+		destination.Header()[key] = append([]string(nil), values...)
+	}
+	destination.WriteHeader(w.status)
+	_, _ = destination.Write(w.body)
 }
 
 func (w *responseRecorder) WriteHeader(status int) {

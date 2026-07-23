@@ -1,12 +1,16 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+
+	"commerce/internal/platform/telemetry"
 )
 
 func TestLiveAndReadyHaveDifferentDependencySemantics(t *testing.T) {
@@ -49,6 +53,45 @@ func TestHandlerRecoversPanicsAsProblemJSON(t *testing.T) {
 	}
 	if got := w.Header().Get("Content-Type"); got != "application/problem+json" {
 		t.Fatalf("Content-Type = %q, want application/problem+json", got)
+	}
+}
+
+func TestHandlerDiscardsWrittenResponseWhenHandlerPanics(t *testing.T) {
+	s := NewServer(ServerConfig{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+		_, _ = w.Write([]byte("partial response"))
+		panic("unexpected")
+	})})
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+	}
+	if got := w.Body.String(); got == "partial response" || bytes.Contains(w.Body.Bytes(), []byte("partial response")) {
+		t.Fatalf("body = %q, want no partial response", got)
+	}
+	if got := w.Header().Get("Content-Type"); got != "application/problem+json" {
+		t.Fatalf("Content-Type = %q, want application/problem+json", got)
+	}
+}
+
+func TestAccessLogIsJSONAndIncludesServiceIdentity(t *testing.T) {
+	var logs bytes.Buffer
+	s := NewServer(ServerConfig{
+		Service: "order",
+		Logger:  telemetry.NewJSONLogger(&logs),
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
+	})
+	s.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	var entry map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+		t.Fatalf("access log is not JSON: %v; log=%q", err, logs.String())
+	}
+	if got := entry["service"]; got != "order" {
+		t.Fatalf("service = %v, want order", got)
+	}
+	if got := entry["msg"]; got != "http request" {
+		t.Fatalf("msg = %v, want http request", got)
 	}
 }
 

@@ -3,11 +3,14 @@ package httpx
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"time"
 
+	"commerce/internal/platform/telemetry"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -22,6 +25,7 @@ type ServerConfig struct {
 	Handler          http.Handler
 	Ready            func(context.Context) error
 	Registry         *prometheus.Registry
+	Logger           *slog.Logger
 	ShutdownTimeout  time.Duration
 	RequestBodyLimit int64
 }
@@ -46,6 +50,9 @@ func NewServer(config ServerConfig) *Server {
 	if config.RequestBodyLimit <= 0 {
 		config.RequestBodyLimit = defaultBodyLimit
 	}
+	if config.Logger == nil {
+		config.Logger = telemetry.NewJSONLogger(os.Stderr)
+	}
 
 	server := &Server{ready: config.Ready, shutdownTimeout: config.ShutdownTimeout}
 	mux := http.NewServeMux()
@@ -62,7 +69,9 @@ func NewServer(config ServerConfig) *Server {
 		mux.Handle("/", config.Handler)
 	}
 
-	server.handler = accessLog(recoverPanic(serviceInstance(config.Instance, requestID(limitBody(config.RequestBodyLimit, mux)))))
+	server.handler = requestID(serviceInstance(config.Instance,
+		accessLog(config.Logger, config.Service,
+			limitBody(config.RequestBodyLimit, recoverPanic(config.Logger, config.Service, mux)))))
 	server.server = &http.Server{
 		Addr:              config.Addr,
 		Handler:           server.handler,
