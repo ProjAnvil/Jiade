@@ -1,10 +1,13 @@
 package httpx
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
@@ -43,7 +46,7 @@ func recoverPanic(logger *slog.Logger, service string, next http.Handler) http.H
 			if recovered := recover(); recovered != nil {
 				logger.Error("panic while serving HTTP request", "service", service, "panic", recovered, "request_id", RequestID(r.Context()))
 				if state, ok := w.(interface{ Committed() bool }); ok && state.Committed() {
-					panic(recovered)
+					panic(http.ErrAbortHandler)
 				}
 				WriteProblem(w, Problem{Status: http.StatusInternalServerError, Code: "internal_error"})
 			}
@@ -111,6 +114,49 @@ func (w *responseRecorder) FlushError() error {
 	}
 	return err
 }
+
+// Flush delegates direct legacy flushing while retaining response state.
+func (w *responseRecorder) Flush() { _ = w.FlushError() }
+
+// Hijack delegates connection hijacking when the underlying writer supports it.
+func (w *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	connection, readerWriter, err := hijacker.Hijack()
+	if err == nil && !w.committed {
+		w.status = http.StatusOK
+		w.committed = true
+	}
+	return connection, readerWriter, err
+}
+
+// Push delegates HTTP/2 server push when the underlying writer supports it.
+func (w *responseRecorder) Push(target string, options *http.PushOptions) error {
+	pusher, ok := w.ResponseWriter.(http.Pusher)
+	if !ok {
+		return http.ErrNotSupported
+	}
+	return pusher.Push(target, options)
+}
+
+// ReadFrom delegates efficient response copying and records the emitted bytes.
+func (w *responseRecorder) ReadFrom(source io.Reader) (int64, error) {
+	if !w.committed {
+		w.WriteHeader(http.StatusOK)
+	}
+	if readerFrom, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		n, err := readerFrom.ReadFrom(source)
+		w.bytes += int(n)
+		return n, err
+	}
+	n, err := io.Copy(writerOnly{w.ResponseWriter}, source)
+	w.bytes += int(n)
+	return n, err
+}
+
+type writerOnly struct{ io.Writer }
 
 func newRequestID() string {
 	var bytes [16]byte

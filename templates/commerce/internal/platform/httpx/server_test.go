@@ -1,12 +1,16 @@
 package httpx
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -64,8 +68,8 @@ func TestHandlerRepanicsAfterCommittedResponsePanics(t *testing.T) {
 	})})
 	w := httptest.NewRecorder()
 	defer func() {
-		if got := recover(); got != "unexpected" {
-			t.Fatalf("panic = %v, want unexpected", got)
+		if got := recover(); got != http.ErrAbortHandler {
+			t.Fatalf("panic = %v, want http.ErrAbortHandler", got)
 		}
 		if w.Code != http.StatusNoContent {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusNoContent)
@@ -75,6 +79,51 @@ func TestHandlerRepanicsAfterCommittedResponsePanics(t *testing.T) {
 		}
 	}()
 	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+}
+
+func TestResponseRecorderPreservesDirectOptionalInterfaces(t *testing.T) {
+	underlying := &capabilityRecorder{ResponseRecorder: httptest.NewRecorder()}
+	w := &responseRecorder{ResponseWriter: underlying, status: http.StatusOK}
+
+	flusher, ok := any(w).(http.Flusher)
+	if !ok {
+		t.Fatal("response recorder does not implement http.Flusher")
+	}
+	flusher.Flush()
+	if !underlying.flushed || !w.Committed() || w.status != http.StatusOK {
+		t.Fatalf("Flush() flushed=%v committed=%v status=%d", underlying.flushed, w.Committed(), w.status)
+	}
+
+	pusher, ok := any(w).(http.Pusher)
+	if !ok {
+		t.Fatal("response recorder does not implement http.Pusher")
+	}
+	if err := pusher.Push("/asset.js", nil); err != nil || underlying.pushed != "/asset.js" {
+		t.Fatalf("Push() err=%v target=%q", err, underlying.pushed)
+	}
+
+	readerFrom, ok := any(w).(io.ReaderFrom)
+	if !ok {
+		t.Fatal("response recorder does not implement io.ReaderFrom")
+	}
+	if n, err := readerFrom.ReadFrom(strings.NewReader("payload")); err != nil || n != int64(len("payload")) {
+		t.Fatalf("ReadFrom() n=%d err=%v", n, err)
+	}
+	if got := underlying.Body.String(); got != "payload" || w.bytes != len("payload") || !underlying.readFrom {
+		t.Fatalf("body=%q bytes=%d delegated=%v", got, w.bytes, underlying.readFrom)
+	}
+
+	hijacker, ok := any(w).(http.Hijacker)
+	if !ok {
+		t.Fatal("response recorder does not implement http.Hijacker")
+	}
+	conn, _, err := hijacker.Hijack()
+	if err != nil || !underlying.hijacked {
+		t.Fatalf("Hijack() err=%v hijacked=%v", err, underlying.hijacked)
+	}
+	if conn != nil {
+		_ = conn.Close()
+	}
 }
 
 func TestResponseControllerFlushesThroughServerResponseWrapper(t *testing.T) {
@@ -100,8 +149,8 @@ func TestFlushMarksResponseCommittedBeforePanic(t *testing.T) {
 	})})
 	w := flushRecorder{ResponseRecorder: httptest.NewRecorder(), flushed: new(bool)}
 	defer func() {
-		if got := recover(); got != "unexpected" {
-			t.Fatalf("panic = %v, want unexpected", got)
+		if got := recover(); got != http.ErrAbortHandler {
+			t.Fatalf("panic = %v, want http.ErrAbortHandler", got)
 		}
 	}()
 	s.Handler().ServeHTTP(&w, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -144,4 +193,32 @@ type flushRecorder struct {
 func (w *flushRecorder) Flush() {
 	*w.flushed = true
 	w.ResponseRecorder.Flush()
+}
+
+type capabilityRecorder struct {
+	*httptest.ResponseRecorder
+	flushed  bool
+	hijacked bool
+	pushed   string
+	readFrom bool
+}
+
+func (w *capabilityRecorder) Flush() {
+	w.flushed = true
+	w.ResponseRecorder.Flush()
+}
+
+func (w *capabilityRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	w.hijacked = true
+	return nil, nil, nil
+}
+
+func (w *capabilityRecorder) Push(target string, _ *http.PushOptions) error {
+	w.pushed = target
+	return nil
+}
+
+func (w *capabilityRecorder) ReadFrom(source io.Reader) (int64, error) {
+	w.readFrom = true
+	return io.Copy(w.ResponseRecorder, source)
 }
