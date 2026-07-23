@@ -39,16 +39,16 @@ func serviceInstance(instance string, next http.Handler) http.Handler {
 
 func recoverPanic(logger *slog.Logger, service string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		buffer := &responseBuffer{header: make(http.Header), status: http.StatusOK}
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				logger.Error("panic while serving HTTP request", "service", service, "panic", recovered, "request_id", RequestID(r.Context()))
+				if state, ok := w.(interface{ Committed() bool }); ok && state.Committed() {
+					panic(recovered)
+				}
 				WriteProblem(w, Problem{Status: http.StatusInternalServerError, Code: "internal_error"})
-				return
 			}
-			buffer.flush(w)
 		}()
-		next.ServeHTTP(buffer, r)
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -73,52 +73,43 @@ func accessLog(logger *slog.Logger, service string, next http.Handler) http.Hand
 
 type responseRecorder struct {
 	http.ResponseWriter
-	status int
-	bytes  int
-}
-
-type responseBuffer struct {
-	header      http.Header
-	status      int
-	body        []byte
-	wroteHeader bool
-}
-
-func (w *responseBuffer) Header() http.Header { return w.header }
-
-func (w *responseBuffer) WriteHeader(status int) {
-	if w.wroteHeader {
-		return
-	}
-	w.status = status
-	w.wroteHeader = true
-}
-
-func (w *responseBuffer) Write(body []byte) (int, error) {
-	if !w.wroteHeader {
-		w.WriteHeader(http.StatusOK)
-	}
-	w.body = append(w.body, body...)
-	return len(body), nil
-}
-
-func (w *responseBuffer) flush(destination http.ResponseWriter) {
-	for key, values := range w.header {
-		destination.Header()[key] = append([]string(nil), values...)
-	}
-	destination.WriteHeader(w.status)
-	_, _ = destination.Write(w.body)
+	status    int
+	bytes     int
+	committed bool
 }
 
 func (w *responseRecorder) WriteHeader(status int) {
+	if w.committed {
+		return
+	}
 	w.status = status
+	w.committed = true
 	w.ResponseWriter.WriteHeader(status)
 }
 
 func (w *responseRecorder) Write(body []byte) (int, error) {
+	if !w.committed {
+		w.WriteHeader(http.StatusOK)
+	}
 	n, err := w.ResponseWriter.Write(body)
 	w.bytes += n
 	return n, err
+}
+
+// Committed reports whether response headers have been sent.
+func (w *responseRecorder) Committed() bool { return w.committed }
+
+// Unwrap preserves optional ResponseWriter interfaces for ResponseController.
+func (w *responseRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// FlushError marks the response committed before delegating optional flush support.
+func (w *responseRecorder) FlushError() error {
+	err := http.NewResponseController(w.ResponseWriter).Flush()
+	if err == nil && !w.committed {
+		w.status = http.StatusOK
+		w.committed = true
+	}
+	return err
 }
 
 func newRequestID() string {

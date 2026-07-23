@@ -56,23 +56,55 @@ func TestHandlerRecoversPanicsAsProblemJSON(t *testing.T) {
 	}
 }
 
-func TestHandlerDiscardsWrittenResponseWhenHandlerPanics(t *testing.T) {
+func TestHandlerRepanicsAfterCommittedResponsePanics(t *testing.T) {
 	s := NewServer(ServerConfig{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		_, _ = w.Write([]byte("partial response"))
 		panic("unexpected")
 	})})
 	w := httptest.NewRecorder()
+	defer func() {
+		if got := recover(); got != "unexpected" {
+			t.Fatalf("panic = %v, want unexpected", got)
+		}
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusNoContent)
+		}
+		if got := w.Body.String(); got != "partial response" {
+			t.Fatalf("body = %q, want partial response", got)
+		}
+	}()
 	s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+}
+
+func TestResponseControllerFlushesThroughServerResponseWrapper(t *testing.T) {
+	flushed := false
+	s := NewServer(ServerConfig{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Fatalf("Flush() error = %v", err)
+		}
+	})})
+	w := flushRecorder{ResponseRecorder: httptest.NewRecorder(), flushed: &flushed}
+	s.Handler().ServeHTTP(&w, httptest.NewRequest(http.MethodGet, "/", nil))
+	if !flushed {
+		t.Fatal("ResponseController.Flush() did not reach the underlying ResponseWriter")
 	}
-	if got := w.Body.String(); got == "partial response" || bytes.Contains(w.Body.Bytes(), []byte("partial response")) {
-		t.Fatalf("body = %q, want no partial response", got)
-	}
-	if got := w.Header().Get("Content-Type"); got != "application/problem+json" {
-		t.Fatalf("Content-Type = %q, want application/problem+json", got)
-	}
+}
+
+func TestFlushMarksResponseCommittedBeforePanic(t *testing.T) {
+	s := NewServer(ServerConfig{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Fatalf("Flush() error = %v", err)
+		}
+		panic("unexpected")
+	})})
+	w := flushRecorder{ResponseRecorder: httptest.NewRecorder(), flushed: new(bool)}
+	defer func() {
+		if got := recover(); got != "unexpected" {
+			t.Fatalf("panic = %v, want unexpected", got)
+		}
+	}()
+	s.Handler().ServeHTTP(&w, httptest.NewRequest(http.MethodGet, "/", nil))
 }
 
 func TestAccessLogIsJSONAndIncludesServiceIdentity(t *testing.T) {
@@ -102,4 +134,14 @@ func assertStatus(t *testing.T, h http.Handler, path string, want int) {
 	if w.Code != want {
 		t.Fatalf("GET %s status = %d, want %d", path, w.Code, want)
 	}
+}
+
+type flushRecorder struct {
+	*httptest.ResponseRecorder
+	flushed *bool
+}
+
+func (w *flushRecorder) Flush() {
+	*w.flushed = true
+	w.ResponseRecorder.Flush()
 }
