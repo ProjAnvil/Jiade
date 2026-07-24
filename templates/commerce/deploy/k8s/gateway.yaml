@@ -1,0 +1,113 @@
+# Single entrypoint mirroring the Traefik labels in compose.yaml.
+#
+# Default choice: networking.k8s.io/v1 Ingress — universally available
+# (kind/minikube/k3d/EKS/GKE/AKS all ship an Ingress controller). Path rules
+# below mirror the Traefik router rules 1:1 (compose.yaml labels).
+#
+# ALTERNATIVE (Gateway API): the spec mentions both Gateway and Ingress as
+# valid shapes. If your cluster has the Gateway API CRDs installed
+# (gateway.networking.k8s.io/*), you can swap this file for a Gateway +
+# HTTPRoute pair. The path -> backend mapping is identical:
+#
+#   apiVersion: gateway.networking.k8s.io/v1
+#   kind: Gateway
+#   metadata: { name: commerce, namespace: commerce }
+#   spec:
+#     gatewayClassName: <your-class>
+#     listeners:
+#       - name: http
+#         protocol: HTTP
+#         port: 80
+#   ---
+#   apiVersion: gateway.networking.k8s.io/v1
+#   kind: HTTPRoute
+#   metadata: { name: commerce, namespace: commerce }
+#   spec:
+#     parentRefs: [{ name: commerce }]
+#     rules:
+#       - matches: [{ path: { type: PathPrefix, value: /api/v1/products } }]
+#         backendRefs: [{ name: catalog, port: 8080 }]
+#       # ... (same path -> backend mapping as the Ingress below)
+#
+# No host is set so any cluster-IP / node-port the controller exposes works.
+# Ingress class is left to the cluster default; pin with
+# `metadata.annotations: { kubernetes.io/ingress.class: nginx }` if you have
+# multiple controllers.
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: commerce
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: gateway
+  annotations:
+    # Round-robin (no session affinity) so smoke.sh gate 1 sees multiple
+    # X-Service-Instance headers when querying scaled services. The default
+    # nginx behavior already does this; the annotation is explicit.
+    nginx.ingress.kubernetes.io/load-balance: round_robin
+    # The services' /readyz gate drains connections on shutdown; a generous
+    # grace period lets the deployment roll without 502s.
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_next_upstream error timeout http_502 http_503 http_504;
+spec:
+  ingressClassName: nginx  # override if your cluster uses a different class
+  rules:
+    - http:
+        paths:
+          # Mirrors Traefik rule for catalog.
+          - path: /api/v1/products
+            pathType: Prefix
+            backend:
+              service: { name: catalog, port: { number: 8080 } }
+          - path: /internal/v1/catalog
+            pathType: Prefix
+            backend:
+              service: { name: catalog, port: { number: 8080 } }
+          # customer.
+          - path: /api/v1/customers
+            pathType: Prefix
+            backend:
+              service: { name: customer, port: { number: 8080 } }
+          - path: /internal/v1/customer
+            pathType: Prefix
+            backend:
+              service: { name: customer, port: { number: 8080 } }
+          # inventory.
+          - path: /api/v1/inventory
+            pathType: Prefix
+            backend:
+              service: { name: inventory, port: { number: 8080 } }
+          - path: /api/v1/reservations
+            pathType: Prefix
+            backend:
+              service: { name: inventory, port: { number: 8080 } }
+          - path: /internal/v1/reservations
+            pathType: Prefix
+            backend:
+              service: { name: inventory, port: { number: 8080 } }
+          # order.
+          - path: /api/v1/carts
+            pathType: Prefix
+            backend:
+              service: { name: order, port: { number: 8080 } }
+          - path: /api/v1/checkouts
+            pathType: Prefix
+            backend:
+              service: { name: order, port: { number: 8080 } }
+          - path: /api/v1/orders
+            pathType: Prefix
+            backend:
+              service: { name: order, port: { number: 8080 } }
+          # payment.
+          - path: /api/v1/payments
+            pathType: Prefix
+            backend:
+              service: { name: payment, port: { number: 8080 } }
+          # fulfillment.
+          - path: /api/v1/fulfillment
+            pathType: Prefix
+            backend:
+              service: { name: fulfillment, port: { number: 8080 } }

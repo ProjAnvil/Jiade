@@ -1,0 +1,221 @@
+# Availability controls: PodDisruptionBudgets and HorizontalPodAutoscalers.
+#
+# PodDisruptionBudgets cover every service with replicas >= 2 (catalog,
+# inventory, order) so voluntary disruptions (node drain, cluster autoscaler)
+# leave at least one healthy pod. Services at replicas=1 (customer, payment,
+# fulfillment) deliberately have NO PDB — a PDB with minAvailable=1 on a
+# single-replica Deployment blocks drains indefinitely, which is the wrong
+# trade-off for a dev cluster. Promote them to >= 2 replicas and add a PDB
+# before serving real traffic.
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: catalog
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: catalog
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: commerce
+      app.kubernetes.io/component: catalog
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: inventory
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: inventory
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: commerce
+      app.kubernetes.io/component: inventory
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: order
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: order
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: commerce
+      app.kubernetes.io/component: order
+
+# ---------------------------------------------------------------------------
+# HorizontalPodAutoscalers for the stateless services.
+#
+# All six services are stateless (their state lives in PostgreSQL + the
+# RabbitMQ Outbox/Inbox), so each one can be HPA'd. The minReplicas mirror the
+# compose defaults; maxReplicas is the value `make scale SERVICE=<svc>
+# REPLICAS=<n>` would target in compose for the load profile. CPU target is
+# 70% of the request (100m), i.e. scale at ~70m average CPU.
+#
+# The stateful backing services (PostgreSQL, RabbitMQ) are explicitly NOT
+# HPA'd — they live as single replicas in compose and the same applies here.
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: catalog
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: catalog
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: catalog
+  minReplicas: 2  # compose default
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: customer
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: customer
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: customer
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: inventory
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: inventory
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: inventory
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: order
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: order
+  minReplicas: 2
+  maxReplicas: 6  # the compose.load.yaml profile pushes order to 4; allow headroom
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payment
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: payment
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payment
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fulfillment
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: fulfillment
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fulfillment
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

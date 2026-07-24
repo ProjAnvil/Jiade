@@ -1,0 +1,551 @@
+# Deployments for the six Go services.
+#
+# Replicas, resource envelopes, probes, and topology spread mirror the
+# production-shaped compose.yaml:
+#
+#   - catalog=2, customer=1, inventory=2, order=2, payment=1, fulfillment=1.
+#   - mem_reservation 128m / mem_limit 512m / cpus 1.0 (compose x-service-defaults).
+#   - read-only root fs + non-root + no-new-privileges (compose security_opt).
+#   - probes on /livez (liveness) and /readyz (readiness), 5s/3s/12/15s,
+#     matching compose's healthcheck.
+#
+# Each Deployment lists envFrom: [commerce-shared, <svc>-env, commerce-dev-secret]
+# in that order, so the per-service ConfigMap wins over the shared one for the
+# DB_HOST/DB_NAME/INSTANCE_ID/SERVICE_URL keys, and the Secret supplies
+# DB_PASSWORD and BROKER_URL.
+#
+# IMAGE TAG: ${COMMERCE_IMAGE_PREFIX:-}commerce-<svc>:${COMMERCE_TAG:-latest} in
+# compose becomes the placeholder `commerce-<svc>:latest` here. Override via
+# `kustomize edit set image` or by patching the Deployment before apply.
+#
+# The init container waits for the service's migration Job to complete; the Job
+# itself lives in this file (one per service, after the Deployment).
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: catalog
+spec:
+  replicas: 2  # compose default
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: commerce
+      app.kubernetes.io/component: catalog
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: commerce
+        app.kubernetes.io/part-of: commerce
+        app.kubernetes.io/component: catalog
+    spec:
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: catalog
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/component: catalog
+      containers:
+        - name: catalog
+          image: commerce-catalog:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: commerce-shared
+            - configMapRef:
+                name: catalog-env
+            - secretRef:
+                name: commerce-dev-secret
+          # Read-only root filesystem mirrors compose `read_only: true`.
+          # /tmp is the only writable mount because the Go services use it
+          # for transient scratch (compose mounts it as tmpfs).
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readOnlyRootFilesystem: true
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "1",    memory: "512Mi" }
+          startupProbe:
+            httpGet: { path: /livez, port: http }
+            periodSeconds: 5
+            failureThreshold: 12
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /livez, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customer
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: customer
+spec:
+  replicas: 1  # compose default
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: commerce
+      app.kubernetes.io/component: customer
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: commerce
+        app.kubernetes.io/part-of: commerce
+        app.kubernetes.io/component: customer
+    spec:
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: customer
+          image: commerce-customer:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef: { name: commerce-shared }
+            - configMapRef: { name: customer-env }
+            - secretRef:    { name: commerce-dev-secret }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readOnlyRootFilesystem: true
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "1",    memory: "512Mi" }
+          startupProbe:
+            httpGet: { path: /livez, port: http }
+            periodSeconds: 5
+            failureThreshold: 12
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /livez, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: inventory
+spec:
+  replicas: 2  # compose default
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: commerce
+      app.kubernetes.io/component: inventory
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: commerce
+        app.kubernetes.io/part-of: commerce
+        app.kubernetes.io/component: inventory
+    spec:
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: inventory
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/component: inventory
+      containers:
+        - name: inventory
+          image: commerce-inventory:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef: { name: commerce-shared }
+            - configMapRef: { name: inventory-env }
+            - secretRef:    { name: commerce-dev-secret }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readOnlyRootFilesystem: true
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "1",    memory: "512Mi" }
+          startupProbe:
+            httpGet: { path: /livez, port: http }
+            periodSeconds: 5
+            failureThreshold: 12
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /livez, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: order
+spec:
+  replicas: 2  # compose default
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: commerce
+      app.kubernetes.io/component: order
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: commerce
+        app.kubernetes.io/part-of: commerce
+        app.kubernetes.io/component: order
+    spec:
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/component: order
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 50
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/component: order
+      containers:
+        - name: order
+          image: commerce-order:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef: { name: commerce-shared }
+            - configMapRef: { name: order-env }
+            - secretRef:    { name: commerce-dev-secret }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readOnlyRootFilesystem: true
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "1",    memory: "512Mi" }
+          startupProbe:
+            httpGet: { path: /livez, port: http }
+            periodSeconds: 5
+            failureThreshold: 12
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /livez, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: payment
+spec:
+  replicas: 1  # compose default
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: commerce
+      app.kubernetes.io/component: payment
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: commerce
+        app.kubernetes.io/part-of: commerce
+        app.kubernetes.io/component: payment
+    spec:
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: payment
+          image: commerce-payment:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef: { name: commerce-shared }
+            - configMapRef: { name: payment-env }
+            - secretRef:    { name: commerce-dev-secret }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readOnlyRootFilesystem: true
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "1",    memory: "512Mi" }
+          startupProbe:
+            httpGet: { path: /livez, port: http }
+            periodSeconds: 5
+            failureThreshold: 12
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /livez, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fulfillment
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: fulfillment
+spec:
+  replicas: 1  # compose default
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: commerce
+      app.kubernetes.io/component: fulfillment
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: commerce
+        app.kubernetes.io/part-of: commerce
+        app.kubernetes.io/component: fulfillment
+    spec:
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fulfillment
+          image: commerce-fulfillment:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef: { name: commerce-shared }
+            - configMapRef: { name: fulfillment-env }
+            - secretRef:    { name: commerce-dev-secret }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readOnlyRootFilesystem: true
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits:   { cpu: "1",    memory: "512Mi" }
+          startupProbe:
+            httpGet: { path: /livez, port: http }
+            periodSeconds: 5
+            failureThreshold: 12
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /livez, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }

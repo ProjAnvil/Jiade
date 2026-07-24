@@ -1,0 +1,42 @@
+# Kustomize bundle for the commerce topology.
+#
+# Apply the full set:
+#   kubectl apply -k deploy/k8s
+#
+# Render the rendered manifest to stdout without applying:
+#   kubectl kustomize deploy/k8s > /tmp/commerce-k8s.yaml
+#
+# The resources list is intentionally flat (one entry per file) so a reviewer
+# can map every produced object back to a single source file. Per-resource
+# patches live in their own files if you add them later — keep this file a
+# plain index.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+
+namespace: commerce
+
+resources:
+  - namespace.yaml
+  - config.yaml
+  - services.yaml
+  - apps.yaml
+  - gateway.yaml
+  - availability.yaml
+
+# Common labels applied to every resource produced above. Lets a query like
+#   kubectl -n commerce get all -l app.kubernetes.io/part-of=commerce
+# surface the whole topology. Uses the `labels` transformer (the modern
+# replacement for the deprecated `commonLabels` field, which does not mutate
+# selectors on existing resources).
+labels:
+  - pairs:
+      app.kubernetes.io/name: commerce
+      app.kubernetes.io/part-of: commerce
+    includeSelectors: false
+    includeTemplates: true

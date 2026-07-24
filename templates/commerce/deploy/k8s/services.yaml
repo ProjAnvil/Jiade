@@ -1,0 +1,248 @@
+# ClusterIP services for the six Go apps and the infrastructure they talk to.
+#
+# Per compose.yaml, Traefik is the only externally-reachable entrypoint. Here
+# we mirror that with a single Ingress (gateway.yaml) — no Service is published
+# outside the cluster. App Services are plain ClusterIP so the Ingress
+# controller and intra-cluster callers (order -> customer/catalog/inventory,
+# fulfillment -> inventory) can resolve them by DNS name.
+#
+# Session affinity is OFF on every Service. compose's Traefik load-balancer
+# uses round-robin and exposes the per-instance ID via the
+# X-Service-Instance response header (see smoke.sh gate 1). To verify the same
+# in k8s, the Ingress must round-robin across the Service endpoints — the
+# default for kube-proxy in ipvs/iptables mode.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: catalog
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/component: catalog
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customer
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: customer
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/component: customer
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: inventory
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/component: inventory
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: order
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/component: order
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: payment
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/component: payment
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fulfillment
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: fulfillment
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/component: fulfillment
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+
+# ---------------------------------------------------------------------------
+# Infrastructure DNS aliases.
+#
+# These Services exist ONLY so the in-cluster app Pods can resolve the same
+# DNS names compose.yaml uses (catalog-db, customer-db, ..., rabbitmq) without
+# editing the ConfigMaps. They are not the database itself — they point at
+# whatever StatefulSet / external-name you wire up in your cluster. The
+# ExternalName form is the lightest way to make this work on a fresh dev
+# cluster where Postgres/RabbitMQ live outside the namespace (e.g. host
+# accessor on kind, or a separately-installed operator release).
+#
+# For dev we point them at the typical docker-compose hostnames reachable via
+# the cluster's DNS search list. Override these to your real endpoints (RDS,
+# CloudSQL, operator-managed StatefulSet Service, etc.) before non-dev use.
+#
+# NO HA CLAIM: each ExternalName resolves to a single endpoint, mirroring the
+# single-replica Postgres / RabbitMQ containers in compose.yaml.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-db
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: catalog-db
+spec:
+  type: ExternalName
+  externalName: catalog-db.default.svc.cluster.local
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customer-db
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: customer-db
+spec:
+  type: ExternalName
+  externalName: customer-db.default.svc.cluster.local
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-db
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: inventory-db
+spec:
+  type: ExternalName
+  externalName: inventory-db.default.svc.cluster.local
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-db
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: order-db
+spec:
+  type: ExternalName
+  externalName: order-db.default.svc.cluster.local
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-db
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: payment-db
+spec:
+  type: ExternalName
+  externalName: payment-db.default.svc.cluster.local
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fulfillment-db
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: fulfillment-db
+spec:
+  type: ExternalName
+  externalName: fulfillment-db.default.svc.cluster.local
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: commerce
+  labels:
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    app.kubernetes.io/component: rabbitmq
+spec:
+  type: ExternalName
+  externalName: rabbitmq.default.svc.cluster.local

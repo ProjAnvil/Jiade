@@ -1,0 +1,32 @@
+# Kubernetes equivalents of the Compose topology (Task 10).
+#
+# The manifests in this directory mirror `compose.yaml` — six stateless Go
+# services plus per-service PostgreSQL databases and a single RabbitMQ broker.
+# They target a development cluster (kind, minikube, k3d) and are NOT a
+# production posture:
+#
+#   - The included Secret carries plaintext dev credentials and is labeled
+#     `commerce.jiade/unsafe: dev-only`. Replace it with a real secret store
+#     (Sealed Secrets / Vault / cloud secret manager) for any non-dev use.
+#   - PostgreSQL and RabbitMQ ship as single replicas with no HA claims.
+#     Treat them the same way as the compose file does: a disposable dev
+#     backing store. Swap them for your operator-managed stateful services
+#     before serving real traffic.
+#
+# Bring everything up with:
+#
+#   kubectl apply -k deploy/k8s
+#
+# Mirror of the compose replica defaults:
+#   catalog=2  customer=1  inventory=2  order=2  payment=1  fulfillment=1
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: commerce
+  labels:
+    # Common app label so `kubectl -n commerce get all -l app.kubernetes.io/part-of=commerce` works.
+    app.kubernetes.io/name: commerce
+    app.kubernetes.io/part-of: commerce
+    # Identifies the whole topology as a development-only bundle.
+    commerce.jiade/unsafe: dev-only

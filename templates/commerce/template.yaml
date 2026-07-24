@@ -1,0 +1,32 @@
+name: commerce
+description: A complete commerce backend microcosm covering catalog/SKUs, customers, inventory reservations, orders, payments/refunds, split fulfillment, and tracking
+version: 0.1.0
+databases:
+  - name: catalog
+    migrate: db/migrations/catalog_db.sql
+  - name: customer
+    migrate: db/migrations/customer_db.sql
+  - name: inventory
+    migrate: db/migrations/inventory_db.sql
+  - name: order
+    migrate: db/migrations/order_db.sql
+  - name: payment
+    migrate: db/migrations/payment_db.sql
+  - name: fulfillment
+    migrate: db/migrations/fulfillment_db.sql
+services:
+  - {name: catalog,      port: 8080, db: catalog,      replicas: 2}
+  - {name: customer,     port: 8080, db: customer,     replicas: 1}
+  - {name: inventory,    port: 8080, db: inventory,    replicas: 2}
+  - {name: order,        port: 8080, db: order,        replicas: 2}
+  - {name: payment,      port: 8080, db: payment,      replicas: 1}
+  - {name: fulfillment,  port: 8080, db: fulfillment,  replicas: 1}
+seed:
+  entrypoint: go run ./cmd/seed
+  scales: [dev, demo, load]
+deploy:
+  compose: compose.yaml
+  kustomize: deploy/k8s
+gateway:
+  host_port: 18100
+  type: traefik
