@@ -1,11 +1,35 @@
 package inventory
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestCanonicalInventoryTimestampsProduceByteStableUTCJSON(t *testing.T) {
+	chinaStandardTime := time.FixedZone("CST", 8*60*60)
+	local := time.Date(2026, 7, 24, 20, 0, 0, 0, chinaStandardTime)
+	level := canonicalInventoryLevel(InventoryLevel{SKU: "SKU-1", UpdatedAt: local})
+	allocation := canonicalReservationAllocation(ReservationAllocation{
+		ID: "RES-1", OrderID: "ORD-1", SKU: "SKU-1", LocationID: "LOC-1",
+		Quantity: 1, State: ReservationActive, ExpiresAt: local,
+	})
+	body, err := json.Marshal(struct {
+		Level      InventoryLevel        `json:"level"`
+		Allocation ReservationAllocation `json:"allocation"`
+	}{Level: level, Allocation: allocation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if level.UpdatedAt.Location() != time.UTC || allocation.ExpiresAt.Location() != time.UTC {
+		t.Fatalf("level location=%v allocation location=%v", level.UpdatedAt.Location(), allocation.ExpiresAt.Location())
+	}
+	if got := strings.Count(string(body), "2026-07-24T12:00:00Z"); got != 2 {
+		t.Fatalf("UTC timestamp count=%d json=%s", got, body)
+	}
+}
 
 func TestPostgresReservationStoreOwnsTransactionLockMovementAndOutboxSQL(t *testing.T) {
 	source, err := os.ReadFile("store.go")

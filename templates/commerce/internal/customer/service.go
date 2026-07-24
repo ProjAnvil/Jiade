@@ -93,6 +93,9 @@ func (service *Service) ListCustomers(ctx context.Context, encodedCursor string,
 	if page.Items == nil {
 		page.Items = []Customer{}
 	}
+	for index := range page.Items {
+		page.Items[index] = canonicalCustomer(page.Items[index])
+	}
 	return page, nil
 }
 
@@ -100,7 +103,11 @@ func (service *Service) GetCustomer(ctx context.Context, id string) (Customer, e
 	if strings.TrimSpace(id) == "" {
 		return Customer{}, ErrCustomerNotFound
 	}
-	return service.store.GetCustomer(ctx, id)
+	customer, err := service.store.GetCustomer(ctx, id)
+	if err != nil {
+		return Customer{}, err
+	}
+	return canonicalCustomer(customer), nil
 }
 
 func (service *Service) ValidateAddress(ctx context.Context, customerID, addressID string) (ValidatedAddress, error) {
@@ -138,6 +145,13 @@ func usableAddress(address Address) bool {
 		}
 	}
 	return len(address.CountryCode) == 2
+}
+
+func canonicalCustomer(customer Customer) Customer {
+	if !customer.CreatedAt.IsZero() {
+		customer.CreatedAt = customer.CreatedAt.UTC()
+	}
+	return customer
 }
 
 type customerCursorEnvelope struct {

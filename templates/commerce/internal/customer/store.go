@@ -31,7 +31,7 @@ func (store *PostgresStore) ListCustomers(ctx context.Context, after string, lim
 			&customer.Status, &customer.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan customer: %w", err)
 		}
-		customers = append(customers, customer)
+		customers = append(customers, canonicalCustomer(customer))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate customers: %w", err)
@@ -53,6 +53,7 @@ func (store *PostgresStore) GetCustomer(ctx context.Context, id string) (Custome
 	if err != nil {
 		return Customer{}, fmt.Errorf("query customer: %w", err)
 	}
+	customer = canonicalCustomer(customer)
 	addresses, err := store.addresses(ctx, id)
 	if err != nil {
 		return Customer{}, err

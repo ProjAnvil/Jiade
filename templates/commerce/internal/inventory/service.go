@@ -118,6 +118,9 @@ func (service *Service) ListLevels(ctx context.Context, encodedCursor string, re
 	if page.Items == nil {
 		page.Items = []InventoryLevel{}
 	}
+	for index := range page.Items {
+		page.Items[index] = canonicalInventoryLevel(page.Items[index])
+	}
 	return page, nil
 }
 
@@ -125,14 +128,25 @@ func (service *Service) GetLevelsBySKU(ctx context.Context, sku string) ([]Inven
 	if strings.TrimSpace(sku) == "" {
 		return nil, ErrSKUNotFound
 	}
-	return service.store.GetLevelsBySKU(ctx, sku)
+	levels, err := service.store.GetLevelsBySKU(ctx, sku)
+	if err != nil {
+		return nil, err
+	}
+	for index := range levels {
+		levels[index] = canonicalInventoryLevel(levels[index])
+	}
+	return levels, nil
 }
 
 func (service *Service) ListReservationsByOrder(ctx context.Context, orderID string) ([]ReservationAllocation, error) {
 	if strings.TrimSpace(orderID) == "" {
 		return nil, ErrReservationNotFound
 	}
-	return service.store.ListReservationsByOrder(ctx, orderID)
+	allocations, err := service.store.ListReservationsByOrder(ctx, orderID)
+	if err != nil {
+		return nil, err
+	}
+	return canonicalReservationAllocations(allocations), nil
 }
 
 func (service *Service) Reserve(ctx context.Context, command ReserveCommand) (ReservationResult, error) {
@@ -158,6 +172,8 @@ func (service *Service) Reserve(ctx context.Context, command ReserveCommand) (Re
 	command.OccurredAt = service.clock().UTC()
 	if command.ExpiresAt.IsZero() {
 		command.ExpiresAt = command.OccurredAt.Add(DefaultReservationTTL)
+	} else {
+		command.ExpiresAt = command.ExpiresAt.UTC()
 	}
 	if !command.ExpiresAt.After(command.OccurredAt) {
 		return ReservationResult{}, ErrInvalidCommand
@@ -165,7 +181,12 @@ func (service *Service) Reserve(ctx context.Context, command ReserveCommand) (Re
 	if command.CorrelationID == "" {
 		command.CorrelationID = command.OrderID
 	}
-	return service.store.Reserve(ctx, command)
+	result, err := service.store.Reserve(ctx, command)
+	if err != nil {
+		return ReservationResult{}, err
+	}
+	result.Allocations = canonicalReservationAllocations(result.Allocations)
+	return result, nil
 }
 
 func (service *Service) TransitionOrder(ctx context.Context, orderID string, event ReservationEvent) (ReservationResult, error) {
@@ -182,7 +203,9 @@ func (service *Service) TransitionOrder(ctx context.Context, orderID string, eve
 	if err != nil {
 		return ReservationResult{}, err
 	}
-	return ReservationResult{OrderID: orderID, Allocations: allocations}, nil
+	return ReservationResult{
+		OrderID: orderID, Allocations: canonicalReservationAllocations(allocations),
+	}, nil
 }
 
 type inventoryCursorEnvelope struct {

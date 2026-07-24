@@ -71,7 +71,7 @@ func scanLevels(rows levelRows, capacity int) ([]InventoryLevel, error) {
 			&level.OnHand, &level.Reserved, &level.Available, &level.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan inventory level: %w", err)
 		}
-		levels = append(levels, level)
+		levels = append(levels, canonicalInventoryLevel(level))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate inventory levels: %w", err)
@@ -90,6 +90,12 @@ func (store *PostgresStore) ListReservationsByOrder(ctx context.Context, orderID
 }
 
 func (store *PostgresStore) Reserve(ctx context.Context, command ReserveCommand) (ReservationResult, error) {
+	if !command.OccurredAt.IsZero() {
+		command.OccurredAt = command.OccurredAt.UTC()
+	}
+	if !command.ExpiresAt.IsZero() {
+		command.ExpiresAt = command.ExpiresAt.UTC()
+	}
 	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return ReservationResult{}, fmt.Errorf("begin inventory reservation: %w", err)
@@ -287,6 +293,7 @@ func (store *PostgresStore) TransitionOrder(
 	event ReservationEvent,
 	now time.Time,
 ) ([]ReservationAllocation, bool, error) {
+	now = now.UTC()
 	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, false, fmt.Errorf("begin inventory transition: %w", err)
@@ -521,7 +528,7 @@ func queryAllocations(ctx context.Context, queryer allocationQueryer, statement 
 			&allocation.ExpiresAt); err != nil {
 			return nil, fmt.Errorf("scan reservation allocation: %w", err)
 		}
-		allocations = append(allocations, allocation)
+		allocations = append(allocations, canonicalReservationAllocation(allocation))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate reservation allocations: %w", err)
@@ -563,11 +570,32 @@ func allocationsMatchCommand(allocations []ReservationAllocation, command Reserv
 }
 
 func allocationFromReservation(reservation Reservation) ReservationAllocation {
-	return ReservationAllocation{
+	return canonicalReservationAllocation(ReservationAllocation{
 		ID: reservation.ID, OrderID: reservation.OrderID, SKU: reservation.SKU,
 		LocationID: reservation.LocationID, Quantity: reservation.Quantity,
 		State: reservation.State, ExpiresAt: reservation.ExpiresAt,
+	})
+}
+
+func canonicalInventoryLevel(level InventoryLevel) InventoryLevel {
+	if !level.UpdatedAt.IsZero() {
+		level.UpdatedAt = level.UpdatedAt.UTC()
 	}
+	return level
+}
+
+func canonicalReservationAllocation(allocation ReservationAllocation) ReservationAllocation {
+	if !allocation.ExpiresAt.IsZero() {
+		allocation.ExpiresAt = allocation.ExpiresAt.UTC()
+	}
+	return allocation
+}
+
+func canonicalReservationAllocations(allocations []ReservationAllocation) []ReservationAllocation {
+	for index := range allocations {
+		allocations[index] = canonicalReservationAllocation(allocations[index])
+	}
+	return allocations
 }
 
 func reservationKeyPrefix(key string) string {
