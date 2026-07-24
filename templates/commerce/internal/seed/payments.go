@@ -36,6 +36,16 @@ func generatePayments(ds *Dataset, c counts, seed int64, generatedAt time.Time) 
 // the intent, its attempts, and an optional refund. Both the batch
 // (generatePayments) and streaming (generatePaymentsStreaming) paths share it
 // so payment state stays consistent.
+//
+// Load-order invariant: the seed writes a captured intent (status
+// "succeeded" or "partially_refunded"), then a succeeded attempt, then the
+// refund. The PostgreSQL validate_refund trigger accepts a refund row only
+// while the intent status is "succeeded" or "partially_refunded"; the seed
+// never emits a terminal "refunded" intent status because the refund is
+// written after the intent, and COPY/INSERT do not replay the post-refund
+// transition. A fully-refunded order therefore maps to the captured intent
+// status "partially_refunded"; the refund amount (full vs. half) preserves
+// the full/partial distinction in the data.
 func generateOnePayment(stream *rand.Rand, order SalesOrderRow, generatedAt time.Time) (PaymentIntentRow, []PaymentAttemptRow, *RefundRow, error) {
 	intentID := fmt.Sprintf("%s-pi", order.OrderID)
 	provider := pick(stream, paymentProviders)
@@ -76,25 +86,12 @@ func generateOnePayment(stream *rand.Rand, order SalesOrderRow, generatedAt time
 			AmountMinor:     intent.AmountMinor,
 			CreatedAt:       created.Add(time.Second),
 		})
-	case "refunded":
-		attempts = append(attempts, PaymentAttemptRow{
-			AttemptID:       fmt.Sprintf("%s-a1", intentID),
-			PaymentIntentID: intentID,
-			Status:          "succeeded",
-			AmountMinor:     intent.AmountMinor,
-			CreatedAt:       created.Add(time.Second),
-		})
-		r := RefundRow{
-			RefundID:        fmt.Sprintf("%s-rf1", intentID),
-			PaymentIntentID: intentID,
-			AmountMinor:     intent.AmountMinor,
-			Status:          "succeeded",
-			Reason:          pick(stream, refundReasons),
-			IdempotencyKey:  fmt.Sprintf("refund-%s", intentID),
-			CreatedAt:       created.Add(48 * time.Hour),
-		}
-		refund = &r
 	case "partially_refunded":
+		// Captured intent with a refund. The intent status stays at
+		// "partially_refunded" (the trigger-safe captured state) so the
+		// validate_refund trigger accepts the refund row written next. Both
+		// fully- and partially-refunded orders land here; the refund amount
+		// distinguishes them (full vs. half).
 		attempts = append(attempts, PaymentAttemptRow{
 			AttemptID:       fmt.Sprintf("%s-a1", intentID),
 			PaymentIntentID: intentID,
@@ -102,10 +99,7 @@ func generateOnePayment(stream *rand.Rand, order SalesOrderRow, generatedAt time
 			AmountMinor:     intent.AmountMinor,
 			CreatedAt:       created.Add(time.Second),
 		})
-		refundAmount := intent.AmountMinor / 2
-		if refundAmount <= 0 {
-			refundAmount = 1
-		}
+		refundAmount := refundAmountFor(order.PaymentStatus, intent.AmountMinor)
 		r := RefundRow{
 			RefundID:        fmt.Sprintf("%s-rf1", intentID),
 			PaymentIntentID: intentID,
@@ -136,9 +130,29 @@ func generateOnePayment(stream *rand.Rand, order SalesOrderRow, generatedAt time
 	return intent, attempts, refund, nil
 }
 
-// paymentIntentStatus maps an order's payment_status onto a payment_intent
-// status. They are intentionally the same vocabulary except for orders that
-// are still pending (no intent captured yet).
+// refundAmountFor returns the refund amount for a captured intent given the
+// order's payment_status. A fully-refunded order refunds the full intent
+// amount; a partially-refunded order refunds half (minimum 1 minor unit).
+func refundAmountFor(orderPaymentStatus string, intentAmount int64) int64 {
+	if orderPaymentStatus == "refunded" {
+		return intentAmount
+	}
+	refundAmount := intentAmount / 2
+	if refundAmount <= 0 {
+		refundAmount = 1
+	}
+	return refundAmount
+}
+
+// paymentIntentStatus maps an order's payment_status onto the payment_intent
+// status the seed writes. The mapping is intentionally conservative: every
+// refund-family order status maps to the captured intent status
+// "partially_refunded" rather than "refunded", because the seed writes the
+// intent in its final state before the refund row, and the PostgreSQL
+// validate_refund trigger accepts refunds only while the intent status is
+// "succeeded" or "partially_refunded". "partially_refunded" is the captured
+// state that remains valid after the refund is applied, so it is the safe
+// terminal status for any refunded intent.
 func paymentIntentStatus(orderPaymentStatus string) string {
 	switch orderPaymentStatus {
 	case "pending":
@@ -149,10 +163,8 @@ func paymentIntentStatus(orderPaymentStatus string) string {
 		return "succeeded"
 	case "failed":
 		return "failed"
-	case "partially_refunded":
+	case "partially_refunded", "refunded":
 		return "partially_refunded"
-	case "refunded":
-		return "refunded"
 	default:
 		return "requires_method"
 	}

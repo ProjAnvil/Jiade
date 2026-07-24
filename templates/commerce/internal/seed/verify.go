@@ -16,6 +16,13 @@ var (
 	// ErrOrphanedReference signals a foreign key that points at a missing
 	// parent row (e.g. an order_item referencing an unknown order_id).
 	ErrOrphanedReference = errors.New("seed: orphaned reference")
+	// ErrRefundWithoutCapture signals a refund written against a payment
+	// intent that is not in a captured state. The PostgreSQL validate_refund
+	// trigger only permits refunds while the intent status is "succeeded" or
+	// "partially_refunded" (the moment the refund row is INSERTed); a final
+	// intent status of "refunded" still fails the trigger because the row is
+	// written after the intent reaches its terminal status.
+	ErrRefundWithoutCapture = errors.New("seed: refund without captured intent")
 )
 
 // Violation is a single integrity problem. The Verifier returns the first
@@ -226,12 +233,16 @@ func verifyRefunds(ds Dataset) error {
 		if refund.Status != "succeeded" && refund.Status != "pending" {
 			continue
 		}
-		if intentStatus[refund.PaymentIntentID] != "succeeded" &&
-			intentStatus[refund.PaymentIntentID] != "partially_refunded" &&
-			intentStatus[refund.PaymentIntentID] != "refunded" {
-			return Violation{ErrInvalidTransition, fmt.Sprintf(
-				"refund %s against non-captured intent %s",
-				refund.RefundID, refund.PaymentIntentID)}
+		// The PostgreSQL validate_refund trigger (payment_db.sql) accepts a
+		// refund row only when the intent's current status is "succeeded" or
+		// "partially_refunded". A final status of "refunded" fails the
+		// trigger at INSERT time because the seed writes the intent in its
+		// terminal state before the refund row. Mirror that exactly here.
+		status := intentStatus[refund.PaymentIntentID]
+		if status != "succeeded" && status != "partially_refunded" {
+			return Violation{ErrRefundWithoutCapture, fmt.Sprintf(
+				"refund %s against intent %s with non-captured status %q (want succeeded or partially_refunded)",
+				refund.RefundID, refund.PaymentIntentID, status)}
 		}
 		refundedByIntent[refund.PaymentIntentID] += refund.AmountMinor
 	}
