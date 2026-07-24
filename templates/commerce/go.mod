@@ -4,7 +4,6 @@ go 1.22
 
 require (
 	github.com/jackc/pgx/v5 v5.7.2
-	github.com/lib/pq v1.12.3
 	github.com/prometheus/client_golang v1.21.0
 	github.com/rabbitmq/amqp091-go v1.10.0
 )
