@@ -66,6 +66,15 @@ pick_customer_id() {
   curl -fsS "${GATEWAY}/api/v1/customers?limit=1" | jq -r '.items[0].customer_id // empty'
 }
 
+# Resolve the seeded customer's default address id. The customer LIST omits
+# addresses, so fetch the customer DETAIL and read .addresses[].address_id for
+# the entry whose is_default is true (falling back to the first address).
+pick_address_id() {
+  local customer="$1"
+  curl -fsS "${GATEWAY}/api/v1/customers/${customer}" |
+    jq -r 'first(.addresses[] | select(.is_default == true) | .address_id) // .addresses[0].address_id // empty'
+}
+
 # Discover the order_id of the first seeded order whose payment_status matches
 # the given value. The seed is deterministic for a given SEED, so the same
 # failing/paid order is returned every run. We list up to MaxPageSize (100)
@@ -99,27 +108,38 @@ discover_order_by_payment_fulfillment() {
 # ---------------------------------------------------------------------------
 gate_checkout_success() {
   log "gate 2: successful checkout (cart -> checkout -> paid)"
-  local sku customer cart checkout order_id status
+  local sku customer address cart cart_version checkout order_id status
   sku=$(pick_sku)
   test -n "${sku}" || fail "no SKU returned by catalog"
   customer=$(pick_customer_id)
   test -n "${customer}" || fail "no customer returned by customer service"
+  address=$(pick_address_id "${customer}")
+  test -n "${address}" || fail "no address returned for customer ${customer}"
 
+  # Cart create returns Version=1 (and an ETag header). The item-add mutation
+  # REQUIRES expected_version > 0 (internal/order/service.go MutateCart rejects
+  # ExpectedVersion <= 0 with ErrInvalidCommand -> 422 invalid_order), so read
+  # the cart version from the create response and replay it.
   cart=$(curl -fsS -X POST "${GATEWAY}/api/v1/carts" \
         -H 'Content-Type: application/json' \
         -H "Idempotency-Key: smoke-cart-${SEED_INT}" \
-        -d "{\"customer_id\":\"${customer}\",\"currency\":\"USD\"}" | jq -r '.cart_id // empty')
-  test -n "${cart}" || fail "cart creation returned no id"
+        -d "{\"customer_id\":\"${customer}\",\"currency\":\"USD\"}")
+  cart_id=$(printf '%s' "${cart}" | jq -r '.cart_id // empty')
+  cart_version=$(printf '%s' "${cart}" | jq -r '.version // empty')
+  test -n "${cart_id}" || fail "cart creation returned no cart_id"
+  test -n "${cart_version}" || fail "cart creation returned no version"
 
-  curl -fsS -X POST "${GATEWAY}/api/v1/carts/${cart}/items" \
+  curl -fsS -X POST "${GATEWAY}/api/v1/carts/${cart_id}/items" \
        -H 'Content-Type: application/json' \
        -H "Idempotency-Key: smoke-item-${SEED_INT}" \
-       -d "{\"sku\":\"${sku}\",\"quantity\":1}" >/dev/null
+       -d "{\"sku\":\"${sku}\",\"quantity\":1,\"expected_version\":${cart_version}}" >/dev/null
 
+  # Checkout REQUIRES address_id (validateCheckoutCommand rejects empty). The
+  # order service then validates the address and snapshots the catalog SKU.
   checkout=$(curl -fsS -X POST "${GATEWAY}/api/v1/checkouts" \
              -H 'Content-Type: application/json' \
              -H "Idempotency-Key: smoke-success-${SEED_INT}" \
-             -d "{\"cart_id\":\"${cart}\"}")
+             -d "{\"cart_id\":\"${cart_id}\",\"address_id\":\"${address}\"}")
   order_id=$(printf '%s' "${checkout}" | jq -r '.order_id // empty')
   test -n "${order_id}" || fail "checkout returned no order_id"
   log "checkout produced order ${order_id}"
@@ -186,8 +206,14 @@ gate_payment_failure() {
 # ---------------------------------------------------------------------------
 gate_duplicate_webhook() {
   log "gate 4: duplicate webhook replay is idempotent"
-  local payload response1 response2 attempt1 attempt2
-  payload='{"event_type":"payment.webhook","order_id":"smoke-webhook-'${SEED_INT}'","reference":"wh-'${SEED_INT}'","amount_minor":100,"currency":"USD"}'
+  local payload response1 response2 intent1 intent2
+  # The webhook handler (internal/payment/http.go:65) decodes with
+  # DisallowUnknownFields and only accepts {order_id,currency,amount_minor}.
+  # The Idempotency-Key header is ignored: the service derives the idempotency
+  # key from the order_id (placeIntentKey), so replaying the SAME body is what
+  # makes it idempotent. The response is an IntentView whose identifier is
+  # payment_intent_id.
+  payload='{"order_id":"smoke-webhook-'${SEED_INT}'","currency":"USD","amount_minor":100}'
   response1=$(curl -fsS -X POST "${GATEWAY}/api/v1/payments/webhooks" \
               -H 'Content-Type: application/json' \
               -H "Idempotency-Key: smoke-webhook-${SEED_INT}" \
@@ -196,10 +222,11 @@ gate_duplicate_webhook() {
               -H 'Content-Type: application/json' \
               -H "Idempotency-Key: smoke-webhook-${SEED_INT}" \
               -d "${payload}")
-  attempt1=$(printf '%s' "${response1}" | jq -r '.payment_attempt_id // .attempt_id // .id // empty')
-  attempt2=$(printf '%s' "${response2}" | jq -r '.payment_attempt_id // .attempt_id // .id // empty')
-  test "${attempt1}" = "${attempt2}" || fail "webhook replay returned distinct ids: ${attempt1} vs ${attempt2}"
-  log "webhook replay returned identical attempt id ${attempt1}"
+  intent1=$(printf '%s' "${response1}" | jq -r '.payment_intent_id // empty')
+  intent2=$(printf '%s' "${response2}" | jq -r '.payment_intent_id // empty')
+  test -n "${intent1}" || fail "first webhook returned no payment_intent_id: ${response1}"
+  test "${intent1}" = "${intent2}" || fail "webhook replay returned distinct intents: ${intent1} vs ${intent2}"
+  log "webhook replay returned identical payment_intent_id ${intent1}"
 }
 
 # ---------------------------------------------------------------------------

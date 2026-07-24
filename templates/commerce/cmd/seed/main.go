@@ -253,7 +253,7 @@ func (c poolCopier) poolFor(table string) *pgxpool.Pool {
 		return c.catalog
 	case "membership_tier", "customer", "address":
 		return c.customer
-	case "location", "inventory_level", "stock_movement":
+	case "location", "location_profile", "inventory_level", "stock_movement":
 		return c.inventory
 	case "cart", "cart_item", "sales_order", "order_item", "order_tax_line",
 		"order_customer_snapshot", "reservation":

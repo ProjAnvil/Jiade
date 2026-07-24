@@ -199,6 +199,10 @@ func loadInventory(ctx context.Context, pool *pgxpool.Pool, ds Dataset) error {
 		batch.Queue(`INSERT INTO location (location_id, name, type, priority) VALUES ($1,$2,$3,$4)`,
 			l.LocationID, l.Name, l.Type, l.Priority)
 	}
+	for _, p := range ds.LocationProfiles {
+		batch.Queue(`INSERT INTO location_profile (location_id, region, fulfills_orders, time_zone) VALUES ($1,$2,$3,$4)`,
+			p.LocationID, p.Region, p.FulfillsOrders, p.TimeZone)
+	}
 	for _, lvl := range ds.InventoryLevels {
 		batch.Queue(`INSERT INTO inventory_level (sku, location_id, on_hand, reserved, updated_at) VALUES ($1,$2,$3,$4,$5)`,
 			lvl.SKU, lvl.LocationID, lvl.OnHand, lvl.Reserved, lvl.UpdatedAt)
@@ -551,6 +555,11 @@ func streamCopyCustomer(ctx context.Context, copier Copier, ds Dataset) error {
 func streamCopyInventory(ctx context.Context, copier Copier, ds Dataset) error {
 	for _, l := range ds.Locations {
 		if _, err := copier.CopyFrom(ctx, "location", []string{"location_id", "name", "type", "priority"}, [][]any{{l.LocationID, l.Name, l.Type, l.Priority}}); err != nil {
+			return err
+		}
+	}
+	for _, p := range ds.LocationProfiles {
+		if _, err := copier.CopyFrom(ctx, "location_profile", []string{"location_id", "region", "fulfills_orders", "time_zone"}, [][]any{{p.LocationID, p.Region, p.FulfillsOrders, p.TimeZone}}); err != nil {
 			return err
 		}
 	}

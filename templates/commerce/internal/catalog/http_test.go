@@ -138,6 +138,57 @@ func TestCheckoutSKUSnapshotMapsUnknownAndInactiveSKU(t *testing.T) {
 	assertCatalogProblem(t, inactive, http.StatusUnprocessableEntity, "sku_not_saleable", request.URL.Path)
 }
 
+// TestCheckoutSKUSnapshotAcceptsLegacyAndWebChannels locks the controller's
+// saleability gate: a SKU with no web price_list rows is priced via the legacy
+// fallback (channel="legacy") and MUST remain saleable. The dev seed produces
+// NO variant_price/price_list rows, so every seeded SKU relies on this path.
+// A SKU advertised on an unsupported channel (e.g. "retail") is rejected.
+func TestCheckoutSKUSnapshotAcceptsLegacyAndWebChannels(t *testing.T) {
+	base := CheckoutSnapshot{
+		ProductID: "PROD-1", SKU: "SKU-1", ProductTitle: "Product",
+		VariantTitle: "Black / S", Status: "active",
+		UnitPriceMinor: 1999, Currency: "USD", WeightGrams: 220,
+		Attributes: map[string]any{"color": "black"},
+	}
+
+	for _, channel := range []string{"", "legacy", "web"} {
+		store := &catalogStoreStub{}
+		snapshot := base
+		snapshot.SKU = "SKU-" + channel
+		snapshot.Channel = channel
+		store.snapshot = snapshot
+		handler := NewHandler(NewService(store))
+		response := httptest.NewRecorder()
+		path := "/internal/v1/catalog/skus/" + snapshot.SKU
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("channel=%q expected 200, got status=%d body=%s",
+				channel, response.Code, response.Body.String())
+		}
+		var got CheckoutSnapshot
+		if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+			t.Fatalf("channel=%q decode: %v", channel, err)
+		}
+		if !got.AvailableForSale {
+			t.Fatalf("channel=%q AvailableForSale=false; legacy fallback must be saleable",
+				channel)
+		}
+	}
+
+	// An unsupported channel is not saleable. This guards the controller's
+	// allow-list (web/legacy/empty) from silently widening.
+	store := &catalogStoreStub{}
+	retail := base
+	retail.SKU = "SKU-RETAIL"
+	retail.Channel = "retail"
+	store.snapshot = retail
+	handler := NewHandler(NewService(store))
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/internal/v1/catalog/skus/SKU-RETAIL", nil)
+	handler.ServeHTTP(response, request)
+	assertCatalogProblem(t, response, http.StatusUnprocessableEntity, "sku_not_saleable", request.URL.Path)
+}
+
 func TestCheckoutSnapshotStoreQueriesOwnedCatalogTablesBySKU(t *testing.T) {
 	source, err := os.ReadFile("store.go")
 	if err != nil {

@@ -23,9 +23,10 @@ type Dataset struct {
 	Customers       []CustomerRow
 	Addresses       []AddressRow
 
-	Locations       []LocationRow
-	InventoryLevels []InventoryLevelRow
-	StockMovements  []StockMovementRow
+	Locations        []LocationRow
+	LocationProfiles []LocationProfileRow
+	InventoryLevels  []InventoryLevelRow
+	StockMovements   []StockMovementRow
 
 	Carts     []CartRow
 	CartItems []CartItemRow
@@ -126,6 +127,18 @@ type LocationRow struct {
 	Name       string
 	Type       string
 	Priority   int
+}
+
+// LocationProfileRow mirrors the location_profile table. The inventory
+// reservation store gates every candidate level on fulfills_orders, so the
+// seed must populate a profile for every location it creates — otherwise
+// runtime reservations see an empty profile map and reject every request
+// with ErrInsufficientStock.
+type LocationProfileRow struct {
+	LocationID     string
+	Region         string
+	FulfillsOrders bool
+	TimeZone       string
 }
 
 type InventoryLevelRow struct {

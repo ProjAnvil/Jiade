@@ -115,7 +115,7 @@ func (service *Service) GetCheckoutSnapshot(ctx context.Context, sku string) (Ch
 	if snapshot.ProductID == "" || snapshot.SKU != sku || snapshot.ProductTitle == "" ||
 		snapshot.VariantTitle == "" || snapshot.UnitPriceMinor < 0 ||
 		len(snapshot.Currency) != 3 || snapshot.Status != "active" ||
-		(snapshot.Channel != "" && snapshot.Channel != "web") {
+		(snapshot.Channel != "" && snapshot.Channel != "web" && snapshot.Channel != "legacy") {
 		return CheckoutSnapshot{}, ErrSKUNotSaleable
 	}
 	snapshot.AvailableForSale = true
