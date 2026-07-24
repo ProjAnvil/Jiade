@@ -54,6 +54,13 @@ CREATE INDEX IF NOT EXISTS idx_reservation_level_active
   ON reservation(sku, location_id, expires_at)
   WHERE status = 'active';
 
+CREATE TABLE IF NOT EXISTS reservation_order_state (
+  order_id text PRIMARY KEY,
+  terminal_state text NOT NULL
+    CHECK (terminal_state IN ('release', 'commit', 'expire')),
+  updated_at timestamptz NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS stock_movement (
   movement_id text PRIMARY KEY,
   sku text NOT NULL,

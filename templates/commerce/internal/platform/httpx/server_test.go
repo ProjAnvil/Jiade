@@ -13,9 +13,28 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"commerce/internal/platform/telemetry"
 )
+
+func TestServerUsesConfiguredHTTPTimeouts(t *testing.T) {
+	config := ServerConfig{
+		ReadHeaderTimeout: 2 * time.Second,
+		ReadTimeout:       3 * time.Second,
+		WriteTimeout:      4 * time.Second,
+		IdleTimeout:       5 * time.Second,
+	}
+	server := NewServer(config)
+	if server.server.ReadHeaderTimeout != config.ReadHeaderTimeout ||
+		server.server.ReadTimeout != config.ReadTimeout ||
+		server.server.WriteTimeout != config.WriteTimeout ||
+		server.server.IdleTimeout != config.IdleTimeout {
+		t.Fatalf("timeouts read_header=%v read=%v write=%v idle=%v",
+			server.server.ReadHeaderTimeout, server.server.ReadTimeout,
+			server.server.WriteTimeout, server.server.IdleTimeout)
+	}
+}
 
 func TestLiveAndReadyHaveDifferentDependencySemantics(t *testing.T) {
 	ready := atomic.Bool{}

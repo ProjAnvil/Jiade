@@ -118,6 +118,10 @@ func assertDomainConstraintFixtures(t *testing.T, ctx context.Context, pool *pgx
 		if available != 7 {
 			t.Fatalf("generated availability=%d, want 7", available)
 		}
+		expectRejected(t, ctx, connection, `
+			INSERT INTO reservation_order_state
+				(order_id, terminal_state, updated_at)
+			VALUES ('order-invalid-terminal', 'cancel', now())`)
 	case "order_db.sql":
 		if _, err := connection.Exec(ctx, `
 			INSERT INTO sales_order (

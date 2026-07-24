@@ -17,7 +17,7 @@ var serviceMigrations = map[string][]string{
 		"membership_tier", "customer", "address", "customer_consent",
 	},
 	"inventory_db.sql": {
-		"location", "inventory_level", "reservation", "stock_movement",
+		"location", "inventory_level", "reservation", "reservation_order_state", "stock_movement",
 	},
 	"order_db.sql": {
 		"cart", "cart_item", "sales_order", "order_item", "order_discount_allocation",
@@ -90,6 +90,8 @@ func TestServiceMigrationsDeclareDomainConstraintsAndIndexes(t *testing.T) {
 			`reserved\s*<=\s*on_hand`, `idx_reservation_active`,
 			`where\s+status\s*=\s*'active'`, `idx_stock_movement_level`,
 			`available\s+integer\s+generated\s+always\s+as\s*\(\s*on_hand\s*-\s*reserved\s*\)\s+stored`,
+			`reservation_order_state[\s\S]*?order_id\s+text\s+primary\s+key`,
+			`terminal_state\s+text\s+not\s+null\s+check\s*\(\s*terminal_state\s+in\s*\(\s*'release'\s*,\s*'commit'\s*,\s*'expire'\s*\)`,
 		},
 		"order_db.sql": {
 			`total_minor\s*=\s*subtotal_minor\s*-\s*discount_minor\s*\+\s*shipping_minor\s*\+\s*tax_minor`,

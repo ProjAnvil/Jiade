@@ -145,6 +145,152 @@ func TestPostgresConcurrentSameKeyCreatesOneReservation(t *testing.T) {
 	assertIntegrationCount(t, pool, "outbox_event", 1)
 }
 
+func TestPostgresTerminalBeforeReserveFencesOrder(t *testing.T) {
+	store, pool := newIntegrationInventoryStore(t)
+	seedIntegrationLevels(t, pool, "SKU-FENCE", []integrationLevel{
+		{location: "LOC-1", priority: 1, onHand: 5},
+	})
+	now := fixedInventoryClock()
+	if allocations, changed, err := store.TransitionOrder(context.Background(), "ORD-FENCE", ReservationRelease, now); err != nil || !changed || len(allocations) != 0 {
+		t.Fatalf("terminal before reserve allocations=%v changed=%v err=%v", allocations, changed, err)
+	}
+	if _, changed, err := store.TransitionOrder(context.Background(), "ORD-FENCE", ReservationRelease, now); err != nil || changed {
+		t.Fatalf("terminal replay changed=%v err=%v", changed, err)
+	}
+	if _, _, err := store.TransitionOrder(context.Background(), "ORD-FENCE", ReservationCommit, now); !errors.Is(err, ErrOrderTerminal) {
+		t.Fatalf("different terminal error=%v", err)
+	}
+	_, err := store.Reserve(context.Background(), ReserveCommand{
+		OrderID: "ORD-FENCE", IdempotencyKey: "late-key", CorrelationID: "late-request",
+		Lines:      []ReserveLine{{SKU: "SKU-FENCE", Quantity: 1}},
+		OccurredAt: now, ExpiresAt: now.Add(DefaultReservationTTL),
+	})
+	if !errors.Is(err, ErrOrderTerminal) {
+		t.Fatalf("late reserve error=%v", err)
+	}
+	assertIntegrationCount(t, pool, "reservation_order_state", 1)
+	assertIntegrationCount(t, pool, "reservation", 0)
+	assertIntegrationCount(t, pool, "stock_movement", 0)
+	assertIntegrationCount(t, pool, "outbox_event", 1)
+}
+
+func TestPostgresConcurrentReserveAndTerminalLeaveNoActiveStock(t *testing.T) {
+	store, pool := newIntegrationInventoryStore(t)
+	seedIntegrationLevels(t, pool, "SKU-FENCE-RACE", []integrationLevel{
+		{location: "LOC-1", priority: 1, onHand: 5},
+	})
+	now := fixedInventoryClock()
+	start := make(chan struct{})
+	var reserveErr, terminalErr error
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		<-start
+		_, reserveErr = store.Reserve(context.Background(), ReserveCommand{
+			OrderID: "ORD-FENCE-RACE", IdempotencyKey: "race-key", CorrelationID: "race-request",
+			Lines:      []ReserveLine{{SKU: "SKU-FENCE-RACE", Quantity: 2}},
+			OccurredAt: now, ExpiresAt: now.Add(DefaultReservationTTL),
+		})
+	}()
+	go func() {
+		defer wait.Done()
+		<-start
+		_, _, terminalErr = store.TransitionOrder(context.Background(), "ORD-FENCE-RACE", ReservationRelease, now)
+	}()
+	close(start)
+	wait.Wait()
+	if terminalErr != nil {
+		t.Fatalf("terminal error=%v", terminalErr)
+	}
+	if reserveErr != nil && !errors.Is(reserveErr, ErrOrderTerminal) {
+		t.Fatalf("reserve error=%v", reserveErr)
+	}
+	var reserved, active int64
+	if err := pool.QueryRow(context.Background(), `
+		SELECT reserved FROM inventory_level
+		WHERE sku = 'SKU-FENCE-RACE' AND location_id = 'LOC-1'`).Scan(&reserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM reservation
+		WHERE order_id = 'ORD-FENCE-RACE' AND status = 'active'`).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if reserved != 0 || active != 0 {
+		t.Fatalf("reserved=%d active=%d", reserved, active)
+	}
+	assertIntegrationCount(t, pool, "reservation_order_state", 1)
+}
+
+func TestPostgresRequiresEnabledLocationProfile(t *testing.T) {
+	tests := []struct {
+		name          string
+		profileExists bool
+		enabled       bool
+	}{
+		{name: "missing profile"},
+		{name: "disabled profile", profileExists: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, pool := newIntegrationInventoryStore(t)
+			seedIntegrationLevelWithProfile(t, pool, "SKU-PROFILE", "LOC-1", 1, 5, test.profileExists, test.enabled)
+			now := fixedInventoryClock()
+			_, err := store.Reserve(context.Background(), ReserveCommand{
+				OrderID: "ORD-PROFILE", IdempotencyKey: "profile-key", CorrelationID: "profile-request",
+				Lines:      []ReserveLine{{SKU: "SKU-PROFILE", Quantity: 1}},
+				OccurredAt: now, ExpiresAt: now.Add(DefaultReservationTTL),
+			})
+			if !errors.Is(err, ErrInsufficientStock) {
+				t.Fatalf("Reserve() error=%v, want ErrInsufficientStock", err)
+			}
+		})
+	}
+}
+
+func TestPostgresMultiSKULockOrderAvoidsDeadlock(t *testing.T) {
+	store, pool := newIntegrationInventoryStore(t)
+	seedIntegrationLevels(t, pool, "SKU-A", []integrationLevel{{location: "LOC-1", priority: 1, onHand: 10}})
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO inventory_level (sku, location_id, on_hand, reserved, updated_at)
+		VALUES ('SKU-B', 'LOC-1', 10, 0, $1)`, fixedInventoryClock()); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store, fixedInventoryClock)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var successes atomic.Int32
+	var wait sync.WaitGroup
+	for index := 0; index < 20; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			lines := []ReserveLine{{SKU: "SKU-A", Quantity: 1}, {SKU: "SKU-B", Quantity: 1}}
+			if index%2 == 1 {
+				lines[0], lines[1] = lines[1], lines[0]
+			}
+			_, err := service.Reserve(ctx, ReserveCommand{
+				OrderID:        fmt.Sprintf("ORD-MULTI-%d", index),
+				IdempotencyKey: fmt.Sprintf("multi-%d", index),
+				Lines:          lines,
+			})
+			if err == nil {
+				successes.Add(1)
+			} else if !errors.Is(err, ErrInsufficientStock) {
+				t.Errorf("reserve %d: %v", index, err)
+			}
+		}(index)
+	}
+	wait.Wait()
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("multi-SKU reservations timed out: %v", err)
+	}
+	if successes.Load() != 10 {
+		t.Fatalf("successes=%d, want 10", successes.Load())
+	}
+}
+
 func TestPostgresDuplicateTerminalOperationsAreNoOps(t *testing.T) {
 	store, pool := newIntegrationInventoryStore(t)
 	seedIntegrationLevels(t, pool, "SKU-TERM", []integrationLevel{
@@ -165,7 +311,7 @@ func TestPostgresDuplicateTerminalOperationsAreNoOps(t *testing.T) {
 	if _, changed, err := store.TransitionOrder(context.Background(), "ORD-TERM", ReservationRelease, now); err != nil || changed {
 		t.Fatalf("duplicate release changed=%v err=%v", changed, err)
 	}
-	if _, changed, err := store.TransitionOrder(context.Background(), "ORD-TERM", ReservationCommit, now); err != nil || changed {
+	if _, changed, err := store.TransitionOrder(context.Background(), "ORD-TERM", ReservationCommit, now); !errors.Is(err, ErrOrderTerminal) || changed {
 		t.Fatalf("late commit changed=%v err=%v", changed, err)
 	}
 	assertIntegrationCount(t, pool, "stock_movement", 2)
@@ -332,6 +478,34 @@ func seedIntegrationLevels(t *testing.T, pool *pgxpool.Pool, sku string, levels 
 			sku, level.location, level.onHand, fixedInventoryClock()); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func seedIntegrationLevelWithProfile(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	sku, location string,
+	priority int,
+	onHand int64,
+	profileExists, enabled bool,
+) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO location (location_id, name, type, priority)
+		VALUES ($1, $1, 'warehouse', $2)`, location, priority); err != nil {
+		t.Fatal(err)
+	}
+	if profileExists {
+		if _, err := pool.Exec(context.Background(), `
+			INSERT INTO location_profile (location_id, region, fulfills_orders, time_zone)
+			VALUES ($1, 'test', $2, 'UTC')`, location, enabled); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO inventory_level (sku, location_id, on_hand, reserved, updated_at)
+		VALUES ($1, $2, $3, 0, $4)`, sku, location, onHand, fixedInventoryClock()); err != nil {
+		t.Fatal(err)
 	}
 }
 

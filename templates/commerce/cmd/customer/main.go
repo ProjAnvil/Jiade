@@ -33,13 +33,17 @@ func run() error {
 	defer pool.Close()
 	handler := customer.NewHandler(customer.NewService(customer.NewPostgresStore(pool)))
 	server := httpx.NewServer(httpx.ServerConfig{
-		Service:          settings.Service,
-		Instance:         settings.Instance,
-		Addr:             settings.HTTP.Addr,
-		Handler:          handler,
-		Ready:            pool.Ping,
-		ShutdownTimeout:  settings.Shutdown.Timeout,
-		RequestBodyLimit: settings.HTTP.RequestBodyLimit,
+		Service:           settings.Service,
+		Instance:          settings.Instance,
+		Addr:              settings.HTTP.Addr,
+		Handler:           handler,
+		Ready:             pool.Ping,
+		ShutdownTimeout:   settings.Shutdown.Timeout,
+		RequestBodyLimit:  settings.HTTP.RequestBodyLimit,
+		ReadHeaderTimeout: settings.HTTP.ReadHeaderTimeout,
+		ReadTimeout:       settings.HTTP.ReadTimeout,
+		WriteTimeout:      settings.HTTP.WriteTimeout,
+		IdleTimeout:       settings.HTTP.IdleTimeout,
 	})
 	serverError := make(chan error, 1)
 	go func() { serverError <- server.ListenAndServe() }()

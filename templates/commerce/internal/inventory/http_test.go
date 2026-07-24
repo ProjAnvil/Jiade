@@ -80,6 +80,23 @@ func TestReservationTerminalOperationsAffectActiveRowsOnce(t *testing.T) {
 	}
 }
 
+func TestTerminalBeforeReservePersistsFenceAndRejectsLateMutations(t *testing.T) {
+	store := newInventoryStoreStub()
+	handler := NewHandler(NewService(store, fixedInventoryClock))
+
+	first := postInventoryJSON(handler, "/internal/v1/reservations/ORD-FENCED/release", `{}`, "")
+	replay := postInventoryJSON(handler, "/internal/v1/reservations/ORD-FENCED/release", `{}`, "")
+	different := postInventoryJSON(handler, "/internal/v1/reservations/ORD-FENCED/commit", `{}`, "")
+	reserve := postInventoryJSON(handler, "/internal/v1/reservations",
+		`{"order_id":"ORD-FENCED","lines":[{"sku":"SKU-1","quantity":1}]}`, "late-key")
+
+	if first.Code != http.StatusOK || replay.Code != http.StatusOK {
+		t.Fatalf("first=%d replay=%d", first.Code, replay.Code)
+	}
+	assertInventoryProblem(t, different, http.StatusConflict, "order_terminal")
+	assertInventoryProblem(t, reserve, http.StatusConflict, "order_terminal")
+}
+
 func TestInventoryPublicReadsUseStablePagination(t *testing.T) {
 	store := newInventoryStoreStub()
 	store.levels = []InventoryLevel{
@@ -138,13 +155,17 @@ func fixedInventoryClock() time.Time {
 
 type inventoryStoreStub struct {
 	reservations      map[string]ReservationResult
+	terminals         map[string]ReservationEvent
 	levels            []InventoryLevel
 	reserveErr        error
 	transitionChanges int
 }
 
 func newInventoryStoreStub() *inventoryStoreStub {
-	return &inventoryStoreStub{reservations: make(map[string]ReservationResult)}
+	return &inventoryStoreStub{
+		reservations: make(map[string]ReservationResult),
+		terminals:    make(map[string]ReservationEvent),
+	}
 }
 
 func (store *inventoryStoreStub) ListLevels(_ context.Context, after InventoryCursor, limit int) ([]InventoryLevel, error) {
@@ -187,6 +208,9 @@ func (store *inventoryStoreStub) Reserve(_ context.Context, command ReserveComma
 	if store.reserveErr != nil {
 		return ReservationResult{}, store.reserveErr
 	}
+	if _, terminal := store.terminals[command.OrderID]; terminal {
+		return ReservationResult{}, ErrOrderTerminal
+	}
 	if existing, ok := store.reservations[command.IdempotencyKey]; ok {
 		if !sameReservePayload(existing, command) {
 			return ReservationResult{}, ErrIdempotencyConflict
@@ -207,6 +231,13 @@ func (store *inventoryStoreStub) Reserve(_ context.Context, command ReserveComma
 }
 
 func (store *inventoryStoreStub) TransitionOrder(_ context.Context, orderID string, event ReservationEvent, _ time.Time) ([]ReservationAllocation, bool, error) {
+	if terminal, ok := store.terminals[orderID]; ok {
+		if terminal != event {
+			return nil, false, ErrOrderTerminal
+		}
+		return store.allocationsForOrder(orderID), false, nil
+	}
+	store.terminals[orderID] = event
 	for key, result := range store.reservations {
 		if result.OrderID != orderID {
 			continue
@@ -224,7 +255,17 @@ func (store *inventoryStoreStub) TransitionOrder(_ context.Context, orderID stri
 		}
 		return result.Allocations, changed, nil
 	}
-	return nil, false, ErrReservationNotFound
+	store.transitionChanges++
+	return nil, true, nil
+}
+
+func (store *inventoryStoreStub) allocationsForOrder(orderID string) []ReservationAllocation {
+	for _, result := range store.reservations {
+		if result.OrderID == orderID {
+			return append([]ReservationAllocation(nil), result.Allocations...)
+		}
+	}
+	return nil
 }
 
 func sameReservePayload(result ReservationResult, command ReserveCommand) bool {

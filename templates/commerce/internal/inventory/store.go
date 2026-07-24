@@ -96,8 +96,16 @@ func (store *PostgresStore) Reserve(ctx context.Context, command ReserveCommand)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, command.IdempotencyKey); err != nil {
-		return ReservationResult{}, fmt.Errorf("lock reservation idempotency key: %w", err)
+	if err := lockOrder(ctx, tx, command.OrderID); err != nil {
+		return ReservationResult{}, err
+	}
+	if err := lockIdempotencyKey(ctx, tx, command.IdempotencyKey); err != nil {
+		return ReservationResult{}, err
+	}
+	if terminal, err := terminalOrderState(ctx, tx, command.OrderID); err != nil {
+		return ReservationResult{}, err
+	} else if terminal != "" {
+		return ReservationResult{}, ErrOrderTerminal
 	}
 	keyPrefix := reservationKeyPrefix(command.IdempotencyKey)
 	existing, err := existingAllocations(ctx, tx, keyPrefix)
@@ -172,28 +180,58 @@ type candidateLevel struct {
 
 func lockCandidateLevels(ctx context.Context, tx pgx.Tx, sku string) ([]candidateLevel, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT i.location_id, l.priority, i.on_hand, i.reserved,
-		       COALESCE(p.fulfills_orders, true)
+		SELECT i.location_id, l.priority, i.on_hand, i.reserved
 		FROM inventory_level i
 		JOIN location l USING (location_id)
-		LEFT JOIN location_profile p USING (location_id)
 		WHERE i.sku = $1
 		ORDER BY l.priority, i.location_id
-		FOR UPDATE OF i`, sku)
+		FOR UPDATE OF i, l`, sku)
 	if err != nil {
 		return nil, fmt.Errorf("lock candidate inventory levels: %w", err)
 	}
-	defer rows.Close()
 	var levels []candidateLevel
 	for rows.Next() {
 		var level candidateLevel
-		if err := rows.Scan(&level.LocationID, &level.Priority, &level.OnHand, &level.Reserved, &level.Fulfills); err != nil {
+		if err := rows.Scan(&level.LocationID, &level.Priority, &level.OnHand, &level.Reserved); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("scan candidate inventory level: %w", err)
 		}
 		levels = append(levels, level)
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, fmt.Errorf("iterate candidate inventory levels: %w", err)
+	}
+	rows.Close()
+	if len(levels) == 0 {
+		return levels, nil
+	}
+	profileRows, err := tx.Query(ctx, `
+		SELECT p.location_id, p.fulfills_orders = true
+		FROM inventory_level i
+		JOIN location l USING (location_id)
+		JOIN location_profile p USING (location_id)
+		WHERE i.sku = $1
+		ORDER BY l.priority, p.location_id
+		FOR UPDATE OF i, l, p`, sku)
+	if err != nil {
+		return nil, fmt.Errorf("lock inventory location profiles: %w", err)
+	}
+	defer profileRows.Close()
+	enabled := make(map[string]bool, len(levels))
+	for profileRows.Next() {
+		var locationID string
+		var fulfills bool
+		if err := profileRows.Scan(&locationID, &fulfills); err != nil {
+			return nil, fmt.Errorf("scan inventory location profile: %w", err)
+		}
+		enabled[locationID] = fulfills
+	}
+	if err := profileRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate inventory location profiles: %w", err)
+	}
+	for index := range levels {
+		levels[index].Fulfills = enabled[levels[index].LocationID]
 	}
 	return levels, nil
 }
@@ -254,6 +292,29 @@ func (store *PostgresStore) TransitionOrder(
 		return nil, false, fmt.Errorf("begin inventory transition: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockOrder(ctx, tx, orderID); err != nil {
+		return nil, false, err
+	}
+	terminal, err := terminalOrderState(ctx, tx, orderID)
+	if err != nil {
+		return nil, false, err
+	}
+	if terminal != "" {
+		allocations, queryErr := queryAllocations(ctx, tx, `
+			SELECT r.reservation_id, r.order_id, r.sku, r.location_id,
+			       r.quantity, r.status, r.expires_at
+			FROM reservation r
+			JOIN location l USING (location_id)
+			WHERE r.order_id = $1
+			ORDER BY r.sku, l.priority, r.location_id, r.reservation_id`, orderID)
+		if queryErr != nil {
+			return nil, false, queryErr
+		}
+		if terminal != event {
+			return allocations, false, ErrOrderTerminal
+		}
+		return allocations, false, nil
+	}
 	allocations, err := queryAllocations(ctx, tx, `
 		SELECT r.reservation_id, r.order_id, r.sku, r.location_id,
 		       r.quantity, r.status, r.expires_at
@@ -265,10 +326,15 @@ func (store *PostgresStore) TransitionOrder(
 	if err != nil {
 		return nil, false, err
 	}
-	if len(allocations) == 0 {
-		return nil, false, ErrReservationNotFound
+	if !canApplyTerminalFence(allocations, event, now) {
+		return allocations, false, nil
 	}
-	changed := false
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO reservation_order_state (order_id, terminal_state, updated_at)
+		VALUES ($1, $2, $3)`, orderID, event, now); err != nil {
+		return nil, false, fmt.Errorf("insert reservation order terminal state: %w", err)
+	}
+	changed := true
 	for index := range allocations {
 		allocation := &allocations[index]
 		if allocation.State != ReservationActive ||
@@ -328,15 +394,58 @@ func (store *PostgresStore) TransitionOrder(
 		allocation.State = nextReservation.State
 		changed = true
 	}
-	if changed {
-		if err := insertInventoryEvent(ctx, tx, inventoryEventType(event), orderID, orderID, allocations, now); err != nil {
-			return nil, false, err
-		}
+	if err := insertInventoryEvent(ctx, tx, inventoryEventType(event), orderID, orderID, allocations, now); err != nil {
+		return nil, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, false, fmt.Errorf("commit inventory transition: %w", err)
 	}
 	return allocations, changed, nil
+}
+
+func canApplyTerminalFence(allocations []ReservationAllocation, event ReservationEvent, now time.Time) bool {
+	if event != ReservationExpire {
+		return true
+	}
+	for _, allocation := range allocations {
+		if allocation.State == ReservationActive && allocation.ExpiresAt.After(now) {
+			return false
+		}
+	}
+	return true
+}
+
+func lockOrder(ctx context.Context, tx pgx.Tx, orderID string) error {
+	if _, err := tx.Exec(ctx, `
+		SELECT pg_advisory_xact_lock(hashtextextended('inventory:order:' || $1, 0))`,
+		orderID); err != nil {
+		return fmt.Errorf("lock inventory order: %w", err)
+	}
+	return nil
+}
+
+func lockIdempotencyKey(ctx context.Context, tx pgx.Tx, key string) error {
+	if _, err := tx.Exec(ctx, `
+		SELECT pg_advisory_xact_lock(hashtextextended('inventory:key:' || $1, 0))`,
+		key); err != nil {
+		return fmt.Errorf("lock reservation idempotency key: %w", err)
+	}
+	return nil
+}
+
+func terminalOrderState(ctx context.Context, tx pgx.Tx, orderID string) (ReservationEvent, error) {
+	var terminal ReservationEvent
+	err := tx.QueryRow(ctx, `
+		SELECT terminal_state
+		FROM reservation_order_state
+		WHERE order_id = $1`, orderID).Scan(&terminal)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("query reservation order terminal state: %w", err)
+	}
+	return terminal, nil
 }
 
 func applyReservationTransition(level Level, reservation Reservation, event ReservationEvent) (Level, Reservation, error) {

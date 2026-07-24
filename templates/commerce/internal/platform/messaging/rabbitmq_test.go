@@ -59,8 +59,21 @@ func TestRabbitPublisherCancellationRetiresChannel(t *testing.T) {
 	if !channel.closed {
 		t.Fatal("channel was not retired after ambiguous cancellation")
 	}
+	if publisher.Available() {
+		t.Fatal("publisher still reports available after channel retirement")
+	}
 	if err := publisher.Publish(context.Background(), testEvent()); err == nil || !strings.Contains(err.Error(), "retired") {
 		t.Fatalf("Publish() after retirement error=%v", err)
+	}
+}
+
+func TestRabbitPublisherReportsAvailabilityBeforeRetirement(t *testing.T) {
+	publisher, err := newRabbitPublisher(newFakeRabbitChannel(), "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !publisher.Available() {
+		t.Fatal("new publisher reports unavailable")
 	}
 }
 

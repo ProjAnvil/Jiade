@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -20,6 +21,7 @@ type RabbitPublisher struct {
 	returns       <-chan amqp.Return
 	mu            sync.Mutex
 	retired       bool
+	available     atomic.Bool
 }
 
 type rabbitChannel interface {
@@ -48,12 +50,20 @@ func newRabbitPublisher(channel rabbitChannel, exchange string) (*RabbitPublishe
 	if err := channel.Confirm(false); err != nil {
 		return nil, fmt.Errorf("%w: enable rabbit publisher confirmations: %w", ErrPublisherUnavailable, err)
 	}
-	return &RabbitPublisher{
+	publisher := &RabbitPublisher{
 		channel:       channel,
 		exchange:      exchange,
 		confirmations: channel.NotifyPublish(make(chan amqp.Confirmation, 1)),
 		returns:       channel.NotifyReturn(make(chan amqp.Return, 1)),
-	}, nil
+	}
+	publisher.available.Store(true)
+	return publisher, nil
+}
+
+// Available reports whether the publisher channel can accept new relay work.
+// It is nonblocking so readiness checks cannot wait behind an in-flight publish.
+func (publisher *RabbitPublisher) Available() bool {
+	return publisher != nil && publisher.available.Load()
 }
 
 // Publish sends event using its type as the topic routing key. mandatory=true
@@ -105,6 +115,7 @@ func (publisher *RabbitPublisher) retireLocked() {
 		return
 	}
 	publisher.retired = true
+	publisher.available.Store(false)
 	_ = publisher.channel.Close()
 }
 

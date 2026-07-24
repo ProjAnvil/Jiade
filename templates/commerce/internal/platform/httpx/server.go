@@ -19,15 +19,19 @@ const defaultBodyLimit = 1 << 20
 
 // ServerConfig configures a production HTTP server.
 type ServerConfig struct {
-	Service          string
-	Instance         string
-	Addr             string
-	Handler          http.Handler
-	Ready            func(context.Context) error
-	Registry         *prometheus.Registry
-	Logger           *slog.Logger
-	ShutdownTimeout  time.Duration
-	RequestBodyLimit int64
+	Service           string
+	Instance          string
+	Addr              string
+	Handler           http.Handler
+	Ready             func(context.Context) error
+	Registry          *prometheus.Registry
+	Logger            *slog.Logger
+	ShutdownTimeout   time.Duration
+	RequestBodyLimit  int64
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
 }
 
 // Server owns an HTTP server and its readiness state.
@@ -49,6 +53,18 @@ func NewServer(config ServerConfig) *Server {
 	}
 	if config.RequestBodyLimit <= 0 {
 		config.RequestBodyLimit = defaultBodyLimit
+	}
+	if config.ReadHeaderTimeout <= 0 {
+		config.ReadHeaderTimeout = 5 * time.Second
+	}
+	if config.ReadTimeout <= 0 {
+		config.ReadTimeout = 15 * time.Second
+	}
+	if config.WriteTimeout <= 0 {
+		config.WriteTimeout = 30 * time.Second
+	}
+	if config.IdleTimeout <= 0 {
+		config.IdleTimeout = time.Minute
 	}
 	if config.Logger == nil {
 		config.Logger = telemetry.NewJSONLogger(os.Stderr)
@@ -75,10 +91,10 @@ func NewServer(config ServerConfig) *Server {
 	server.server = &http.Server{
 		Addr:              config.Addr,
 		Handler:           server.handler,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       time.Minute,
+		ReadHeaderTimeout: config.ReadHeaderTimeout,
+		ReadTimeout:       config.ReadTimeout,
+		WriteTimeout:      config.WriteTimeout,
+		IdleTimeout:       config.IdleTimeout,
 	}
 	return server
 }

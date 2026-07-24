@@ -47,39 +47,33 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("open inventory publisher channel: %w", err)
 	}
+	defer channel.Close()
 	if err := channel.ExchangeDeclare(eventExchange, "topic", true, false, false, false, nil); err != nil {
-		_ = channel.Close()
 		return fmt.Errorf("declare inventory event exchange: %w", err)
 	}
 	publisher, err := messaging.NewRabbitPublisher(channel, eventExchange)
 	if err != nil {
-		_ = channel.Close()
 		return err
 	}
-	relayError := make(chan error, 1)
-	go func() {
-		relayError <- messaging.RunRelay(processContext, pool, publisher, messaging.RelayConfig{
+	relay := inventory.NewRelayLifecycle(processContext, func(ctx context.Context) error {
+		return messaging.RunRelay(ctx, pool, publisher, messaging.RelayConfig{
 			BatchSize: settings.Outbox.BatchSize, PollInterval: settings.Outbox.PollInterval,
 		})
-	}()
+	})
 
 	handler := inventory.NewHandler(inventory.NewService(inventory.NewPostgresStore(pool), nil))
 	server := httpx.NewServer(httpx.ServerConfig{
-		Service:  settings.Service,
-		Instance: settings.Instance,
-		Addr:     settings.HTTP.Addr,
-		Handler:  handler,
-		Ready: func(ctx context.Context) error {
-			if err := pool.Ping(ctx); err != nil {
-				return err
-			}
-			if connection.IsClosed() {
-				return errors.New("inventory broker connection is closed")
-			}
-			return nil
-		},
-		ShutdownTimeout:  settings.Shutdown.Timeout,
-		RequestBodyLimit: settings.HTTP.RequestBodyLimit,
+		Service:           settings.Service,
+		Instance:          settings.Instance,
+		Addr:              settings.HTTP.Addr,
+		Handler:           handler,
+		Ready:             inventory.NewRuntimeReadiness(pool.Ping, publisher, connection.IsClosed, relay),
+		ShutdownTimeout:   settings.Shutdown.Timeout,
+		RequestBodyLimit:  settings.HTTP.RequestBodyLimit,
+		ReadHeaderTimeout: settings.HTTP.ReadHeaderTimeout,
+		ReadTimeout:       settings.HTTP.ReadTimeout,
+		WriteTimeout:      settings.HTTP.WriteTimeout,
+		IdleTimeout:       settings.HTTP.IdleTimeout,
 	})
 	serverError := make(chan error, 1)
 	go func() { serverError <- server.ListenAndServe() }()
@@ -90,20 +84,18 @@ func run() error {
 		if !httpx.IsClosed(err) {
 			runError = err
 		}
-	case err := <-relayError:
-		if err != nil {
-			runError = fmt.Errorf("run inventory outbox relay: %w", err)
+	case <-relay.Done():
+		if signalContext.Err() == nil {
+			runError = fmt.Errorf("run inventory outbox relay: %w", relay.ErrIfStopped())
 		}
 	}
 	cancelProcess()
 	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), settings.Shutdown.Timeout)
 	defer cancelShutdown()
-	err = server.Shutdown(shutdownContext)
-	if runError != nil {
-		return errors.Join(runError, err)
-	}
-	if errors.Is(err, context.Canceled) {
+	shutdownError := server.Shutdown(shutdownContext)
+	relayError := relay.Wait(shutdownContext)
+	if runError == nil && errors.Is(shutdownError, context.Canceled) && relayError == nil {
 		return nil
 	}
-	return err
+	return errors.Join(runError, shutdownError, relayError)
 }

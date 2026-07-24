@@ -129,6 +129,8 @@ func writeInventoryServiceError(w http.ResponseWriter, r *http.Request, err erro
 		writeInventoryProblem(w, r, http.StatusConflict, "insufficient_stock")
 	case errors.Is(err, ErrIdempotencyConflict):
 		writeInventoryProblem(w, r, http.StatusConflict, "idempotency_conflict")
+	case errors.Is(err, ErrOrderTerminal):
+		writeInventoryProblem(w, r, http.StatusConflict, "order_terminal")
 	case errors.Is(err, ErrReservationNotFound):
 		writeInventoryProblem(w, r, http.StatusNotFound, "reservation_not_found")
 	default:

@@ -22,6 +22,7 @@ var (
 	ErrSKUNotFound         = errors.New("inventory SKU not found")
 	ErrInsufficientStock   = errors.New("insufficient inventory stock")
 	ErrIdempotencyConflict = errors.New("inventory idempotency conflict")
+	ErrOrderTerminal       = errors.New("inventory order is terminal")
 	ErrReservationNotFound = errors.New("inventory reservation not found")
 	ErrInvalidCommand      = errors.New("invalid inventory command")
 	errInvalidCursor       = errors.New("invalid inventory cursor")
