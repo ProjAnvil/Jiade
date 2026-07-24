@@ -17,6 +17,11 @@ type Publisher interface {
 	Publish(context.Context, Event) error
 }
 
+// ErrPublisherUnavailable identifies a terminal publisher/channel failure.
+// The relay returns it after recording the current row's failure so its owner
+// can replace the publisher or restart instead of draining more Outbox rows.
+var ErrPublisherUnavailable = errors.New("messaging publisher unavailable")
+
 // RelayConfig controls transactional claims and polling. ClaimTTL permits an
 // event to be resent after a process crashes after broker publish but before
 // the published marker is stored, preserving at-least-once delivery.
@@ -30,6 +35,7 @@ const (
 	defaultRelayBatchSize = 100
 	defaultRelayPoll      = time.Second
 	defaultClaimTTL       = 30 * time.Second
+	failureRecordTimeout  = 5 * time.Second
 )
 
 // InsertOutbox records an event inside the domain transaction that produced
@@ -113,7 +119,21 @@ func relayOnce(ctx context.Context, store outboxStore, publisher Publisher, conf
 	}
 	for _, claim := range claims {
 		if err := publisher.Publish(ctx, claim.Event); err != nil {
-			if markErr := store.MarkFailed(ctx, claim, err); markErr != nil {
+			terminal := errors.Is(err, ErrPublisherUnavailable)
+			failureContext := ctx
+			cancel := func() {}
+			if terminal {
+				failureContext, cancel = context.WithTimeout(context.WithoutCancel(ctx), failureRecordTimeout)
+			}
+			markErr := store.MarkFailed(failureContext, claim, err)
+			cancel()
+			if terminal {
+				if markErr != nil {
+					return 0, errors.Join(err, fmt.Errorf("record outbox publish failure: %w", markErr))
+				}
+				return 0, err
+			}
+			if markErr != nil {
 				return 0, fmt.Errorf("record outbox publish failure: %w", markErr)
 			}
 			continue

@@ -223,11 +223,12 @@ func (tx *inboxTx) Commit(context.Context) error   { tx.committed = true; return
 func (tx *inboxTx) Rollback(context.Context) error { tx.rolledBack = true; return nil }
 
 type relayStore struct {
-	claims    []outboxClaim
-	published int
-	failed    int
-	batch     int
-	lease     time.Duration
+	claims        []outboxClaim
+	published     int
+	failed        int
+	failureErrors []error
+	batch         int
+	lease         time.Duration
 }
 
 func (store *relayStore) Claim(_ context.Context, batch int, lease time.Duration) ([]outboxClaim, error) {
@@ -239,8 +240,9 @@ func (store *relayStore) MarkPublished(context.Context, outboxClaim) error {
 	store.published++
 	return nil
 }
-func (store *relayStore) MarkFailed(context.Context, outboxClaim, error) error {
+func (store *relayStore) MarkFailed(_ context.Context, _ outboxClaim, err error) error {
 	store.failed++
+	store.failureErrors = append(store.failureErrors, err)
 	return nil
 }
 

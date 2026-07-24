@@ -53,6 +53,8 @@ func TestRabbitPublisherCancellationRetiresChannel(t *testing.T) {
 	}
 	if err := publisher.Publish(ctx, testEvent()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Publish() error=%v, want context.Canceled", err)
+	} else if !errors.Is(err, ErrPublisherUnavailable) {
+		t.Fatalf("Publish() error=%v, want ErrPublisherUnavailable", err)
 	}
 	if !channel.closed {
 		t.Fatal("channel was not retired after ambiguous cancellation")
@@ -69,7 +71,7 @@ func TestRabbitPublisherConfirmationClosureRetiresChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := publisher.Publish(context.Background(), testEvent()); err == nil || !strings.Contains(err.Error(), "confirmation") {
+	if err := publisher.Publish(context.Background(), testEvent()); err == nil || !strings.Contains(err.Error(), "confirmation") || !errors.Is(err, ErrPublisherUnavailable) {
 		t.Fatalf("Publish() error=%v, want confirmation closure error", err)
 	}
 	if !channel.closed {
@@ -84,7 +86,7 @@ func TestRabbitPublisherReturnClosureRetiresChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := publisher.Publish(context.Background(), testEvent()); err == nil || !strings.Contains(err.Error(), "return") {
+	if err := publisher.Publish(context.Background(), testEvent()); err == nil || !strings.Contains(err.Error(), "return") || !errors.Is(err, ErrPublisherUnavailable) {
 		t.Fatalf("Publish() error=%v, want return closure error", err)
 	}
 	if !channel.closed {
@@ -100,11 +102,52 @@ func TestRabbitPublisherWrongConfirmationSequenceRetiresChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := publisher.Publish(context.Background(), testEvent()); err == nil || !strings.Contains(err.Error(), "correlation lost") {
+	if err := publisher.Publish(context.Background(), testEvent()); err == nil || !strings.Contains(err.Error(), "correlation lost") || !errors.Is(err, ErrPublisherUnavailable) {
 		t.Fatalf("Publish() error=%v, want correlation error", err)
 	}
 	if !channel.closed {
 		t.Fatal("channel was not retired after sequence mismatch")
+	}
+}
+
+func TestRelayRecordsTerminalRabbitFailureThenStopsBatch(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	channel.closeConfirmOnPublish = true
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &relayStore{claims: []outboxClaim{{Event: testEvent()}, {Event: testEvent()}}}
+
+	_, err = relayOnce(context.Background(), store, publisher, RelayConfig{BatchSize: 2})
+	if !errors.Is(err, ErrPublisherUnavailable) {
+		t.Fatalf("relayOnce() error=%v, want ErrPublisherUnavailable", err)
+	}
+	if store.failed != 1 || channel.publishCalls != 1 {
+		t.Fatalf("failed=%d publishCalls=%d, want one recorded failure and immediate stop", store.failed, channel.publishCalls)
+	}
+	if len(store.failureErrors) != 1 || !errors.Is(store.failureErrors[0], ErrPublisherUnavailable) {
+		t.Fatalf("recorded failure=%v, want ErrPublisherUnavailable", store.failureErrors)
+	}
+}
+
+func TestRelayContinuesBatchAfterAlignedReturnAndNack(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	channel.outcomes = []fakePublishOutcome{
+		{returned: true, ack: true},
+		{ack: false},
+	}
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &relayStore{claims: []outboxClaim{{Event: testEvent()}, {Event: testEvent()}}}
+
+	if _, err := relayOnce(context.Background(), store, publisher, RelayConfig{BatchSize: 2}); err != nil {
+		t.Fatalf("relayOnce() error=%v, want event-local failures only", err)
+	}
+	if store.failed != 2 || channel.publishCalls != 2 || channel.closed {
+		t.Fatalf("failed=%d publishCalls=%d closed=%v, want two recorded event failures on usable publisher", store.failed, channel.publishCalls, channel.closed)
 	}
 }
 

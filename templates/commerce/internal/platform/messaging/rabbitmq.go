@@ -36,17 +36,17 @@ type rabbitChannel interface {
 // channel; use one publisher per relay worker for concurrency.
 func NewRabbitPublisher(channel *amqp.Channel, exchange string) (*RabbitPublisher, error) {
 	if channel == nil {
-		return nil, errors.New("messaging rabbit channel is nil")
+		return nil, fmt.Errorf("%w: rabbit channel is nil", ErrPublisherUnavailable)
 	}
 	return newRabbitPublisher(channel, exchange)
 }
 
 func newRabbitPublisher(channel rabbitChannel, exchange string) (*RabbitPublisher, error) {
 	if channel == nil {
-		return nil, errors.New("messaging rabbit channel is nil")
+		return nil, fmt.Errorf("%w: rabbit channel is nil", ErrPublisherUnavailable)
 	}
 	if err := channel.Confirm(false); err != nil {
-		return nil, fmt.Errorf("enable rabbit publisher confirmations: %w", err)
+		return nil, fmt.Errorf("%w: enable rabbit publisher confirmations: %w", ErrPublisherUnavailable, err)
 	}
 	return &RabbitPublisher{
 		channel:       channel,
@@ -60,7 +60,7 @@ func newRabbitPublisher(channel rabbitChannel, exchange string) (*RabbitPublishe
 // makes an unroutable message a failure instead of silently dropping it.
 func (publisher *RabbitPublisher) Publish(ctx context.Context, event Event) error {
 	if publisher == nil || publisher.channel == nil {
-		return errors.New("messaging rabbit publisher is nil")
+		return fmt.Errorf("%w: rabbit publisher is nil", ErrPublisherUnavailable)
 	}
 	if !validEventID(event.ID) {
 		return errors.New("messaging event ID must be a UUID")
@@ -72,7 +72,7 @@ func (publisher *RabbitPublisher) Publish(ctx context.Context, event Event) erro
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()
 	if publisher.retired {
-		return errors.New("messaging rabbit publisher channel is retired")
+		return fmt.Errorf("%w: rabbit publisher channel is retired", ErrPublisherUnavailable)
 	}
 	sequence := publisher.channel.GetNextPublishSeqNo()
 	if err := publisher.channel.PublishWithContext(ctx, publisher.exchange, event.Type, true, false, amqp.Publishing{
@@ -90,11 +90,12 @@ func (publisher *RabbitPublisher) Publish(ctx context.Context, event Event) erro
 		Body: body,
 	}); err != nil {
 		publisher.retireLocked()
-		return fmt.Errorf("publish event: %w", err)
+		return fmt.Errorf("%w: publish event: %w", ErrPublisherUnavailable, err)
 	}
 	err, aligned := awaitAMQPPublishOutcome(ctx, publisher.confirmations, publisher.returns, sequence, event.ID)
 	if !aligned {
 		publisher.retireLocked()
+		return fmt.Errorf("%w: %w", ErrPublisherUnavailable, err)
 	}
 	return err
 }
