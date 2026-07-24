@@ -153,9 +153,50 @@ func TestClientRejectsUnreplayableBodyBeforeAnyAttempt(t *testing.T) {
 	if !errors.Is(err, ErrBodyNotReplayable) {
 		t.Fatalf("Do() error=%v, want ErrBodyNotReplayable", err)
 	}
-	if sourceBody.read != 0 || sourceBody.closed {
-		t.Fatalf("source body read=%d closed=%t, want untouched", sourceBody.read, sourceBody.closed)
+	if sourceBody.read != 0 || !sourceBody.closed {
+		t.Fatalf("source body read=%d closed=%t, want unread and closed", sourceBody.read, sourceBody.closed)
 	}
+}
+
+func TestClientReleasesHalfOpenProbeWhenBodyFactoryFails(t *testing.T) {
+	now := time.Now()
+	bodyErr := errors.New("body factory failed")
+	client := newTestClient(func(config *Config) {
+		config.Breaker = BreakerConfig{
+			FailureThreshold: 1,
+			OpenFor:          time.Second,
+			Now:              func() time.Time { return now },
+		}
+		config.HTTPClient = newHandlerHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}))
+	})
+	failing, err := http.NewRequest(
+		http.MethodPost,
+		"http://upstream.test/reservations",
+		io.NopCloser(strings.NewReader(`{"sku":"SKU-1"}`)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failing.Header.Set("Idempotency-Key", "reserve-1")
+	failing.GetBody = func() (io.ReadCloser, error) { return nil, bodyErr }
+
+	client.breakerFor(failing).Record(false)
+	now = now.Add(time.Second)
+	if _, err := client.Do(context.Background(), failing, Policy{MaxAttempts: 2}); !errors.Is(err, bodyErr) {
+		t.Fatalf("first Do() error=%v, want body factory error", err)
+	}
+
+	probe, err := http.NewRequest(http.MethodGet, "http://upstream.test/health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(context.Background(), probe, Policy{MaxAttempts: 1})
+	if err != nil {
+		t.Fatalf("second Do() error=%v, want half-open probe admission", err)
+	}
+	defer response.Body.Close()
 }
 
 func TestClientUsesOriginalUnreplayableBodyForSingleAttempt(t *testing.T) {

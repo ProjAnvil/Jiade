@@ -106,7 +106,9 @@ func New(config Config) *Client {
 }
 
 // Do sends request with a total deadline, a per-attempt timeout, bounded retry,
-// and a circuit breaker scoped to the request's upstream.
+// and a circuit breaker scoped to the request's upstream. Like http.Client.Do,
+// it takes ownership of a non-nil request body and closes it on preflight
+// rejection.
 func (client *Client) Do(ctx context.Context, request *http.Request, policy Policy) (*http.Response, error) {
 	if request == nil {
 		return nil, errors.New("client request is nil")
@@ -126,23 +128,24 @@ func (client *Client) Do(ctx context.Context, request *http.Request, policy Poli
 	retryAllowed := isRetryEligible(request)
 	body, err := requestBodyForAttempts(request, retryAllowed, attempts)
 	if err != nil {
-		return nil, err
+		return rejectRequest(request, err)
 	}
 	breaker := client.breakerFor(request)
 
 	for attempt := 1; attempt <= attempts; attempt++ {
 		if err := totalContext.Err(); err != nil {
-			return nil, err
+			return rejectRequest(request, err)
 		}
 		if err := breaker.Allow(); err != nil {
-			return nil, err
+			return rejectRequest(request, err)
 		}
 
 		attemptContext, cancelAttempt := context.WithTimeout(totalContext, client.attemptTimeoutFor(policy))
 		attemptRequest, err := requestForAttempt(request, attemptContext, body)
 		if err != nil {
 			cancelAttempt()
-			return nil, err
+			breaker.Abandon()
+			return rejectRequest(request, err)
 		}
 		response, err := client.httpClient.Do(attemptRequest)
 		if err == nil && attemptContext.Err() != nil {
@@ -189,6 +192,13 @@ func (client *Client) Do(ctx context.Context, request *http.Request, policy Poli
 		}
 	}
 	return nil, context.Canceled // unreachable, retained for compiler completeness
+}
+
+func rejectRequest(request *http.Request, err error) (*http.Response, error) {
+	if request.Body != nil {
+		_ = request.Body.Close()
+	}
+	return nil, err
 }
 
 func (client *Client) retryDelay(attempt int) time.Duration {
