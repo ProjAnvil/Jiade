@@ -8,35 +8,19 @@
 
 ## 内置模板
 
-- `bank`：银行核心系统，7 个服务、7 个库。
-- `commerce`：完整电商后端缩影，覆盖商品/SKU、客户、库存预占、订单、支付退款、拆单履约和物流跟踪，6 个服务、6 个库。
+每个模板都是独立的 Go module，自带 README 与 ARCHITECTURE.md，说明其服务、端口、数据库与操作方式。选一个模板，生成可运行副本：
+
+| 模板 | 是什么 | 文档 |
+|------|--------|------|
+| `bank` | 银行核心系统缩影——7 个 Go 服务、7 个 PostgreSQL 库、复式记账总账、逐日滚存余额。 | [templates/bank/README.md](templates/bank/README.md) · [ARCHITECTURE.md](templates/bank/ARCHITECTURE.md) |
+| `commerce` | 电商后端缩影——6 个 Go 服务、6 个 PostgreSQL 库、RabbitMQ saga、Traefik 网关。 | [templates/commerce/README.md](templates/commerce/README.md) · [ARCHITECTURE.md](templates/commerce/ARCHITECTURE.md) |
 
 ```bash
-jiade init --template commerce --dir ./myshop
-cd myshop && make up
+jiade init --template <bank|commerce> --dir ./myproj
+cd myproj && make up
 ```
 
-## 生成物（`bank` 模板）
-
-一个微缩银行核心系统——**7 个 Go 微服务 + 7 个 PostgreSQL 库**（单实例）。每个服务独占自己的库，跨域读取走 HTTP API：
-
-| 服务 | 端口 | 库 | 内容 |
-|------|------|----|------|
-| core-banking | 18080 | core_db | 活期/定存账户、复式记账总账、逐日余额、写接口（过账/冲正） |
-| customer | 18081 | cust_db | 客户信息、账户关系 |
-| payment | 18082 | pay_db | 商户、转账、消费流水 |
-| reward | 18083 | reward_db | 积分账户/流水、优惠券、活动 |
-| risk | 18084 | risk_db | 风控规则、事件、黑名单 |
-| loan | 18085 | loan_db | 借据、放款、月度还款、五级分类逾期、**逐日余额快照** |
-| wealth | 18086 | wealth_db | 理财产品、**逐日净值游走**、持仓、申赎订单、每日利息 |
-
-每个服务都是同一个四层纵切（`api → service → repo → domain`）。数据引擎要点：
-
-- **确定性 fixture**：同 seed + scale → 完全相同的行。确定性 ID（无 UUID），逐日独立 rng（`seed + 偏移 + 日序`）。
-- **两种数据形态**：三因子事件流（`趋势 × 季节 × 周期`——周末单量 < 工作日）与路径依赖的**逐日滚存快照**（账户余额、借据余额、净值游走）。
-- **数据库按服务隔离**：每个服务只查自己的库，跨域数据通过 HTTP 获取（如 loan 调 customer 完成 `GET /api/v1/loan/accounts/{loan_no}/profile`）。
-- **金额 int64 分，禁 float**；利率/净值/份额等非货币小数按 NUMERIC 文本直存。
-- **生成物自包含**：离开 jiade 也能构建运行——只需 Docker 和 Go。
+详细架构（服务/端口表、数据引擎说明、各模板操作指南）位于各模板目录内——根 README 只做简要总览。
 
 ## 环境要求
 
@@ -60,35 +44,29 @@ go build -o jiade ./cmd/jiade
 ## 快速开始
 
 ```bash
-# 1. 生成工程（模板逐字拷贝）
-jiade init --template bank --dir ./mybank
+# 1. 生成工程（模板逐字拷贝）。
+jiade init --template bank --dir ./mybank     # 或：--template commerce --dir ./myshop
 
-# 2. 起 postgres + 全部 7 个服务（并灌入数据）
+# 2. 起 postgres + 全部服务并灌入数据。
 cd mybank
 jiade up      # docker compose up -d
 jiade seed    # go run ./cmd/seed --scale=dev --reset
 
-# 3. 试一试
-curl localhost:18085/healthz                                          # loan
-curl localhost:18086/healthz                                          # wealth
-curl localhost:18085/api/v1/loan/accounts                             # 借据列表
-curl localhost:18085/api/v1/loan/accounts/LN0000001/profile           # loan 调用 customer
-curl 'localhost:18086/api/v1/wealth/nav?product_code=WP-FIX1'         # 逐日净值序列
-curl 'localhost:18085/api/v1/loan/overdue?overdue_class=可疑'          # 五级分类逾期
+# 3. 探一下 healthz（端口与端点因模板而异——见各模板 README）。
+curl localhost:18080/healthz                    # bank：core-banking
+curl localhost:18100/api/v1/products?limit=1     # commerce：Traefik 网关
 
-# 4. 拆除
+# 4. 拆除。
 jiade down
 ```
 
-生成物离开 jiade 也能跑：工程内 `make up` = postgres → seed → 全服务；`make seed` 重新灌数（`--reset` 重建 7 库）。
-
-灌数规模：`--scale=dev`（约 1/4 量，默认）或 `--scale=full`。同 seed 重跑 `jiade seed` 产出完全相同的数据。
+生成物离开 jiade 也能跑：工程内 `make up` 一步到位（postgres → seed → 全服务），`make seed` 重新灌数。灌数规模与探查端点见各模板 README。
 
 ## 工作原理
 
 - jiade 把所有内置模板打成 tar 内嵌（`internal/template/templates.tar`，改动后用 `go generate ./internal/template` 重打包），`init` 逐字拷出——零模板替换。
 - `jiade up/down` 在目标目录包装 `docker compose up -d` / `down`（先探测 docker/compose/daemon）。
-- `jiade seed` 运行生成物自带的灌数器：建 7 库 → 跑 7 套迁移 → 按依赖序灌各域（core → customer → payment → reward → risk → loan → wealth）。9 个幂等步骤。
+- `jiade seed` 运行生成物自带的灌数器：建库 → 跑迁移 → 按依赖序灌各域。各步骤幂等。
 
 ## 仓库结构
 
@@ -108,12 +86,12 @@ docs/superpowers/    设计 spec 与实施计划
 # jiade 本体
 go build ./... && go test ./...
 
-# bank 模板（独立 module）
+# 某个模板（独立 module，以 bank 为例）
 cd templates/bank
 go build ./... && go test ./...
 go test -tags=integration -p 1 ./...   # 需本机 15432 有 postgres（可用 DB_PORT 覆盖）
 
-# 改动 templates/bank 后重新内嵌：
+# 改动任一模板后重新内嵌：
 go generate ./internal/template
 ```
 

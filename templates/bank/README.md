@@ -2,23 +2,43 @@
 
 简化版银行核心系统——「现实世界大工程的缩影」。本工程由 `jiade init --template bank` 生成，**自包含**：离开 jiade 也可独立运行（仅需 docker + go）。
 
+本模板属于 [jiade](../../README.md) 项目；架构细节见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
 工程包含 **7 服务 + 7 库 + 服务间 HTTP 调用 + 逐日滚存/三因子 fixture**。每个服务只访问自己的数据库：
 
-| 服务 | 端口 | 库 |
-|------|------|----|
-| core-banking | 18080 | core_db |
-| customer | 18081 | cust_db |
-| payment | 18082 | pay_db |
-| reward | 18083 | reward_db |
-| risk | 18084 | risk_db |
-| loan | 18085 | loan_db |
-| wealth | 18086 | wealth_db |
+| 服务 | 端口 | 库 | 内容 |
+|------|------|----|------|
+| core-banking | 18080 | core_db | 活期/定存账户、复式记账总账、逐日余额、写接口（过账/冲正） |
+| customer | 18081 | cust_db | 客户信息、账户关系 |
+| payment | 18082 | pay_db | 商户、转账、消费流水 |
+| reward | 18083 | reward_db | 积分账户/流水、优惠券、活动 |
+| risk | 18084 | risk_db | 风控规则、事件、黑名单 |
+| loan | 18085 | loan_db | 借据、放款、月度还款、五级分类逾期、**逐日余额快照** |
+| wealth | 18086 | wealth_db | 理财产品、**逐日净值游走**、持仓、申赎订单、每日利息 |
+
+## 数据引擎要点
+
+每个服务都是同一个四层纵切（`api → service → repo → domain`）。数据引擎要点：
+
+- **确定性 fixture**：同 seed + scale → 完全相同的行。确定性 ID（无 UUID），逐日独立 rng（`seed + 偏移 + 日序`）。
+- **两种数据形态**：三因子事件流（`趋势 × 季节 × 周期`——周末单量 < 工作日）与路径依赖的**逐日滚存快照**（账户余额、借据余额、净值游走）。
+- **数据库按服务隔离**：每个服务只查自己的库，跨域数据通过 HTTP 获取（如 loan 调 customer 完成 `GET /api/v1/loan/accounts/{loan_no}/profile`）。
+- **金额 int64 分，禁 float**；利率/净值/份额等非货币小数按 NUMERIC 文本直存。
+- **生成物自包含**：离开 jiade 也能构建运行——只需 Docker 和 Go。
 
 ## 快速开始
 
 ```bash
 make up       # docker compose up -d（postgres + 全部 7 服务）
 make seed     # 建 7 库 → 建 7 库表 → 灌 7 域 fixture（9 步，幂等：--reset）
+```
+
+灌数规模：`--scale=dev`（约 1/4 量，默认）或 `--scale=full`。同 seed 重跑 `make seed`（或 `jiade seed`）产出完全相同的数据。`make seed` 走 `--reset`，会重建全部 7 库。
+
+```bash
+make seed                       # dev 规模（默认）
+SCALE=full make seed            # full 规模
+go test -tags=integration -p 1 ./...   # 集成测试，需本机 15432 有 postgres（DB_PORT 可覆盖）
 ```
 
 七服务 healthz：

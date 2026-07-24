@@ -8,37 +8,19 @@ Think of it as scaffolding for *whole systems*, not just code: what you get is a
 
 ## Built-in templates
 
-- `bank`: core banking, seven services and seven databases.
-- `commerce`: a complete commerce backend microcosm covering catalog/SKUs,
-  customers, inventory reservations, orders, payments/refunds, split
-  fulfillment, and tracking; six services and six databases.
+Each template is a standalone Go module that ships its own README and ARCHITECTURE.md describing its services, ports, databases, and operations. Pick one and generate a runnable copy:
+
+| Template | What it is | Docs |
+|----------|------------|------|
+| `bank` | Core banking microcosm — 7 Go services, 7 PostgreSQL databases, double-entry ledger, daily rolling balances. | [templates/bank/README.md](templates/bank/README.md) · [ARCHITECTURE.md](templates/bank/ARCHITECTURE.md) |
+| `commerce` | Commerce backend microcosm — 6 Go services, 6 PostgreSQL databases, RabbitMQ saga, Traefik gateway. | [templates/commerce/README.md](templates/commerce/README.md) · [ARCHITECTURE.md](templates/commerce/ARCHITECTURE.md) |
 
 ```bash
-jiade init --template commerce --dir ./myshop
-cd myshop && make up
+jiade init --template <bank|commerce> --dir ./myproj
+cd myproj && make up
 ```
 
-## What you get (the `bank` template)
-
-A miniature core-banking system — **7 Go microservices + 7 PostgreSQL databases** (single instance). Each service owns its database and cross-domain reads use HTTP APIs:
-
-| Service | Port | Database | Contents |
-|---------|------|----------|----------|
-| core-banking | 18080 | core_db | Demand/fixed accounts, double-entry ledger, daily balances, write API (post/reverse) |
-| customer | 18081 | cust_db | Customer info, account relationships |
-| payment | 18082 | pay_db | Merchants, transfers, consumption txns |
-| reward | 18083 | reward_db | Points accounts/txns, coupons, campaigns |
-| risk | 18084 | risk_db | Risk rules, events, blacklist |
-| loan | 18085 | loan_db | Loan accounts, disbursements, monthly repayment, 5-class overdue, **daily balance snapshots** |
-| wealth | 18086 | wealth_db | Wealth products, **daily NAV walk**, holdings, orders, daily interest |
-
-Every service follows the same four-layer vertical slice (`api → service → repo → domain`). Highlights of the data engine:
-
-- **Deterministic fixtures**: same seed + scale → byte-identical rows. Reproducible IDs (no UUIDs), per-day RNG (`seed + offset + dayOrdinal`).
-- **Two data shapes**: three-factor event streams (`trend × seasonal × cyclical` — weekend volume < weekday) and path-dependent **daily rolling snapshots** (account balances, loan balances, NAV walk).
-- **Database-per-service ownership**: a service queries only its own database and obtains cross-domain data over HTTP (e.g. loan calls customer for `GET /api/v1/loan/accounts/{loan_no}/profile`).
-- **Money is int64 cents**, never float. Rates/NAV/shares (non-monetary decimals) are stored as NUMERIC text.
-- **Self-contained output**: the generated project builds and runs without jiade installed — only Docker and Go are needed.
+The detailed architecture (service/port tables, data-engine notes, per-template operations) lives in each template's own directory — the root README stays a brief overview.
 
 ## Requirements
 
@@ -62,35 +44,30 @@ go build -o jiade ./cmd/jiade
 ## Quickstart
 
 ```bash
-# 1. Generate a project (verbatim copy of the template)
-jiade init --template bank --dir ./mybank
+# 1. Generate a project (verbatim copy of the template).
+jiade init --template bank --dir ./mybank     # or: --template commerce --dir ./myshop
 
-# 2. Start postgres + all 7 services (and seed the data)
+# 2. Bring up postgres + all services and seed the data.
 cd mybank
 jiade up      # docker compose up -d
 jiade seed    # go run ./cmd/seed --scale=dev --reset
 
-# 3. Probe it
-curl localhost:18085/healthz                                          # loan
-curl localhost:18086/healthz                                          # wealth
-curl localhost:18085/api/v1/loan/accounts                             # loan list
-curl localhost:18085/api/v1/loan/accounts/LN0000001/profile           # loan calls customer
-curl 'localhost:18086/api/v1/wealth/nav?product_code=WP-FIX1'         # daily NAV series
-curl 'localhost:18085/api/v1/loan/overdue?overdue_class=可疑'          # 5-class overdue
+# 3. Probe a service healthz (ports and endpoints differ per template —
+#    see the template's README).
+curl localhost:18080/healthz                    # bank: core-banking
+curl localhost:18100/api/v1/products?limit=1     # commerce: Traefik gateway
 
-# 4. Tear down
+# 4. Tear down.
 jiade down
 ```
 
-The generated project also works without jiade: `make up` inside it runs postgres → seed → all services; `make seed` re-seeds (`--reset` rebuilds all 7 databases).
-
-Seed scales: `--scale=dev` (~1/4 volume, default) or `--scale=full`. Re-running `jiade seed` with the same seed reproduces the exact same data.
+The generated project also works without jiade installed: `make up` inside it runs the full bring-up (postgres → seed → services), and `make seed` re-seeds. Seed scales and probe endpoints are documented in each template's README.
 
 ## How it works
 
-- jiade embeds all built-in templates as a tar (`internal/template/templates.tar`, rebuilt with `go generate ./internal/template`) and copies the selected one out verbatim.
+- jiade embeds all built-in templates as a tar (`internal/template/templates.tar`, rebuilt with `go generate ./internal/template`) and copies the selected one out verbatim — no template substitution.
 - `jiade up/down` wraps `docker compose up -d` / `down` in the target directory (with a docker/compose/daemon probe first).
-- `jiade seed` runs the generated project's own seeder: create 7 databases → run 7 migrations → seed each domain in dependency order (core → customer → payment → reward → risk → loan → wealth). 9 idempotent steps.
+- `jiade seed` runs the generated project's own seeder: create databases → run migrations → seed each domain in dependency order. Steps are idempotent.
 
 ## Repository layout
 
@@ -110,12 +87,12 @@ docs/superpowers/    design specs & implementation plans
 # jiade itself
 go build ./... && go test ./...
 
-# the bank template (separate module)
+# a template (separate module, e.g. bank)
 cd templates/bank
 go build ./... && go test ./...
 go test -tags=integration -p 1 ./...   # needs a postgres on localhost:15432 (DB_PORT to override)
 
-# after changing templates/bank, re-embed:
+# after changing any template, re-embed:
 go generate ./internal/template
 ```
 
