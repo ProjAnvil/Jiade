@@ -11,6 +11,19 @@ import (
 
 func NewHandler(service *Service) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /internal/v1/catalog/skus/{sku}", func(w http.ResponseWriter, r *http.Request) {
+		snapshot, err := service.GetCheckoutSnapshot(r.Context(), r.PathValue("sku"))
+		switch {
+		case errors.Is(err, ErrSKUNotFound):
+			writeCatalogProblem(w, r, http.StatusNotFound, "sku_not_found")
+		case errors.Is(err, ErrSKUNotSaleable):
+			writeCatalogProblem(w, r, http.StatusUnprocessableEntity, "sku_not_saleable")
+		case err != nil:
+			writeCatalogProblem(w, r, http.StatusInternalServerError, "internal_error")
+		default:
+			writeCatalogJSON(w, http.StatusOK, snapshot)
+		}
+	})
 	mux.HandleFunc("GET /api/v1/products", func(w http.ResponseWriter, r *http.Request) {
 		pageSize, err := parsePageSize(r)
 		if err != nil {

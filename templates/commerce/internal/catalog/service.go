@@ -15,7 +15,11 @@ const (
 	MaxPageSize     = 100
 )
 
-var ErrProductNotFound = errors.New("catalog product not found")
+var (
+	ErrProductNotFound = errors.New("catalog product not found")
+	ErrSKUNotFound     = errors.New("catalog SKU not found")
+	ErrSKUNotSaleable  = errors.New("catalog SKU not saleable")
+)
 
 type Variant struct {
 	SKU            string         `json:"sku"`
@@ -43,9 +47,27 @@ type ProductPage struct {
 	NextCursor string    `json:"next_cursor,omitempty"`
 }
 
+// CheckoutSnapshot is the immutable catalog projection consumed by order.
+// Availability here means the product/SKU may be sold; stock availability
+// remains owned by inventory.
+type CheckoutSnapshot struct {
+	ProductID        string         `json:"product_id"`
+	SKU              string         `json:"sku"`
+	ProductTitle     string         `json:"product_title"`
+	VariantTitle     string         `json:"variant_title"`
+	Title            string         `json:"title"`
+	Status           string         `json:"status"`
+	AvailableForSale bool           `json:"available_for_sale"`
+	UnitPriceMinor   int64          `json:"unit_price_minor"`
+	Currency         string         `json:"currency"`
+	WeightGrams      int            `json:"weight_grams,omitempty"`
+	Attributes       map[string]any `json:"attributes,omitempty"`
+}
+
 type Store interface {
 	ListProducts(context.Context, string, int) ([]Product, error)
 	GetProduct(context.Context, string) (Product, error)
+	GetCheckoutSnapshot(context.Context, string) (CheckoutSnapshot, error)
 }
 
 type Service struct{ store Store }
@@ -78,6 +100,30 @@ func (service *Service) GetProduct(ctx context.Context, id string) (Product, err
 		return Product{}, ErrProductNotFound
 	}
 	return service.store.GetProduct(ctx, id)
+}
+
+func (service *Service) GetCheckoutSnapshot(ctx context.Context, sku string) (CheckoutSnapshot, error) {
+	sku = strings.TrimSpace(sku)
+	if sku == "" {
+		return CheckoutSnapshot{}, ErrSKUNotFound
+	}
+	snapshot, err := service.store.GetCheckoutSnapshot(ctx, sku)
+	if err != nil {
+		return CheckoutSnapshot{}, err
+	}
+	if snapshot.ProductID == "" || snapshot.SKU != sku || snapshot.ProductTitle == "" ||
+		snapshot.VariantTitle == "" || snapshot.UnitPriceMinor < 0 ||
+		len(snapshot.Currency) != 3 || snapshot.Status != "active" {
+		return CheckoutSnapshot{}, ErrSKUNotSaleable
+	}
+	snapshot.AvailableForSale = true
+	if snapshot.Title == "" {
+		snapshot.Title = snapshot.ProductTitle + " — " + snapshot.VariantTitle
+	}
+	if snapshot.Attributes == nil {
+		snapshot.Attributes = map[string]any{}
+	}
+	return snapshot, nil
 }
 
 type cursorEnvelope struct {

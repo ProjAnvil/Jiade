@@ -83,4 +83,29 @@ func (store *PostgresStore) GetProduct(ctx context.Context, id string) (Product,
 	return product, nil
 }
 
+func (store *PostgresStore) GetCheckoutSnapshot(ctx context.Context, sku string) (CheckoutSnapshot, error) {
+	var snapshot CheckoutSnapshot
+	var attributes []byte
+	err := store.pool.QueryRow(ctx, `
+		SELECT p.product_id, v.sku, p.title, v.title, p.status,
+		       v.price_minor, v.currency, v.weight_grams, v.attributes
+		FROM variant v
+		JOIN product p ON p.product_id = v.product_id
+		WHERE v.sku = $1`, sku).
+		Scan(&snapshot.ProductID, &snapshot.SKU, &snapshot.ProductTitle,
+			&snapshot.VariantTitle, &snapshot.Status, &snapshot.UnitPriceMinor,
+			&snapshot.Currency, &snapshot.WeightGrams, &attributes)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CheckoutSnapshot{}, ErrSKUNotFound
+	}
+	if err != nil {
+		return CheckoutSnapshot{}, fmt.Errorf("query checkout SKU snapshot: %w", err)
+	}
+	if err := json.Unmarshal(attributes, &snapshot.Attributes); err != nil {
+		return CheckoutSnapshot{}, fmt.Errorf("decode checkout SKU attributes: %w", err)
+	}
+	snapshot.Title = snapshot.ProductTitle + " — " + snapshot.VariantTitle
+	return snapshot, nil
+}
+
 var _ Store = (*PostgresStore)(nil)

@@ -20,6 +20,12 @@ CREATE TABLE IF NOT EXISTS cart_item (
   PRIMARY KEY (cart_id, sku)
 );
 
+-- Kept separate so the seeded cart positional insert contract remains stable.
+CREATE TABLE IF NOT EXISTS cart_revision (
+  cart_id text PRIMARY KEY REFERENCES cart(cart_id) ON DELETE CASCADE,
+  version bigint NOT NULL CHECK (version > 0)
+);
+
 -- The first fifteen columns intentionally match the current seed contract.
 CREATE TABLE IF NOT EXISTS sales_order (
   order_id text PRIMARY KEY,
@@ -67,6 +73,15 @@ CREATE TABLE IF NOT EXISTS order_customer_snapshot (
   phone text,
   billing_address jsonb,
   CHECK (billing_address IS NULL OR jsonb_typeof(billing_address) = 'object')
+);
+
+-- Request fingerprints make checkout replay durable without adding columns to
+-- the positional sales_order seed contract.
+CREATE TABLE IF NOT EXISTS checkout_request (
+  idempotency_key text PRIMARY KEY,
+  request_hash text NOT NULL,
+  order_id text NOT NULL UNIQUE REFERENCES sales_order(order_id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS order_item (
