@@ -98,6 +98,8 @@ func TestServiceMigrationsDeclareDomainConstraintsAndIndexes(t *testing.T) {
 			`create\s+unique\s+index\s+if\s+not\s+exists\s+idx_order_discount_order_key[\s\S]*?\(\s*order_id\s*,\s*source\s*\)[\s\S]*?where\s+order_item_id\s+is\s+null`,
 			`create\s+unique\s+index\s+if\s+not\s+exists\s+idx_order_discount_line_key[\s\S]*?\(\s*order_id\s*,\s*order_item_id\s*,\s*source\s*\)[\s\S]*?where\s+order_item_id\s+is\s+not\s+null`,
 			`status\s*<>\s*'completed'[\s\S]*?fulfillment_status\s*=\s*'fulfilled'`,
+			`payment_status\s*<>\s*'failed'\s+or\s+status\s*=\s*'cancelled'`,
+			`fulfillment_status\s*=\s*'unfulfilled'[\s\S]*?status\s+in\s*\(\s*'confirmed'\s*,\s*'completed'\s*,\s*'cancelled'\s*\)`,
 			`idx_order_placed_at[\s\S]*?on\s+sales_order\s*\(\s*placed_at\s+desc`,
 			`idx_order_customer`, `idx_cart_customer_status`, `idx_order_saga_state`,
 		},
@@ -115,6 +117,14 @@ func TestServiceMigrationsDeclareDomainConstraintsAndIndexes(t *testing.T) {
 			`status\s+in\s*\(\s*'pending'\s*,\s*'succeeded'\s*\)`,
 			`drop\s+trigger\s+if\s+exists\s+trg_validate_refund`,
 			`create\s+trigger\s+trg_validate_refund`,
+			`create\s+or\s+replace\s+function\s+validate_payment_intent_update`,
+			`new\.amount_minor\s*<>\s*old\.amount_minor`,
+			`exists\s*\([\s\S]*?from\s+payment_attempt`,
+			`exists\s*\([\s\S]*?from\s+refund`,
+			`old\.status\s+in\s*\(\s*'succeeded'\s*,\s*'partially_refunded'\s*,\s*'refunded'\s*\)`,
+			`new\.status\s+not\s+in\s*\(\s*'succeeded'\s*,\s*'partially_refunded'\s*,\s*'refunded'\s*\)`,
+			`drop\s+trigger\s+if\s+exists\s+trg_validate_payment_intent_update`,
+			`create\s+trigger\s+trg_validate_payment_intent_update`,
 			`idx_payment_created_at[\s\S]*?on\s+payment_intent\s*\(\s*created_at\s+desc`,
 		},
 		"fulfillment_db.sql": {
@@ -131,6 +141,22 @@ func TestServiceMigrationsDeclareDomainConstraintsAndIndexes(t *testing.T) {
 				requirePattern(t, migration, pattern)
 			}
 		})
+	}
+}
+
+func TestOrderStateMatrixAllowsCompensationAndReturns(t *testing.T) {
+	migration := readMigration(t, "order_db.sql")
+	for _, forbidden := range []string{
+		`status\s*<>\s*'cancelled'\s+or\s+fulfillment_status\s*=\s*'unfulfilled'`,
+		`payment_status\s+not\s+in\s*\(\s*'partially_refunded'\s*,\s*'refunded'\s*\)\s+or\s+status\s*=\s*'cancelled'`,
+	} {
+		matched, err := regexp.MatchString(`(?s)`+forbidden, migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if matched {
+			t.Fatalf("migration retains over-restrictive state implication %q", forbidden)
+		}
 	}
 }
 

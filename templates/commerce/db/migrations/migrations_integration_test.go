@@ -105,7 +105,7 @@ func assertDomainConstraintFixtures(t *testing.T, ctx context.Context, pool *pgx
 	case "inventory_db.sql":
 		if _, err := connection.Exec(ctx, `
 			INSERT INTO location VALUES ('loc-generated', 'Generated Test', 'warehouse', 1);
-			INSERT INTO inventory_level (sku, location_id, on_hand, reserved, updated_at)
+			INSERT INTO inventory_level
 			VALUES ('sku-generated', 'loc-generated', 10, 3, now())`); err != nil {
 			t.Fatal(err)
 		}
@@ -157,6 +157,19 @@ func assertDomainConstraintFixtures(t *testing.T, ctx context.Context, pool *pgx
 				idempotency_key, placed_at
 			) VALUES ('bad-combination', 'NO-BAD', 'customer', 'completed', 'paid',
 				'unfulfilled', 'CNY', 100, 0, 0, 0, 100, '{}', 'bad-combination', now())`)
+		if _, err := connection.Exec(ctx, `
+			INSERT INTO sales_order (
+				order_id, order_no, customer_id, status, payment_status,
+				fulfillment_status, currency, subtotal_minor, discount_minor,
+				shipping_minor, tax_minor, total_minor, shipping_address,
+				idempotency_key, placed_at
+			) VALUES
+				('cancelled-partial', 'NO-CP', 'customer', 'cancelled', 'refunded',
+				 'partial', 'CNY', 100, 0, 0, 0, 100, '{}', 'cancelled-partial', now()),
+				('completed-refunded', 'NO-CR', 'customer', 'completed', 'refunded',
+				 'fulfilled', 'CNY', 100, 0, 0, 0, 100, '{}', 'completed-refunded', now())`); err != nil {
+			t.Fatalf("legal compensation/return states rejected: %v", err)
+		}
 	case "payment_db.sql":
 		if _, err := connection.Exec(ctx, `
 			INSERT INTO payment_intent
@@ -183,6 +196,29 @@ func assertDomainConstraintFixtures(t *testing.T, ctx context.Context, pool *pgx
 		expectRejected(t, ctx, connection, `
 			INSERT INTO refund VALUES
 				('refund-41', 'pi-success', 41, 'succeeded', 'test', 'refund-41-key', now())`)
+		expectRejected(t, ctx, connection, `
+			UPDATE payment_intent SET amount_minor = 99
+			WHERE payment_intent_id = 'pi-success'`)
+		expectRejected(t, ctx, connection, `
+			UPDATE payment_intent SET status = 'failed'
+			WHERE payment_intent_id = 'pi-success'`)
+		expectRejected(t, ctx, connection, `
+			UPDATE refund SET amount_minor = 101 WHERE refund_id = 'refund-60'`)
+		expectRejected(t, ctx, connection, `
+			UPDATE refund SET payment_intent_id = 'pi-processing'
+			WHERE refund_id = 'refund-60'`)
+		if _, err := connection.Exec(ctx, `
+			INSERT INTO refund VALUES
+				('refund-status', 'pi-success', 40, 'failed', 'test', 'refund-status-key', now())`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := connection.Exec(ctx, `
+			UPDATE refund SET status = 'succeeded' WHERE refund_id = 'refund-status'`); err != nil {
+			t.Fatalf("legal refund status update rejected: %v", err)
+		}
+		expectRejected(t, ctx, connection, `
+			UPDATE payment_intent SET status = 'processing'
+			WHERE payment_intent_id = 'pi-success'`)
 	case "fulfillment_db.sql":
 		if _, err := connection.Exec(ctx, `
 			INSERT INTO fulfillment_order VALUES

@@ -144,6 +144,50 @@ ON refund
 FOR EACH ROW
 EXECUTE FUNCTION validate_refund();
 
+CREATE OR REPLACE FUNCTION validate_payment_intent_update()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.amount_minor <> OLD.amount_minor
+     AND (
+       EXISTS (
+         SELECT 1 FROM payment_attempt
+         WHERE payment_intent_id = OLD.payment_intent_id
+       )
+       OR EXISTS (
+         SELECT 1 FROM refund
+         WHERE payment_intent_id = OLD.payment_intent_id
+       )
+     ) THEN
+    RAISE EXCEPTION 'payment intent amount is immutable after financial activity';
+  END IF;
+
+  IF OLD.status IN ('succeeded', 'partially_refunded', 'refunded')
+     AND NEW.status NOT IN ('succeeded', 'partially_refunded', 'refunded') THEN
+    RAISE EXCEPTION 'captured payment intent status cannot regress';
+  END IF;
+
+  IF NEW.status NOT IN ('succeeded', 'partially_refunded', 'refunded')
+     AND EXISTS (
+       SELECT 1 FROM refund
+       WHERE payment_intent_id = OLD.payment_intent_id
+         AND status IN ('pending', 'succeeded')
+     ) THEN
+    RAISE EXCEPTION 'payment intent with active refunds must remain captured';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_validate_payment_intent_update ON payment_intent;
+CREATE TRIGGER trg_validate_payment_intent_update
+BEFORE UPDATE OF amount_minor, status
+ON payment_intent
+FOR EACH ROW
+EXECUTE FUNCTION validate_payment_intent_update();
+
 CREATE TABLE IF NOT EXISTS webhook_inbox (
   provider_event_id text PRIMARY KEY,
   event_type text NOT NULL,

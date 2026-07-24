@@ -44,11 +44,9 @@ CREATE TABLE IF NOT EXISTS sales_order (
     payment_status IN ('paid', 'partially_refunded', 'refunded')
     AND fulfillment_status = 'fulfilled'
   )),
-  CHECK (status <> 'cancelled' OR fulfillment_status = 'unfulfilled'),
   CHECK (payment_status <> 'failed' OR status = 'cancelled'),
-  CHECK (payment_status NOT IN ('partially_refunded', 'refunded') OR status = 'cancelled'),
   CHECK (fulfillment_status = 'unfulfilled' OR (
-    status IN ('confirmed', 'completed')
+    status IN ('confirmed', 'completed', 'cancelled')
     AND payment_status IN ('paid', 'partially_refunded', 'refunded')
   ))
 );
