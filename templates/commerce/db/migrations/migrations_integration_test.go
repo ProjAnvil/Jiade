@@ -219,6 +219,28 @@ func assertDomainConstraintFixtures(t *testing.T, ctx context.Context, pool *pgx
 		expectRejected(t, ctx, connection, `
 			UPDATE payment_intent SET status = 'processing'
 			WHERE payment_intent_id = 'pi-success'`)
+		if _, err := connection.Exec(ctx, `
+			UPDATE payment_intent SET status = 'refunded'
+			WHERE payment_intent_id = 'pi-success'`); err != nil {
+			t.Fatalf("forward status transition rejected: %v", err)
+		}
+		expectRejected(t, ctx, connection, `
+			UPDATE payment_intent SET status = 'succeeded'
+			WHERE payment_intent_id = 'pi-success'`)
+		expectRejected(t, ctx, connection, `
+			UPDATE payment_intent SET status = 'partially_refunded'
+			WHERE payment_intent_id = 'pi-success'`)
+		if _, err := connection.Exec(ctx, `
+			INSERT INTO payment_intent
+				(payment_intent_id, order_id, amount_minor, currency, status, provider, idempotency_key, created_at)
+			VALUES ('pi-partial', 'order-partial', 100, 'CNY', 'succeeded', 'test', 'pi-partial-key', now());
+			UPDATE payment_intent SET status = 'partially_refunded'
+			WHERE payment_intent_id = 'pi-partial'`); err != nil {
+			t.Fatal(err)
+		}
+		expectRejected(t, ctx, connection, `
+			UPDATE payment_intent SET status = 'succeeded'
+			WHERE payment_intent_id = 'pi-partial'`)
 	case "fulfillment_db.sql":
 		if _, err := connection.Exec(ctx, `
 			INSERT INTO fulfillment_order VALUES

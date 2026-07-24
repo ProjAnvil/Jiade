@@ -61,7 +61,8 @@ BEGIN
   SELECT amount_minor
     INTO intent_amount
     FROM payment_intent
-    WHERE payment_intent_id = NEW.payment_intent_id;
+    WHERE payment_intent_id = NEW.payment_intent_id
+    FOR UPDATE;
 
   IF NOT FOUND THEN
     RAISE EXCEPTION 'payment intent % does not exist', NEW.payment_intent_id;
@@ -163,8 +164,14 @@ BEGIN
     RAISE EXCEPTION 'payment intent amount is immutable after financial activity';
   END IF;
 
-  IF OLD.status IN ('succeeded', 'partially_refunded', 'refunded')
+  IF OLD.status = 'succeeded'
      AND NEW.status NOT IN ('succeeded', 'partially_refunded', 'refunded') THEN
+    RAISE EXCEPTION 'captured payment intent status cannot regress';
+  ELSIF OLD.status = 'partially_refunded'
+     AND NEW.status NOT IN ('partially_refunded', 'refunded') THEN
+    RAISE EXCEPTION 'partially refunded payment intent status cannot regress';
+  ELSIF OLD.status = 'refunded'
+     AND NEW.status <> 'refunded' THEN
     RAISE EXCEPTION 'captured payment intent status cannot regress';
   END IF;
 

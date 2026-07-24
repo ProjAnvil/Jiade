@@ -121,8 +121,9 @@ func TestServiceMigrationsDeclareDomainConstraintsAndIndexes(t *testing.T) {
 			`new\.amount_minor\s*<>\s*old\.amount_minor`,
 			`exists\s*\([\s\S]*?from\s+payment_attempt`,
 			`exists\s*\([\s\S]*?from\s+refund`,
-			`old\.status\s+in\s*\(\s*'succeeded'\s*,\s*'partially_refunded'\s*,\s*'refunded'\s*\)`,
-			`new\.status\s+not\s+in\s*\(\s*'succeeded'\s*,\s*'partially_refunded'\s*,\s*'refunded'\s*\)`,
+			`old\.status\s*=\s*'succeeded'[\s\S]*?new\.status\s+not\s+in\s*\(\s*'succeeded'\s*,\s*'partially_refunded'\s*,\s*'refunded'\s*\)`,
+			`old\.status\s*=\s*'partially_refunded'[\s\S]*?new\.status\s+not\s+in\s*\(\s*'partially_refunded'\s*,\s*'refunded'\s*\)`,
+			`old\.status\s*=\s*'refunded'[\s\S]*?new\.status\s*<>\s*'refunded'`,
 			`drop\s+trigger\s+if\s+exists\s+trg_validate_payment_intent_update`,
 			`create\s+trigger\s+trg_validate_payment_intent_update`,
 			`idx_payment_created_at[\s\S]*?on\s+payment_intent\s*\(\s*created_at\s+desc`,
@@ -142,6 +143,12 @@ func TestServiceMigrationsDeclareDomainConstraintsAndIndexes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPaymentAttemptValidationLocksParentIntent(t *testing.T) {
+	migration := readMigration(t, "payment_db.sql")
+	body := functionBody(t, migration, "validate_payment_attempt")
+	requirePattern(t, body, `from\s+payment_intent[\s\S]*?for\s+update`)
 }
 
 func TestOrderStateMatrixAllowsCompensationAndReturns(t *testing.T) {
@@ -287,6 +294,20 @@ func tableColumns(t *testing.T, migration, table string) []string {
 		}
 	}
 	return columns
+}
+
+func functionBody(t *testing.T, migration, function string) string {
+	t.Helper()
+	startMarker := "create or replace function " + function
+	start := strings.Index(migration, startMarker)
+	if start < 0 {
+		t.Fatalf("function %s not found", function)
+	}
+	end := strings.Index(migration[start:], "$$;")
+	if end < 0 {
+		t.Fatalf("function %s terminator not found", function)
+	}
+	return migration[start : start+end+3]
 }
 
 func readMigration(t *testing.T, filename string) string {
