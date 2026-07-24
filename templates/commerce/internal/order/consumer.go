@@ -15,8 +15,9 @@ const orderSagaConsumer = "order-saga"
 // Consumer applies payment and fulfillment results through the transactional
 // Inbox owned by PostgresStore.
 type Consumer struct {
-	store  *PostgresStore
-	policy messaging.RetryPolicy
+	store      *PostgresStore
+	policy     messaging.RetryPolicy
+	retryQueue string
 }
 
 type DeliveryRouting struct {
@@ -28,6 +29,13 @@ type DeliveryRouting struct {
 
 func NewConsumer(store *PostgresStore, policy messaging.RetryPolicy) *Consumer {
 	return &Consumer{store: store, policy: policy}
+}
+
+func (consumer *Consumer) WithRetryQueue(queue string) *Consumer {
+	if consumer != nil {
+		consumer.retryQueue = queue
+	}
+	return consumer
 }
 
 func (consumer *Consumer) Handle(ctx context.Context, event messaging.Event) error {
@@ -48,7 +56,7 @@ func (consumer *Consumer) ProcessDelivery(ctx context.Context, delivery amqp.Del
 	if err != nil {
 		return fmt.Errorf("begin order delivery: %w", err)
 	}
-	return messaging.ProcessRabbitDelivery(ctx, tx, orderSagaConsumer, delivery,
+	return messaging.ProcessRabbitDeliveryForRetryQueue(ctx, tx, orderSagaConsumer, delivery, consumer.retryQueue,
 		func(event messaging.Event) error {
 			return consumer.store.applyEvent(ctx, tx, event)
 		}, consumer.policy)
@@ -60,6 +68,7 @@ func (consumer *Consumer) ProcessDelivery(ctx context.Context, delivery amqp.Del
 func RunConsumer(
 	ctx context.Context,
 	channel *amqp.Channel,
+	router confirmedDeliveryRouter,
 	queue string,
 	consumer *Consumer,
 	routing DeliveryRouting,
@@ -69,6 +78,9 @@ func RunConsumer(
 	}
 	if consumer == nil {
 		return errors.New("order consumer is nil")
+	}
+	if router == nil {
+		return errors.New("order confirmed delivery router is nil")
 	}
 	if err := channel.Qos(20, 0, false); err != nil {
 		return fmt.Errorf("configure order consumer qos: %w", err)
@@ -90,7 +102,7 @@ func RunConsumer(
 			}
 			routed := delivery
 			routed.Acknowledger = &retryAcknowledger{
-				original: delivery.Acknowledger, publisher: channel,
+				original: delivery.Acknowledger, publisher: router,
 				delivery: delivery, routing: routing, ctx: ctx,
 			}
 			_ = consumer.ProcessDelivery(ctx, routed)
@@ -98,8 +110,8 @@ func RunConsumer(
 	}
 }
 
-type retryPublisher interface {
-	PublishWithContext(context.Context, string, string, bool, bool, amqp.Publishing) error
+type confirmedDeliveryRouter interface {
+	Route(context.Context, string, string, amqp.Publishing) error
 }
 
 // retryAcknowledger gives Task 3's Nack and Reject settlements distinct broker
@@ -108,7 +120,7 @@ type retryPublisher interface {
 // is accepted by the channel.
 type retryAcknowledger struct {
 	original  amqp.Acknowledger
-	publisher retryPublisher
+	publisher confirmedDeliveryRouter
 	delivery  amqp.Delivery
 	routing   DeliveryRouting
 	ctx       context.Context
@@ -153,7 +165,7 @@ func (acknowledger *retryAcknowledger) publishThenAck(tag uint64, exchange, key 
 		ctx = context.Background()
 	}
 	delivery := acknowledger.delivery
-	if err := acknowledger.publisher.PublishWithContext(ctx, exchange, key, true, false, amqp.Publishing{
+	if err := acknowledger.publisher.Route(ctx, exchange, key, amqp.Publishing{
 		Headers: delivery.Headers, ContentType: delivery.ContentType,
 		ContentEncoding: delivery.ContentEncoding, DeliveryMode: amqp.Persistent,
 		Priority: delivery.Priority, CorrelationId: delivery.CorrelationId,
@@ -227,10 +239,48 @@ type publisherAvailability interface {
 	Available() bool
 }
 
+type combinedAvailability []publisherAvailability
+
+func (publishers combinedAvailability) Available() bool {
+	if len(publishers) == 0 {
+		return false
+	}
+	for _, publisher := range publishers {
+		if publisher == nil || !publisher.Available() {
+			return false
+		}
+	}
+	return true
+}
+
+func CombinePublisherAvailability(publishers ...publisherAvailability) publisherAvailability {
+	return combinedAvailability(publishers)
+}
+
 func NewRuntimeReadiness(
 	database func(context.Context) error,
 	publisher publisherAvailability,
 	brokerClosed func() bool,
+	workers ...*WorkerLifecycle,
+) func(context.Context) error {
+	return newRuntimeReadiness(database, publisher, brokerClosed, nil, workers...)
+}
+
+func NewRuntimeReadinessWithDependencies(
+	database func(context.Context) error,
+	publisher publisherAvailability,
+	brokerClosed func() bool,
+	dependencies []func(context.Context) error,
+	workers ...*WorkerLifecycle,
+) func(context.Context) error {
+	return newRuntimeReadiness(database, publisher, brokerClosed, dependencies, workers...)
+}
+
+func newRuntimeReadiness(
+	database func(context.Context) error,
+	publisher publisherAvailability,
+	brokerClosed func() bool,
+	dependencies []func(context.Context) error,
 	workers ...*WorkerLifecycle,
 ) func(context.Context) error {
 	return func(ctx context.Context) error {
@@ -245,6 +295,14 @@ func NewRuntimeReadiness(
 		}
 		if publisher == nil || !publisher.Available() {
 			return errors.New("order publisher is unavailable")
+		}
+		for index, dependency := range dependencies {
+			if dependency == nil {
+				return fmt.Errorf("order dependency %d readiness is unavailable", index)
+			}
+			if err := dependency(ctx); err != nil {
+				return fmt.Errorf("order dependency %d is unavailable: %w", index, err)
+			}
 		}
 		if len(workers) == 0 {
 			return errors.New("order workers are unavailable")

@@ -80,8 +80,41 @@ CREATE TABLE IF NOT EXISTS order_customer_snapshot (
 CREATE TABLE IF NOT EXISTS checkout_request (
   idempotency_key text PRIMARY KEY,
   request_hash text NOT NULL,
-  order_id text NOT NULL UNIQUE REFERENCES sales_order(order_id) ON DELETE CASCADE,
-  created_at timestamptz NOT NULL
+  phase text NOT NULL CHECK (phase IN (
+    'claimed', 'prepared', 'reserved', 'committed',
+    'compensation_needed', 'failed'
+  )),
+  cart_id text NOT NULL,
+  cart_version bigint NOT NULL CHECK (cart_version > 0),
+  order_id text NOT NULL UNIQUE,
+  prepared_order jsonb,
+  prepared_reservation jsonb,
+  reservation_result jsonb,
+  failure_code text,
+  lease_until timestamptz NOT NULL,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  CHECK (updated_at >= created_at),
+  CHECK (prepared_order IS NULL OR jsonb_typeof(prepared_order) = 'object'),
+  CHECK (prepared_reservation IS NULL OR jsonb_typeof(prepared_reservation) = 'object'),
+  CHECK (reservation_result IS NULL OR jsonb_typeof(reservation_result) = 'object')
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkout_request_phase
+  ON checkout_request(phase, updated_at, idempotency_key)
+  WHERE phase NOT IN ('committed', 'failed');
+
+-- Generic command replay records are companion state so seeded positional
+-- inserts remain unchanged.
+CREATE TABLE IF NOT EXISTS order_command (
+  command_scope text NOT NULL,
+  idempotency_key text NOT NULL,
+  request_hash text NOT NULL,
+  resource_id text NOT NULL,
+  response jsonb NOT NULL,
+  created_at timestamptz NOT NULL,
+  PRIMARY KEY (command_scope, idempotency_key),
+  CHECK (jsonb_typeof(response) = 'object')
 );
 
 CREATE TABLE IF NOT EXISTS order_item (
@@ -102,6 +135,57 @@ CREATE INDEX IF NOT EXISTS idx_order_item_order
   ON order_item(order_id, order_item_id);
 CREATE INDEX IF NOT EXISTS idx_order_item_sku
   ON order_item(sku, order_id);
+
+CREATE TABLE IF NOT EXISTS order_item_snapshot (
+  order_item_id text PRIMARY KEY REFERENCES order_item(order_item_id) ON DELETE CASCADE,
+  product_id text NOT NULL,
+  product_title text NOT NULL,
+  variant_title text NOT NULL,
+  attributes jsonb NOT NULL,
+  weight_grams integer NOT NULL CHECK (weight_grams >= 0),
+  channel text NOT NULL,
+  currency char(3) NOT NULL,
+  CHECK (jsonb_typeof(attributes) = 'object')
+);
+
+CREATE TABLE IF NOT EXISTS order_inventory_allocation (
+  order_id text NOT NULL REFERENCES sales_order(order_id) ON DELETE CASCADE,
+  allocation_id text NOT NULL,
+  sku text NOT NULL,
+  quantity integer NOT NULL CHECK (quantity > 0),
+  status text NOT NULL CHECK (status IN ('active', 'committed', 'released', 'expired')),
+  PRIMARY KEY (order_id, allocation_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_order_inventory_allocation_status
+  ON order_inventory_allocation(order_id, status, allocation_id);
+
+CREATE TABLE IF NOT EXISTS order_tax_line (
+  tax_line_id text PRIMARY KEY,
+  order_id text NOT NULL REFERENCES sales_order(order_id) ON DELETE CASCADE,
+  order_item_id text REFERENCES order_item(order_item_id) ON DELETE CASCADE,
+  jurisdiction text NOT NULL,
+  rate_basis_points integer NOT NULL CHECK (rate_basis_points >= 0),
+  taxable_minor bigint NOT NULL CHECK (taxable_minor >= 0),
+  amount_minor bigint NOT NULL CHECK (amount_minor >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_order_tax_line_order
+  ON order_tax_line(order_id, tax_line_id);
+
+CREATE TABLE IF NOT EXISTS order_payment_projection (
+  order_id text PRIMARY KEY REFERENCES sales_order(order_id) ON DELETE CASCADE,
+  captured_minor bigint NOT NULL DEFAULT 0 CHECK (captured_minor >= 0),
+  refunded_minor bigint NOT NULL DEFAULT 0 CHECK (refunded_minor >= 0),
+  currency char(3) NOT NULL,
+  updated_at timestamptz NOT NULL,
+  CHECK (refunded_minor <= captured_minor)
+);
+
+CREATE TABLE IF NOT EXISTS order_checkout_detail (
+  order_id text PRIMARY KEY REFERENCES sales_order(order_id) ON DELETE CASCADE,
+  coupon_code text
+);
 
 CREATE TABLE IF NOT EXISTS order_discount_allocation (
   allocation_id text PRIMARY KEY,
@@ -155,7 +239,13 @@ CREATE INDEX IF NOT EXISTS idx_order_saga_state
 
 CREATE TABLE IF NOT EXISTS order_saga_step (
   saga_id text NOT NULL REFERENCES order_saga(saga_id) ON DELETE CASCADE,
-  step text NOT NULL CHECK (step IN ('customer_validated', 'catalog_snapshotted', 'inventory_reserved', 'payment_requested', 'inventory_released', 'refund_requested', 'fulfillment_requested')),
+  step text NOT NULL CHECK (step IN (
+    'customer_validated', 'catalog_snapshotted', 'inventory_reserved',
+    'payment_requested', 'inventory_commit_requested', 'inventory_committed',
+    'inventory_release_requested', 'inventory_released', 'refund_requested',
+    'fulfillment_requested', 'fulfillment_cancel_requested',
+    'fulfillment_cancelled'
+  )),
   status text NOT NULL CHECK (status IN ('pending', 'completed', 'failed', 'compensated')),
   event_id uuid,
   error_code text,

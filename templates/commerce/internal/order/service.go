@@ -49,13 +49,15 @@ type CartLine struct {
 }
 
 type Cart struct {
-	ID         string     `json:"cart_id"`
-	CustomerID string     `json:"customer_id"`
-	Status     CartStatus `json:"status"`
-	Currency   string     `json:"currency"`
-	Version    int64      `json:"version"`
-	ExpiresAt  time.Time  `json:"expires_at"`
-	Lines      []CartLine `json:"lines"`
+	ID             string     `json:"cart_id"`
+	CustomerID     string     `json:"customer_id"`
+	Status         CartStatus `json:"status"`
+	Currency       string     `json:"currency"`
+	Version        int64      `json:"version"`
+	ExpiresAt      time.Time  `json:"expires_at"`
+	Lines          []CartLine `json:"lines"`
+	IdempotencyKey string     `json:"-"`
+	Replayed       bool       `json:"-"`
 }
 
 type CartMutationAction string
@@ -72,6 +74,7 @@ type CartMutation struct {
 	Quantity        int64
 	ExpectedVersion int64
 	Action          CartMutationAction
+	IdempotencyKey  string
 }
 
 type CustomerSnapshot struct {
@@ -83,20 +86,34 @@ type CustomerSnapshot struct {
 }
 
 type CatalogSnapshot struct {
-	SKU            string `json:"sku"`
-	Title          string `json:"title"`
-	UnitPriceMinor int64  `json:"unit_price_minor"`
-	Currency       string `json:"currency"`
+	ProductID      string         `json:"product_id"`
+	SKU            string         `json:"sku"`
+	ProductTitle   string         `json:"product_title"`
+	VariantTitle   string         `json:"variant_title"`
+	Title          string         `json:"title"`
+	Attributes     map[string]any `json:"attributes,omitempty"`
+	WeightGrams    int            `json:"weight_grams"`
+	UnitPriceMinor int64          `json:"unit_price_minor"`
+	Currency       string         `json:"currency"`
+	Channel        string         `json:"channel"`
 }
 
 type OrderLine struct {
-	ID             string `json:"order_item_id"`
-	SKU            string `json:"sku"`
-	Title          string `json:"title"`
-	Quantity       int64  `json:"quantity"`
-	UnitPriceMinor int64  `json:"unit_price_minor"`
-	DiscountMinor  int64  `json:"discount_minor"`
-	TotalMinor     int64  `json:"total_minor"`
+	ID             string         `json:"order_item_id"`
+	SKU            string         `json:"sku"`
+	Title          string         `json:"title"`
+	Quantity       int64          `json:"quantity"`
+	UnitPriceMinor int64          `json:"unit_price_minor"`
+	DiscountMinor  int64          `json:"discount_minor"`
+	TotalMinor     int64          `json:"total_minor"`
+	ProductID      string         `json:"product_id,omitempty"`
+	ProductTitle   string         `json:"product_title,omitempty"`
+	VariantTitle   string         `json:"variant_title,omitempty"`
+	Attributes     map[string]any `json:"attributes,omitempty"`
+	WeightGrams    int            `json:"weight_grams,omitempty"`
+	Channel        string         `json:"channel,omitempty"`
+	TaxMinor       int64          `json:"tax_minor,omitempty"`
+	TaxRateBPS     int64          `json:"tax_rate_basis_points,omitempty"`
 }
 
 type Order struct {
@@ -118,6 +135,7 @@ type Order struct {
 	IdempotencyKey    string           `json:"-"`
 	PlacedAt          time.Time        `json:"placed_at"`
 	SagaState         string           `json:"saga_state,omitempty"`
+	CouponCode        string           `json:"coupon_code,omitempty"`
 	Replayed          bool             `json:"-"`
 }
 
@@ -138,23 +156,38 @@ type CheckoutCommand struct {
 	RequestID      string
 	Traceparent    string
 	CorrelationID  string
+	CouponCode     string
 }
 
 type CreateCartCommand struct {
-	CustomerID string
-	Currency   string
+	CustomerID     string
+	Currency       string
+	IdempotencyKey string
 }
 
 type CancelCommand struct {
-	OrderID       string
-	Reason        string
-	CorrelationID string
-	CausationID   string
+	OrderID        string
+	Reason         string
+	IdempotencyKey string
+	CorrelationID  string
+	CausationID    string
 }
 
 type CheckoutRecord struct {
-	RequestHash string
-	Order       Order
+	RequestHash         string
+	Order               Order
+	Phase               string
+	PreparedOrder       Order
+	PreparedReservation ReservationCommand
+	ReservationResult   ReservationResult
+}
+
+type CheckoutClaim struct {
+	IdempotencyKey string
+	RequestHash    string
+	Cart           Cart
+	OrderID        string
+	Now            time.Time
 }
 
 type CheckoutCommit struct {
@@ -174,6 +207,18 @@ type ReservationCommand struct {
 	OrderID        string            `json:"order_id"`
 	IdempotencyKey string            `json:"-"`
 	Lines          []ReservationLine `json:"lines"`
+}
+
+type ReservationAllocation struct {
+	AllocationID string `json:"reservation_id"`
+	SKU          string `json:"sku"`
+	Quantity     int64  `json:"quantity"`
+	Status       string `json:"status"`
+}
+
+type ReservationResult struct {
+	OrderID     string                  `json:"order_id"`
+	Allocations []ReservationAllocation `json:"allocations"`
 }
 
 type Propagation struct {
@@ -208,6 +253,17 @@ type InventoryClient interface {
 	Release(context.Context, string, Propagation) error
 }
 
+type durableCheckoutStore interface {
+	ClaimCheckout(context.Context, CheckoutClaim) (CheckoutRecord, bool, error)
+	SaveCheckoutPrepared(context.Context, string, string, Order, ReservationCommand) error
+	SaveCheckoutReserved(context.Context, string, string, ReservationResult) error
+	FailCheckout(context.Context, string, string, string) error
+}
+
+type reservationResultClient interface {
+	ReserveResult(context.Context, ReservationCommand, Propagation) (ReservationResult, error)
+}
+
 type ServiceOptions struct {
 	Clock func() time.Time
 }
@@ -231,14 +287,17 @@ func NewService(store Store, customer CustomerClient, catalog CatalogClient, inv
 func (service *Service) CreateCart(ctx context.Context, command CreateCartCommand) (Cart, error) {
 	command.CustomerID = strings.TrimSpace(command.CustomerID)
 	command.Currency = strings.ToUpper(strings.TrimSpace(command.Currency))
-	if command.CustomerID == "" || len(command.Currency) != 3 {
+	command.IdempotencyKey = strings.TrimSpace(command.IdempotencyKey)
+	if command.CustomerID == "" || len(command.Currency) != 3 ||
+		command.IdempotencyKey == "" || len(command.IdempotencyKey) > 200 {
 		return Cart{}, ErrInvalidCommand
 	}
 	now := service.clock().UTC()
 	cart := Cart{
-		ID: "CART-" + randomHex(8), CustomerID: command.CustomerID, Status: CartActive,
+		ID:         deterministicChildID("CART", "create", command.IdempotencyKey, 0),
+		CustomerID: command.CustomerID, Status: CartActive,
 		Currency: command.Currency, Version: 1, ExpiresAt: now.Add(24 * time.Hour),
-		Lines: []CartLine{},
+		Lines: []CartLine{}, IdempotencyKey: command.IdempotencyKey,
 	}
 	return service.store.CreateCart(ctx, cart)
 }
@@ -257,7 +316,10 @@ func (service *Service) GetCart(ctx context.Context, id string) (Cart, error) {
 func (service *Service) MutateCart(ctx context.Context, command CartMutation) (Cart, error) {
 	command.CartID = strings.TrimSpace(command.CartID)
 	command.SKU = strings.TrimSpace(command.SKU)
+	command.IdempotencyKey = strings.TrimSpace(command.IdempotencyKey)
 	if command.CartID == "" || command.SKU == "" || command.ExpectedVersion <= 0 ||
+		command.IdempotencyKey == "" ||
+		len(command.IdempotencyKey) > 200 ||
 		(command.Action != CartRemoveLine && command.Quantity <= 0) {
 		return Cart{}, ErrInvalidCommand
 	}
@@ -314,54 +376,117 @@ func (service *Service) Checkout(ctx context.Context, command CheckoutCommand) (
 	if err := validateCheckoutCommand(command); err != nil {
 		return Order{}, err
 	}
-	requestHash := checkoutRequestHash(command)
+	cart, err := service.store.GetCart(ctx, command.CartID)
+	if err != nil {
+		return Order{}, err
+	}
+	now := service.clock().UTC()
+	requestHash := checkoutRequestHash(command, cart)
 	if existing, found, err := service.store.FindCheckout(ctx, command.IdempotencyKey); err != nil {
 		return Order{}, fmt.Errorf("find checkout replay: %w", err)
-	} else if found {
+	} else if found && (existing.Phase == "committed" || existing.Order.OrderID != "") {
 		if existing.RequestHash != requestHash {
 			return Order{}, ErrIdempotencyConflict
 		}
 		existing.Order.Replayed = true
 		return canonicalOrder(existing.Order), nil
 	}
+	if err := validateCheckoutCart(cart, now); err != nil {
+		return Order{}, err
+	}
+	if durable, ok := service.store.(durableCheckoutStore); ok {
+		return service.checkoutDurably(ctx, durable, command, cart, requestHash, now)
+	}
+	return service.checkoutLegacy(ctx, command, cart, requestHash, now)
+}
 
-	cart, err := service.store.GetCart(ctx, command.CartID)
+func (service *Service) checkoutDurably(
+	ctx context.Context,
+	store durableCheckoutStore,
+	command CheckoutCommand,
+	cart Cart,
+	requestHash string,
+	now time.Time,
+) (Order, error) {
+	orderID := deterministicOrderID(command.IdempotencyKey)
+	record, owned, err := store.ClaimCheckout(ctx, CheckoutClaim{
+		IdempotencyKey: command.IdempotencyKey, RequestHash: requestHash,
+		Cart: cart, OrderID: orderID, Now: now,
+	})
 	if err != nil {
 		return Order{}, err
 	}
-	now := service.clock().UTC()
-	if err := validateCheckoutCart(cart, now); err != nil {
-		return Order{}, err
+	if record.RequestHash != requestHash {
+		return Order{}, ErrIdempotencyConflict
+	}
+	if record.Phase == "committed" {
+		record.Order.Replayed = true
+		return canonicalOrder(record.Order), nil
+	}
+	if record.Phase == "failed" || record.Phase == "compensation_needed" {
+		return Order{}, ErrUpstreamUnavailable
+	}
+	if !owned {
+		return service.waitForCheckout(ctx, command.IdempotencyKey, requestHash)
 	}
 	propagation := Propagation{
 		RequestID: command.RequestID, Traceparent: command.Traceparent,
 		IdempotencyKey: command.IdempotencyKey, CorrelationID: command.CorrelationID,
 	}
-	customer, err := service.customer.Validate(ctx, cart.CustomerID, command.AddressID, propagation)
-	if err != nil {
-		return Order{}, fmt.Errorf("validate checkout customer: %w", err)
-	}
-	skus := make([]string, len(cart.Lines))
-	for index := range cart.Lines {
-		skus[index] = cart.Lines[index].SKU
-	}
-	snapshots, err := service.catalog.Snapshot(ctx, skus, propagation)
-	if err != nil {
-		return Order{}, fmt.Errorf("snapshot checkout catalog: %w", err)
-	}
-	orderID := deterministicOrderID(command.IdempotencyKey)
-	order, reservation, err := buildCheckoutOrder(orderID, cart, customer, snapshots, command.IdempotencyKey, now)
-	if err != nil {
-		return Order{}, err
-	}
-	propagation.IdempotencyKey = reservation.IdempotencyKey
-	if err := service.inventory.Reserve(ctx, reservation, propagation); err != nil {
-		if errors.Is(err, ErrIdempotencyConflict) {
-			return Order{}, ErrIdempotencyConflict
+	order, reservation := record.PreparedOrder, record.PreparedReservation
+	if record.Phase == "claimed" {
+		customer, err := service.customer.Validate(ctx, cart.CustomerID, command.AddressID, propagation)
+		if err != nil {
+			code := "retryable"
+			if errors.Is(err, ErrInvalidCommand) {
+				code = "customer"
+			}
+			_ = store.FailCheckout(ctx, command.IdempotencyKey, requestHash, code)
+			return Order{}, fmt.Errorf("validate checkout customer: %w", err)
 		}
-		return Order{}, fmt.Errorf("reserve checkout inventory: %w", err)
+		skus := make([]string, len(cart.Lines))
+		for index := range cart.Lines {
+			skus[index] = cart.Lines[index].SKU
+		}
+		snapshots, err := service.catalog.Snapshot(ctx, skus, propagation)
+		if err != nil {
+			code := "retryable"
+			if errors.Is(err, ErrInvalidCommand) {
+				code = "catalog"
+			}
+			_ = store.FailCheckout(ctx, command.IdempotencyKey, requestHash, code)
+			return Order{}, fmt.Errorf("snapshot checkout catalog: %w", err)
+		}
+		order, reservation, err = buildCheckoutOrder(
+			orderID, cart, customer, snapshots, command.CouponCode, command.IdempotencyKey, now)
+		if err != nil {
+			_ = store.FailCheckout(ctx, command.IdempotencyKey, requestHash, "money")
+			return Order{}, err
+		}
+		if err := store.SaveCheckoutPrepared(ctx, command.IdempotencyKey, requestHash, order, reservation); err != nil {
+			return Order{}, fmt.Errorf("persist checkout preparation: %w", err)
+		}
+		record.Phase = "prepared"
 	}
-
+	if record.Phase == "prepared" {
+		propagation.IdempotencyKey = reservation.IdempotencyKey
+		result, err := service.reserveInventory(ctx, reservation, propagation)
+		if err != nil {
+			code := "retryable"
+			if errors.Is(err, ErrIdempotencyConflict) {
+				code = "inventory_conflict"
+			}
+			_ = store.FailCheckout(ctx, command.IdempotencyKey, requestHash, code)
+			return Order{}, fmt.Errorf("reserve checkout inventory: %w", err)
+		}
+		if err := validateReservationResult(order, reservation, result); err != nil {
+			_ = store.FailCheckout(ctx, command.IdempotencyKey, requestHash, "invalid_reservation")
+			return Order{}, err
+		}
+		if err := store.SaveCheckoutReserved(ctx, command.IdempotencyKey, requestHash, result); err != nil {
+			return Order{}, fmt.Errorf("persist checkout reservation: %w", err)
+		}
+	}
 	payload, err := json.Marshal(orderPlacedPayload(order))
 	if err != nil {
 		return Order{}, fmt.Errorf("encode order placed event: %w", err)
@@ -379,11 +504,14 @@ func (service *Service) Checkout(ctx context.Context, command CheckoutCommand) (
 		return Order{}, err
 	}
 	if errors.Is(err, ErrVersionConflict) {
+		_ = store.FailCheckout(ctx, command.IdempotencyKey, requestHash, "compensation_needed")
 		releasePropagation := propagation
 		releasePropagation.CausationID = placed.ID
 		if releaseErr := service.inventory.Release(ctx, order.OrderID, releasePropagation); releaseErr != nil {
-			return Order{}, errors.Join(err, fmt.Errorf("release inventory after checkout conflict: %w", releaseErr))
+			return Order{}, fmt.Errorf("%w: release inventory after checkout conflict: %v",
+				ErrUpstreamUnavailable, releaseErr)
 		}
+		_ = store.FailCheckout(ctx, command.IdempotencyKey, requestHash, "cart_conflict")
 		return Order{}, err
 	}
 	// The commit result may be unknown. A read-after-error makes a completed
@@ -400,40 +528,159 @@ func (service *Service) Checkout(ctx context.Context, command CheckoutCommand) (
 	return Order{}, fmt.Errorf("%w: %v", ErrCheckoutUncertain, err)
 }
 
-func (service *Service) Cancel(ctx context.Context, command CancelCommand) (Order, error) {
-	command.OrderID = strings.TrimSpace(command.OrderID)
-	command.Reason = strings.TrimSpace(command.Reason)
-	command.CorrelationID = strings.TrimSpace(command.CorrelationID)
-	if command.OrderID == "" || command.Reason == "" {
-		return Order{}, ErrInvalidCommand
+func (service *Service) waitForCheckout(
+	ctx context.Context,
+	key string,
+	hash string,
+) (Order, error) {
+	timeout := time.NewTimer(2 * time.Second)
+	defer timeout.Stop()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return Order{}, fmt.Errorf("%w: %v", ErrCheckoutUncertain, ctx.Err())
+		case <-timeout.C:
+			return Order{}, ErrCheckoutUncertain
+		case <-ticker.C:
+			record, found, err := service.store.FindCheckout(ctx, key)
+			if err != nil {
+				return Order{}, err
+			}
+			if !found || record.RequestHash != hash {
+				return Order{}, ErrIdempotencyConflict
+			}
+			switch record.Phase {
+			case "committed":
+				record.Order.Replayed = true
+				return canonicalOrder(record.Order), nil
+			case "failed", "compensation_needed":
+				return Order{}, ErrUpstreamUnavailable
+			}
+		}
 	}
-	order, err := service.store.GetOrder(ctx, command.OrderID)
+}
+
+func (service *Service) checkoutLegacy(
+	ctx context.Context,
+	command CheckoutCommand,
+	cart Cart,
+	requestHash string,
+	now time.Time,
+) (Order, error) {
+	if existing, found, err := service.store.FindCheckout(ctx, command.IdempotencyKey); err != nil {
+		return Order{}, fmt.Errorf("find checkout replay: %w", err)
+	} else if found {
+		if existing.RequestHash != requestHash {
+			return Order{}, ErrIdempotencyConflict
+		}
+		existing.Order.Replayed = true
+		return canonicalOrder(existing.Order), nil
+	}
+	propagation := Propagation{
+		RequestID: command.RequestID, Traceparent: command.Traceparent,
+		IdempotencyKey: command.IdempotencyKey, CorrelationID: command.CorrelationID,
+	}
+	customer, err := service.customer.Validate(ctx, cart.CustomerID, command.AddressID, propagation)
+	if err != nil {
+		return Order{}, fmt.Errorf("validate checkout customer: %w", err)
+	}
+	skus := make([]string, len(cart.Lines))
+	for index := range cart.Lines {
+		skus[index] = cart.Lines[index].SKU
+	}
+	snapshots, err := service.catalog.Snapshot(ctx, skus, propagation)
+	if err != nil {
+		return Order{}, fmt.Errorf("snapshot checkout catalog: %w", err)
+	}
+	order, reservation, err := buildCheckoutOrder(
+		deterministicOrderID(command.IdempotencyKey), cart, customer, snapshots,
+		command.CouponCode, command.IdempotencyKey, now)
 	if err != nil {
 		return Order{}, err
 	}
-	if order.Status == "cancelled" {
-		return order, nil
+	propagation.IdempotencyKey = reservation.IdempotencyKey
+	if _, err := service.reserveInventory(ctx, reservation, propagation); err != nil {
+		return Order{}, fmt.Errorf("reserve checkout inventory: %w", err)
 	}
-	if order.Status != "pending" && order.Status != "confirmed" {
+	payload, _ := json.Marshal(orderPlacedPayload(order))
+	placed := messaging.NewEvent("order.placed.v1", order.OrderID, command.CorrelationID, "", payload,
+		func() time.Time { return now })
+	saved, err := service.store.CommitCheckout(ctx, CheckoutCommit{
+		CartID: command.CartID, CartVersion: cart.Version, RequestHash: requestHash,
+		Order: order, Event: placed,
+	})
+	if err == nil || errors.Is(err, ErrIdempotencyConflict) {
+		return saved, err
+	}
+	if errors.Is(err, ErrVersionConflict) {
+		if releaseErr := service.inventory.Release(ctx, order.OrderID, propagation); releaseErr != nil {
+			return Order{}, fmt.Errorf("%w: %v", ErrUpstreamUnavailable, releaseErr)
+		}
+		return Order{}, err
+	}
+	if existing, found, lookupErr := service.store.FindCheckout(ctx, command.IdempotencyKey); lookupErr == nil && found && existing.RequestHash == requestHash && existing.Order.OrderID != "" {
+		existing.Order.Replayed = true
+		return existing.Order, nil
+	}
+	return Order{}, fmt.Errorf("%w: %v", ErrCheckoutUncertain, err)
+}
+
+func (service *Service) reserveInventory(
+	ctx context.Context,
+	command ReservationCommand,
+	propagation Propagation,
+) (ReservationResult, error) {
+	if client, ok := service.inventory.(reservationResultClient); ok {
+		return client.ReserveResult(ctx, command, propagation)
+	}
+	if err := service.inventory.Reserve(ctx, command, propagation); err != nil {
+		return ReservationResult{}, err
+	}
+	allocations := make([]ReservationAllocation, len(command.Lines))
+	for index, line := range command.Lines {
+		allocations[index] = ReservationAllocation{
+			AllocationID: deterministicChildID("RES", command.OrderID, line.SKU, index),
+			SKU:          line.SKU, Quantity: line.Quantity, Status: "active",
+		}
+	}
+	return ReservationResult{OrderID: command.OrderID, Allocations: allocations}, nil
+}
+
+func validateReservationResult(
+	order Order,
+	command ReservationCommand,
+	result ReservationResult,
+) error {
+	if result.OrderID != order.OrderID || len(result.Allocations) != len(command.Lines) {
+		return fmt.Errorf("%w: inventory reservation identity mismatch", ErrInvalidCommand)
+	}
+	expected := make(map[string]int64, len(command.Lines))
+	for _, line := range command.Lines {
+		expected[line.SKU] = line.Quantity
+	}
+	seen := make(map[string]bool, len(result.Allocations))
+	for _, allocation := range result.Allocations {
+		if allocation.AllocationID == "" || allocation.Status != "active" ||
+			seen[allocation.SKU] || expected[allocation.SKU] != allocation.Quantity {
+			return fmt.Errorf("%w: inventory did not return active allocations", ErrInvalidCommand)
+		}
+		seen[allocation.SKU] = true
+	}
+	return nil
+}
+
+func (service *Service) Cancel(ctx context.Context, command CancelCommand) (Order, error) {
+	command.OrderID = strings.TrimSpace(command.OrderID)
+	command.Reason = strings.TrimSpace(command.Reason)
+	command.IdempotencyKey = strings.TrimSpace(command.IdempotencyKey)
+	command.CorrelationID = strings.TrimSpace(command.CorrelationID)
+	if command.OrderID == "" || command.Reason == "" || command.IdempotencyKey == "" ||
+		len(command.IdempotencyKey) > 200 {
 		return Order{}, ErrInvalidCommand
 	}
-	now := service.clock().UTC()
-	events := make([]messaging.Event, 0, 4)
-	cancelled := newOrderEvent("order.cancelled.v1", order, command.CorrelationID, command.CausationID,
-		map[string]any{"order_id": order.OrderID, "reason": command.Reason}, now)
-	events = append(events, cancelled)
-	events = append(events, newOrderEvent("inventory.release-requested.v1", order, command.CorrelationID, cancelled.ID,
-		map[string]any{"order_id": order.OrderID, "reason": command.Reason}, now))
-	if order.PaymentStatus == "paid" || order.PaymentStatus == "authorized" ||
-		order.PaymentStatus == "partially_refunded" {
-		events = append(events,
-			newOrderEvent("payment.refund-requested.v1", order, command.CorrelationID, cancelled.ID,
-				map[string]any{"order_id": order.OrderID, "amount_minor": order.TotalMinor, "reason": command.Reason}, now),
-			newOrderEvent("fulfillment.cancel-requested.v1", order, command.CorrelationID, cancelled.ID,
-				map[string]any{"order_id": order.OrderID, "reason": command.Reason}, now),
-		)
-	}
-	return service.store.CancelOrder(ctx, command, events)
+	return service.store.CancelOrder(ctx, command, nil)
 }
 
 func buildCheckoutOrder(
@@ -441,6 +688,7 @@ func buildCheckoutOrder(
 	cart Cart,
 	customer CustomerSnapshot,
 	snapshots []CatalogSnapshot,
+	couponCode string,
 	key string,
 	now time.Time,
 ) (Order, ReservationCommand, error) {
@@ -463,6 +711,7 @@ func buildCheckoutOrder(
 	lines := make([]OrderLine, 0, len(cart.Lines))
 	moneyLines := make([]Line, 0, len(cart.Lines))
 	reservationLines := make([]ReservationLine, 0, len(cart.Lines))
+	grossAmounts := make([]int64, 0, len(cart.Lines))
 	for index, cartLine := range cart.Lines {
 		snapshot, found := bySKU[cartLine.SKU]
 		if !found {
@@ -476,21 +725,76 @@ func buildCheckoutOrder(
 			ID:  deterministicChildID("ITEM", orderID, cartLine.SKU, index),
 			SKU: cartLine.SKU, Title: snapshot.Title, Quantity: cartLine.Quantity,
 			UnitPriceMinor: snapshot.UnitPriceMinor, TotalMinor: gross,
+			ProductID: snapshot.ProductID, ProductTitle: snapshot.ProductTitle,
+			VariantTitle: snapshot.VariantTitle, Attributes: snapshot.Attributes,
+			WeightGrams: snapshot.WeightGrams, Channel: snapshot.Channel,
 		}
 		lines = append(lines, line)
 		moneyLines = append(moneyLines, Line{Quantity: line.Quantity, UnitPriceMinor: line.UnitPriceMinor})
 		reservationLines = append(reservationLines, ReservationLine{SKU: line.SKU, Quantity: line.Quantity})
+		grossAmounts = append(grossAmounts, gross)
+	}
+	if couponCode != "" {
+		if couponCode != "WELCOME10" {
+			return Order{}, ReservationCommand{}, fmt.Errorf("%w: unsupported coupon", ErrInvalidCommand)
+		}
+		allocations, err := AllocatePercentageDiscount(grossAmounts, 1000)
+		if err != nil {
+			return Order{}, ReservationCommand{}, err
+		}
+		for index := range lines {
+			lines[index].DiscountMinor = allocations[index]
+			lines[index].TotalMinor -= allocations[index]
+			moneyLines[index].DiscountMinor = allocations[index]
+		}
 	}
 	shipping := int64(800)
 	var preliminary int64
 	for _, line := range moneyLines {
-		gross, _ := checkedMultiply(line.Quantity, line.UnitPriceMinor)
-		preliminary, _ = checkedAdd(preliminary, gross)
+		gross, ok := checkedMultiply(line.Quantity, line.UnitPriceMinor)
+		if !ok {
+			return Order{}, ReservationCommand{}, ErrInvalidMoney
+		}
+		preliminary, ok = checkedAdd(preliminary, gross)
+		if !ok {
+			return Order{}, ReservationCommand{}, ErrInvalidMoney
+		}
 	}
 	if preliminary >= 10000 {
 		shipping = 0
 	}
-	totals, err := CalculateTotals(moneyLines, shipping, 0)
+	var addressRegion struct {
+		CountryCode string `json:"country_code"`
+		Province    string `json:"province"`
+		Region      string `json:"region"`
+	}
+	if err := json.Unmarshal(customer.Address, &addressRegion); err != nil {
+		return Order{}, ReservationCommand{}, ErrInvalidCommand
+	}
+	region := addressRegion.Province
+	if region == "" {
+		region = addressRegion.Region
+	}
+	taxable := preliminary
+	for _, line := range lines {
+		taxable -= line.DiscountMinor
+	}
+	rate, tax, err := RegionalTax(addressRegion.CountryCode, region, taxable)
+	if err != nil {
+		return Order{}, ReservationCommand{}, err
+	}
+	netAmounts := make([]int64, len(lines))
+	for index := range lines {
+		netAmounts[index] = lines[index].TotalMinor
+	}
+	taxAllocations, err := AllocatePercentageDiscount(netAmounts, rate)
+	if err != nil {
+		return Order{}, ReservationCommand{}, err
+	}
+	for index := range lines {
+		lines[index].TaxRateBPS, lines[index].TaxMinor = rate, taxAllocations[index]
+	}
+	totals, err := CalculateTotals(moneyLines, shipping, tax)
 	if err != nil {
 		return Order{}, ReservationCommand{}, err
 	}
@@ -504,6 +808,7 @@ func buildCheckoutOrder(
 		ShippingMinor: totals.Shipping, TaxMinor: totals.Tax, TotalMinor: totals.Total,
 		Customer: customer, ShippingAddress: append(json.RawMessage(nil), customer.Address...),
 		Lines: lines, IdempotencyKey: key, PlacedAt: now, SagaState: "paying",
+		CouponCode: couponCode,
 	})
 	return order, ReservationCommand{
 		OrderID: order.OrderID, IdempotencyKey: "inventory:" + key, Lines: reservationLines,
@@ -567,17 +872,28 @@ func canonicalCheckoutCommand(command CheckoutCommand) CheckoutCommand {
 	command.RequestID = strings.TrimSpace(command.RequestID)
 	command.Traceparent = strings.TrimSpace(command.Traceparent)
 	command.CorrelationID = strings.TrimSpace(command.CorrelationID)
+	command.CouponCode = strings.ToUpper(strings.TrimSpace(command.CouponCode))
 	if command.CorrelationID == "" {
 		command.CorrelationID = command.RequestID
 	}
 	return command
 }
 
-func checkoutRequestHash(command CheckoutCommand) string {
+func checkoutRequestHash(command CheckoutCommand, cart Cart) string {
+	cart = canonicalCart(cart)
 	body, _ := json.Marshal(struct {
-		CartID    string `json:"cart_id"`
-		AddressID string `json:"address_id"`
-	}{CartID: command.CartID, AddressID: command.AddressID})
+		CartID      string     `json:"cart_id"`
+		CartVersion int64      `json:"cart_version"`
+		CustomerID  string     `json:"customer_id"`
+		Currency    string     `json:"currency"`
+		Lines       []CartLine `json:"lines"`
+		AddressID   string     `json:"address_id"`
+		CouponCode  string     `json:"coupon_code"`
+	}{
+		CartID: command.CartID, CartVersion: cart.Version, CustomerID: cart.CustomerID,
+		Currency: cart.Currency, Lines: cart.Lines, AddressID: command.AddressID,
+		CouponCode: command.CouponCode,
+	})
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:])
 }

@@ -20,6 +20,11 @@ func NewHandler(service *Service) http.Handler {
 		if !requireOrderJSON(w, r) {
 			return
 		}
+		key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+		if key == "" {
+			writeOrderProblem(w, r, http.StatusBadRequest, "idempotency_key_required")
+			return
+		}
 		var body struct {
 			CustomerID string `json:"customer_id"`
 			Currency   string `json:"currency"`
@@ -29,12 +34,16 @@ func NewHandler(service *Service) http.Handler {
 			return
 		}
 		cart, err := service.CreateCart(r.Context(), CreateCartCommand{
-			CustomerID: body.CustomerID, Currency: body.Currency,
+			CustomerID: body.CustomerID, Currency: body.Currency, IdempotencyKey: key,
 		})
 		if writeOrderServiceError(w, r, err) {
 			return
 		}
-		writeCart(w, http.StatusCreated, cart)
+		status := http.StatusCreated
+		if cart.Replayed {
+			status = http.StatusOK
+		}
+		writeCart(w, status, cart)
 	})
 	mux.HandleFunc("GET /api/v1/carts/{id}", func(w http.ResponseWriter, r *http.Request) {
 		cart, err := service.GetCart(r.Context(), r.PathValue("id"))
@@ -62,8 +71,9 @@ func NewHandler(service *Service) http.Handler {
 			return
 		}
 		var body struct {
-			CartID    string `json:"cart_id"`
-			AddressID string `json:"address_id"`
+			CartID     string `json:"cart_id"`
+			AddressID  string `json:"address_id"`
+			CouponCode string `json:"coupon_code"`
 		}
 		if err := decodeOrderJSON(w, r, &body); err != nil {
 			writeOrderProblem(w, r, http.StatusBadRequest, "invalid_json")
@@ -75,7 +85,8 @@ func NewHandler(service *Service) http.Handler {
 		}
 		order, err := service.Checkout(r.Context(), CheckoutCommand{
 			CartID: body.CartID, AddressID: body.AddressID, IdempotencyKey: key,
-			RequestID: requestID, Traceparent: r.Header.Get("traceparent"), CorrelationID: requestID,
+			CouponCode: body.CouponCode,
+			RequestID:  requestID, Traceparent: r.Header.Get("traceparent"), CorrelationID: requestID,
 		})
 		if writeOrderServiceError(w, r, err) {
 			return
@@ -130,7 +141,8 @@ func NewHandler(service *Service) http.Handler {
 			requestID = r.Header.Get("X-Request-ID")
 		}
 		order, err := service.Cancel(r.Context(), CancelCommand{
-			OrderID: r.PathValue("id"), Reason: body.Reason, CorrelationID: requestID,
+			OrderID: r.PathValue("id"), Reason: body.Reason, IdempotencyKey: key,
+			CorrelationID: requestID,
 		})
 		if writeOrderServiceError(w, r, err) {
 			return
@@ -142,6 +154,11 @@ func NewHandler(service *Service) http.Handler {
 
 func mutateCartHTTP(w http.ResponseWriter, r *http.Request, service *Service, action CartMutationAction, pathSKU string) {
 	if !requireOrderJSON(w, r) {
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" {
+		writeOrderProblem(w, r, http.StatusBadRequest, "idempotency_key_required")
 		return
 	}
 	var body struct {
@@ -158,7 +175,7 @@ func mutateCartHTTP(w http.ResponseWriter, r *http.Request, service *Service, ac
 	}
 	cart, err := service.MutateCart(r.Context(), CartMutation{
 		CartID: r.PathValue("id"), SKU: body.SKU, Quantity: body.Quantity,
-		ExpectedVersion: body.ExpectedVersion, Action: action,
+		ExpectedVersion: body.ExpectedVersion, Action: action, IdempotencyKey: key,
 	})
 	if writeOrderServiceError(w, r, err) {
 		return

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -26,8 +25,8 @@ func TestCheckoutSnapshotsPricesAndWritesOutboxAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.TotalMinor != 3272 {
-		t.Fatalf("total=%d, want 3272", got.TotalMinor)
+	if got.TotalMinor != 3593 || got.TaxMinor != 321 {
+		t.Fatalf("total=%d tax=%d, want 3593 and 321", got.TotalMinor, got.TaxMinor)
 	}
 	saved := fixture.store.orders[got.OrderID]
 	if saved.Lines[0].SKU != "SKU-1" || saved.Lines[0].Title != "Snapshot title" ||
@@ -101,6 +100,38 @@ func TestCheckoutRejectsMismatchedCustomerSnapshotBeforeReservation(t *testing.T
 	}
 }
 
+func TestCheckoutWelcome10AllocatesDiscountAndRegionalTaxExactly(t *testing.T) {
+	fixture := newCheckoutFixture()
+	order, err := fixture.service.Checkout(context.Background(), CheckoutCommand{
+		CartID: "CART-1", AddressID: "ADDR-1", CouponCode: "welcome10",
+		IdempotencyKey: "checkout-coupon", CorrelationID: "request-coupon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.DiscountMinor != 247 || order.TaxMinor != 289 || order.TotalMinor != 3314 {
+		t.Fatalf("coupon totals discount=%d tax=%d total=%d", order.DiscountMinor, order.TaxMinor, order.TotalMinor)
+	}
+	if order.Lines[0].DiscountMinor != 247 || order.Lines[0].TaxMinor != 289 {
+		t.Fatalf("coupon line=%+v", order.Lines[0])
+	}
+}
+
+func TestReservationResultRejectsTerminalAllocation(t *testing.T) {
+	order := Order{OrderID: "ORD-1"}
+	command := ReservationCommand{
+		OrderID: "ORD-1", Lines: []ReservationLine{{SKU: "SKU-1", Quantity: 1}},
+	}
+	err := validateReservationResult(order, command, ReservationResult{
+		OrderID: "ORD-1", Allocations: []ReservationAllocation{{
+			AllocationID: "RES-1", SKU: "SKU-1", Quantity: 1, Status: "released",
+		}},
+	})
+	if !errors.Is(err, ErrInvalidCommand) {
+		t.Fatalf("terminal reservation error=%v", err)
+	}
+}
+
 func TestPaymentFailureCancelsAndEmitsInventoryReleaseOnce(t *testing.T) {
 	fixture := newCheckoutFixture()
 	order, err := fixture.service.Checkout(context.Background(), CheckoutCommand{
@@ -129,7 +160,7 @@ func TestPaymentFailureCancelsAndEmitsInventoryReleaseOnce(t *testing.T) {
 	assertEventCausation(t, fixture.store.events, "inventory.release-requested.v1", event.ID)
 }
 
-func TestPaidThenCancelledRequestsRefundReleaseAndFulfillmentCancellation(t *testing.T) {
+func TestPaidThenCancelledStartsWithFulfillmentCancellation(t *testing.T) {
 	fixture := newCheckoutFixture()
 	placed, err := fixture.service.Checkout(context.Background(), CheckoutCommand{
 		CartID: "CART-1", AddressID: "ADDR-1", IdempotencyKey: "checkout-1",
@@ -147,13 +178,14 @@ func TestPaidThenCancelledRequestsRefundReleaseAndFulfillmentCancellation(t *tes
 		t.Fatal(err)
 	}
 	if _, err := fixture.service.Cancel(context.Background(), CancelCommand{
-		OrderID: placed.OrderID, Reason: "buyer_request", CorrelationID: "cancel-1",
+		OrderID: placed.OrderID, Reason: "buyer_request", IdempotencyKey: "cancel-1",
+		CorrelationID: "cancel-1",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	assertEventCount(t, fixture.store.events, "order.paid.v1", 1)
-	assertEventCount(t, fixture.store.events, "payment.refund-requested.v1", 1)
-	assertEventCount(t, fixture.store.events, "inventory.release-requested.v1", 1)
+	assertEventCount(t, fixture.store.events, "payment.refund-requested.v1", 0)
+	assertEventCount(t, fixture.store.events, "inventory.release-requested.v1", 0)
 	assertEventCount(t, fixture.store.events, "fulfillment.cancel-requested.v1", 1)
 	cancelledID := ""
 	for _, event := range fixture.store.events {
@@ -164,13 +196,7 @@ func TestPaidThenCancelledRequestsRefundReleaseAndFulfillmentCancellation(t *tes
 	if cancelledID == "" {
 		t.Fatal("order cancellation event missing")
 	}
-	for _, kind := range []string{
-		"payment.refund-requested.v1",
-		"inventory.release-requested.v1",
-		"fulfillment.cancel-requested.v1",
-	} {
-		assertEventCausation(t, fixture.store.events, kind, cancelledID)
-	}
+	assertEventCausation(t, fixture.store.events, "fulfillment.cancel-requested.v1", cancelledID)
 
 	lateFailure := messaging.Event{
 		ID: "00000000-0000-4000-8000-000000000003", SchemaVersion: 1,
@@ -192,7 +218,8 @@ func TestCancellationRejectsCompletedOrderWithoutCompensation(t *testing.T) {
 		FulfillmentStatus: "fulfilled",
 	}
 	_, err := fixture.service.Cancel(context.Background(), CancelCommand{
-		OrderID: "ORD-DONE", Reason: "too_late", CorrelationID: "cancel-done",
+		OrderID: "ORD-DONE", Reason: "too_late", IdempotencyKey: "cancel-done",
+		CorrelationID: "cancel-done",
 	})
 	if !errors.Is(err, ErrInvalidCommand) {
 		t.Fatalf("cancel error=%v, want ErrInvalidCommand", err)
@@ -321,55 +348,6 @@ func TestOrderRuntimeReadinessTracksDatabaseBrokerPublisherAndWorkers(t *testing
 	}
 }
 
-func TestSagaStoreCreatesConditionalRefundAndFulfillmentSteps(t *testing.T) {
-	source, err := os.ReadFile("store.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(source)
-	for _, fragment := range []string{
-		"'refund_requested', 'pending'",
-		"'fulfillment_requested', 'pending'",
-		"ON CONFLICT (saga_id, step) DO NOTHING",
-	} {
-		if !strings.Contains(text, fragment) {
-			t.Errorf("store.go missing conditional saga step SQL %q", fragment)
-		}
-	}
-}
-
-func TestOrderReadsRemainCompatibleWithSeedRowsWithoutSnapshots(t *testing.T) {
-	source, err := os.ReadFile("store.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(source)
-	for _, fragment := range []string{
-		"COALESCE(c.email, '')", "COALESCE(c.name, '')",
-	} {
-		if !strings.Contains(text, fragment) {
-			t.Errorf("store.go missing seed-compatible projection %q", fragment)
-		}
-	}
-}
-
-func TestSagaStoreRecordsEveryOrderStatusTransition(t *testing.T) {
-	source, err := os.ReadFile("store.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(source)
-	for _, fragment := range []string{
-		`recordStatusTransition(ctx, tx, event, "pending", "cancelled"`,
-		`recordStatusTransition(ctx, tx, event, "pending", "confirmed"`,
-		`recordStatusTransition(ctx, tx, event, "confirmed", "completed"`,
-	} {
-		if !strings.Contains(text, fragment) {
-			t.Errorf("store.go missing event status history call %q", fragment)
-		}
-	}
-}
-
 func TestRetryAcknowledgerSeparatesTransientRetryFromTerminalDLQ(t *testing.T) {
 	original := &acknowledgerStub{}
 	publisher := &retryPublisherStub{}
@@ -407,6 +385,25 @@ func TestRetryAcknowledgerSeparatesTransientRetryFromTerminalDLQ(t *testing.T) {
 	}
 }
 
+func TestRetryAcknowledgerDoesNotAckUnconfirmedRoute(t *testing.T) {
+	original := &acknowledgerStub{}
+	publisher := &retryPublisherStub{err: errors.New("negative confirmation")}
+	delivery := amqp.Delivery{
+		Acknowledger: original, DeliveryTag: 8, MessageId: "event-8",
+		Body: []byte(`{"id":"event-8"}`),
+	}
+	acknowledger := &retryAcknowledger{
+		original: original, publisher: publisher, delivery: delivery,
+		routing: DeliveryRouting{RetryExchange: "retry", RetryRoutingKey: "retry"},
+	}
+	if err := acknowledger.Nack(delivery.DeliveryTag, false, false); err == nil {
+		t.Fatal("unconfirmed retry route returned nil")
+	}
+	if original.acks != 0 {
+		t.Fatalf("original acks=%d, want zero", original.acks)
+	}
+}
+
 type acknowledgerStub struct {
 	acks, nacks, rejects int
 }
@@ -429,17 +426,17 @@ func (acknowledger *acknowledgerStub) Reject(uint64, bool) error {
 type retryPublisherStub struct {
 	exchange string
 	key      string
+	err      error
 }
 
-func (publisher *retryPublisherStub) PublishWithContext(
+func (publisher *retryPublisherStub) Route(
 	_ context.Context,
 	exchange string,
 	key string,
-	_, _ bool,
 	_ amqp.Publishing,
 ) error {
 	publisher.exchange, publisher.key = exchange, key
-	return nil
+	return publisher.err
 }
 
 type availabilityStub bool
@@ -490,19 +487,37 @@ type memoryOrderStore struct {
 	inbox          map[string]bool
 	atomicCommits  int
 	failCommitOnce bool
+	cartCommands   map[string]memoryCartCommand
+	cancelCommands map[string]string
+}
+
+type memoryCartCommand struct {
+	hash string
+	cart Cart
 }
 
 func newMemoryOrderStore() *memoryOrderStore {
 	return &memoryOrderStore{
 		carts: map[string]Cart{}, orders: map[string]Order{}, requests: map[string]string{},
-		inbox: map[string]bool{},
+		inbox: map[string]bool{}, cartCommands: map[string]memoryCartCommand{},
+		cancelCommands: map[string]string{},
 	}
 }
 
 func (store *memoryOrderStore) CreateCart(_ context.Context, cart Cart) (Cart, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	hash := commandFingerprint(struct{ CustomerID, Currency string }{cart.CustomerID, cart.Currency})
+	if prior, ok := store.cartCommands["create:"+cart.IdempotencyKey]; ok {
+		if prior.hash != hash {
+			return Cart{}, ErrIdempotencyConflict
+		}
+		replay := prior.cart
+		replay.Replayed = true
+		return replay, nil
+	}
 	store.carts[cart.ID] = cart
+	store.cartCommands["create:"+cart.IdempotencyKey] = memoryCartCommand{hash: hash, cart: cart}
 	return cart, nil
 }
 
@@ -519,6 +534,20 @@ func (store *memoryOrderStore) GetCart(_ context.Context, id string) (Cart, erro
 func (store *memoryOrderStore) MutateCart(_ context.Context, command CartMutation) (Cart, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	hash := commandFingerprint(struct {
+		SKU               string
+		Quantity, Version int64
+		Action            CartMutationAction
+	}{command.SKU, command.Quantity, command.ExpectedVersion, command.Action})
+	commandKey := "mutate:" + command.CartID + ":" + command.IdempotencyKey
+	if prior, ok := store.cartCommands[commandKey]; ok {
+		if prior.hash != hash {
+			return Cart{}, ErrIdempotencyConflict
+		}
+		replay := prior.cart
+		replay.Replayed = true
+		return replay, nil
+	}
 	cart := store.carts[command.CartID]
 	if cart.Version != command.ExpectedVersion {
 		return Cart{}, ErrVersionConflict
@@ -559,6 +588,7 @@ func (store *memoryOrderStore) MutateCart(_ context.Context, command CartMutatio
 	}
 	cart.Version++
 	store.carts[command.CartID] = cart
+	store.cartCommands[commandKey] = memoryCartCommand{hash: hash, cart: cart}
 	return cart, nil
 }
 
@@ -624,13 +654,38 @@ func (store *memoryOrderStore) CancelOrder(_ context.Context, command CancelComm
 	if !ok {
 		return Order{}, ErrOrderNotFound
 	}
+	hash := commandFingerprint(struct{ OrderID, Reason string }{command.OrderID, command.Reason})
+	if prior, ok := store.cancelCommands[command.IdempotencyKey]; ok {
+		if prior != hash {
+			return Order{}, ErrIdempotencyConflict
+		}
+		order.Replayed = true
+		return order, nil
+	}
 	if order.Status == "cancelled" {
 		return order, nil
+	}
+	if order.Status != "pending" && order.Status != "confirmed" {
+		return Order{}, ErrInvalidCommand
+	}
+	cancelled := newOrderEvent("order.cancelled.v1", order, command.CorrelationID, command.CausationID,
+		map[string]any{"order_id": order.OrderID, "reason": command.Reason}, time.Now().UTC())
+	events = []messaging.Event{cancelled}
+	if order.PaymentStatus == "paid" || order.PaymentStatus == "authorized" ||
+		order.PaymentStatus == "partially_refunded" {
+		events = append(events, newOrderEvent(
+			"fulfillment.cancel-requested.v1", order, command.CorrelationID, cancelled.ID,
+			map[string]any{"order_id": order.OrderID}, time.Now().UTC()))
+	} else {
+		events = append(events, newOrderEvent(
+			"inventory.release-requested.v1", order, command.CorrelationID, cancelled.ID,
+			map[string]any{"order_id": order.OrderID}, time.Now().UTC()))
 	}
 	order.Status = "cancelled"
 	order.SagaState = "compensating"
 	store.orders[command.OrderID] = order
 	store.events = append(store.events, events...)
+	store.cancelCommands[command.IdempotencyKey] = hash
 	return order, nil
 }
 

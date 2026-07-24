@@ -26,12 +26,26 @@ func TestPostgresCheckoutSnapshotResolvesActiveSKUAndRejectsInactive(t *testing.
 			product_id, title, description, brand, category_id, status, created_at
 		) VALUES
 			('PROD-1', 'Product', 'Description', 'Brand', 'CAT-1', 'active', $1),
-			('PROD-2', 'Inactive', 'Description', 'Brand', 'CAT-1', 'inactive', $1);
+			('PROD-2', 'Inactive', 'Description', 'Brand', 'CAT-1', 'archived', $1),
+			('PROD-3', 'Expired price', 'Description', 'Brand', 'CAT-1', 'active', $1);
 		INSERT INTO variant (
 			sku, product_id, title, attributes, price_minor, currency, weight_grams
 		) VALUES
 			('SKU-1', 'PROD-1', 'Black / S', '{"color":"black"}', 1236, 'CNY', 220),
-			('SKU-2', 'PROD-2', 'Retired', '{}', 100, 'CNY', 100)`, now); err != nil {
+			('SKU-2', 'PROD-2', 'Retired', '{}', 100, 'CNY', 100),
+			('SKU-3', 'Expired', '{}', 500, 'CNY', 100);
+		INSERT INTO variant_detail (sku, length_mm, width_mm, height_mm, status)
+		VALUES
+			('SKU-1', 1, 1, 1, 'active'),
+			('SKU-2', 1, 1, 1, 'active'),
+			('SKU-3', 1, 1, 1, 'active');
+		INSERT INTO price_list (
+			price_list_id, name, channel, currency, valid_from, valid_until, status
+		) VALUES
+			('PRICE-WEB', 'Web current', 'web', 'CNY', $1 - interval '1 day', $1 + interval '1 day', 'active'),
+			('PRICE-OLD', 'Web expired', 'web', 'CNY', $1 - interval '3 day', $1 - interval '2 day', 'expired');
+		INSERT INTO variant_price (price_list_id, sku, price_minor)
+		VALUES ('PRICE-WEB', 'SKU-1', 1300), ('PRICE-OLD', 'SKU-3', 450)`, now); err != nil {
 		t.Fatal(err)
 	}
 	service := NewService(store)
@@ -39,12 +53,15 @@ func TestPostgresCheckoutSnapshotResolvesActiveSKUAndRejectsInactive(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.ProductID != "PROD-1" || snapshot.UnitPriceMinor != 1236 ||
+	if snapshot.ProductID != "PROD-1" || snapshot.UnitPriceMinor != 1300 ||
 		!snapshot.AvailableForSale || snapshot.Attributes["color"] != "black" {
 		t.Fatalf("snapshot=%+v", snapshot)
 	}
 	if _, err := service.GetCheckoutSnapshot(ctx, "SKU-2"); !errors.Is(err, ErrSKUNotSaleable) {
 		t.Fatalf("inactive error=%v", err)
+	}
+	if _, err := service.GetCheckoutSnapshot(ctx, "SKU-3"); !errors.Is(err, ErrSKUNotSaleable) {
+		t.Fatalf("expired price error=%v", err)
 	}
 	if _, err := service.GetCheckoutSnapshot(ctx, "MISSING"); !errors.Is(err, ErrSKUNotFound) {
 		t.Fatalf("missing error=%v", err)

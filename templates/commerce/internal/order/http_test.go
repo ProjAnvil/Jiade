@@ -15,7 +15,7 @@ func TestCartHTTPCreateGetAndVersionedLineMutations(t *testing.T) {
 	handler := NewHandler(fixture.service)
 
 	created := postOrderJSON(handler, http.MethodPost, "/api/v1/carts",
-		`{"customer_id":"CUS-2","currency":"CNY"}`, "")
+		`{"customer_id":"CUS-2","currency":"CNY"}`, "create-cart-1")
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -26,9 +26,17 @@ func TestCartHTTPCreateGetAndVersionedLineMutations(t *testing.T) {
 	if cart.ID == "" || cart.Version != 1 || cart.Status != CartActive {
 		t.Fatalf("created cart=%+v", cart)
 	}
+	createReplay := postOrderJSON(handler, http.MethodPost, "/api/v1/carts",
+		`{"customer_id":"CUS-2","currency":"CNY"}`, "create-cart-1")
+	if createReplay.Code != http.StatusOK || createReplay.Body.String() != created.Body.String() {
+		t.Fatalf("create replay status=%d body=%s", createReplay.Code, createReplay.Body.String())
+	}
+	createConflict := postOrderJSON(handler, http.MethodPost, "/api/v1/carts",
+		`{"customer_id":"CUS-OTHER","currency":"CNY"}`, "create-cart-1")
+	assertOrderProblem(t, createConflict, http.StatusConflict, "idempotency_conflict")
 
 	added := postOrderJSON(handler, http.MethodPost, "/api/v1/carts/"+cart.ID+"/items",
-		`{"sku":"SKU-2","quantity":2,"expected_version":1}`, "")
+		`{"sku":"SKU-2","quantity":2,"expected_version":1}`, "add-line-1")
 	if added.Code != http.StatusOK {
 		t.Fatalf("add status=%d body=%s", added.Code, added.Body.String())
 	}
@@ -39,13 +47,18 @@ func TestCartHTTPCreateGetAndVersionedLineMutations(t *testing.T) {
 	if afterAdd.Version != 2 || len(afterAdd.Lines) != 1 || added.Header().Get("ETag") != `"2"` {
 		t.Fatalf("after add=%+v ETag=%q", afterAdd, added.Header().Get("ETag"))
 	}
+	addReplay := postOrderJSON(handler, http.MethodPost, "/api/v1/carts/"+cart.ID+"/items",
+		`{"sku":"SKU-2","quantity":2,"expected_version":1}`, "add-line-1")
+	if addReplay.Code != http.StatusOK || addReplay.Body.String() != added.Body.String() {
+		t.Fatalf("add replay status=%d body=%s", addReplay.Code, addReplay.Body.String())
+	}
 
 	stale := postOrderJSON(handler, http.MethodPatch, "/api/v1/carts/"+cart.ID+"/items/SKU-2",
-		`{"quantity":3,"expected_version":1}`, "")
+		`{"quantity":3,"expected_version":1}`, "change-line-stale")
 	assertOrderProblem(t, stale, http.StatusConflict, "cart_version_conflict")
 
 	removed := postOrderJSON(handler, http.MethodDelete, "/api/v1/carts/"+cart.ID+"/items/SKU-2",
-		`{"expected_version":2}`, "")
+		`{"expected_version":2}`, "remove-line-1")
 	if removed.Code != http.StatusOK || !strings.Contains(removed.Body.String(), `"version":3`) ||
 		!strings.Contains(removed.Body.String(), `"lines":[]`) {
 		t.Fatalf("remove status=%d body=%s", removed.Code, removed.Body.String())
@@ -91,6 +104,26 @@ func TestCheckoutHTTPRequiresJSONAndIdempotencyAndPropagatesHeaders(t *testing.T
 	if replay.Code != http.StatusOK {
 		t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
 	}
+	var placed Order
+	if err := json.Unmarshal(response.Body.Bytes(), &placed); err != nil {
+		t.Fatal(err)
+	}
+	cancel := postOrderJSON(handler, http.MethodPost,
+		"/api/v1/orders/"+placed.OrderID+"/cancel",
+		`{"reason":"buyer_request"}`, "cancel-http-1")
+	if cancel.Code != http.StatusOK {
+		t.Fatalf("cancel status=%d body=%s", cancel.Code, cancel.Body.String())
+	}
+	cancelReplay := postOrderJSON(handler, http.MethodPost,
+		"/api/v1/orders/"+placed.OrderID+"/cancel",
+		`{"reason":"buyer_request"}`, "cancel-http-1")
+	if cancelReplay.Code != http.StatusOK || cancelReplay.Body.String() != cancel.Body.String() {
+		t.Fatalf("cancel replay status=%d body=%s", cancelReplay.Code, cancelReplay.Body.String())
+	}
+	cancelConflict := postOrderJSON(handler, http.MethodPost,
+		"/api/v1/orders/"+placed.OrderID+"/cancel",
+		`{"reason":"different"}`, "cancel-http-1")
+	assertOrderProblem(t, cancelConflict, http.StatusConflict, "idempotency_conflict")
 }
 
 func TestOrderHTTPProblemsAreStableAndListsUseOpaqueCursor(t *testing.T) {

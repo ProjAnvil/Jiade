@@ -87,14 +87,45 @@ func (store *PostgresStore) GetCheckoutSnapshot(ctx context.Context, sku string)
 	var snapshot CheckoutSnapshot
 	var attributes []byte
 	err := store.pool.QueryRow(ctx, `
-		SELECT p.product_id, v.sku, p.title, v.title, p.status,
-		       v.price_minor, v.currency, v.weight_grams, v.attributes
+		SELECT p.product_id, v.sku, p.title, v.title,
+		       CASE
+		         WHEN p.status <> 'active' THEN 'inactive'
+		         WHEN vd.sku IS NOT NULL AND vd.status <> 'active' THEN 'inactive'
+		         WHEN (vd.sku IS NOT NULL OR price_state.has_richer_price)
+		              AND current_price.price_minor IS NULL THEN 'inactive'
+		         ELSE 'active'
+		       END,
+		       COALESCE(current_price.price_minor, v.price_minor),
+		       COALESCE(current_price.currency, v.currency),
+		       CASE WHEN price_state.has_richer_price THEN 'web' ELSE 'legacy' END,
+		       v.weight_grams, v.attributes
 		FROM variant v
 		JOIN product p ON p.product_id = v.product_id
+		LEFT JOIN variant_detail vd ON vd.sku = v.sku
+		CROSS JOIN LATERAL (
+		  SELECT EXISTS (
+		    SELECT 1
+		    FROM variant_price vp
+		    JOIN price_list pl USING (price_list_id)
+		    WHERE vp.sku = v.sku AND pl.channel = 'web'
+		  ) AS has_richer_price
+		) price_state
+		LEFT JOIN LATERAL (
+		  SELECT vp.price_minor, pl.currency
+		  FROM variant_price vp
+		  JOIN price_list pl USING (price_list_id)
+		  WHERE vp.sku = v.sku
+		    AND pl.channel = 'web'
+		    AND pl.status = 'active'
+		    AND pl.valid_from <= now()
+		    AND (pl.valid_until IS NULL OR pl.valid_until > now())
+		  ORDER BY pl.valid_from DESC, pl.price_list_id
+		  LIMIT 1
+		) current_price ON true
 		WHERE v.sku = $1`, sku).
 		Scan(&snapshot.ProductID, &snapshot.SKU, &snapshot.ProductTitle,
 			&snapshot.VariantTitle, &snapshot.Status, &snapshot.UnitPriceMinor,
-			&snapshot.Currency, &snapshot.WeightGrams, &attributes)
+			&snapshot.Currency, &snapshot.Channel, &snapshot.WeightGrams, &attributes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return CheckoutSnapshot{}, ErrSKUNotFound
 	}

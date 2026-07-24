@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -24,7 +25,9 @@ type RabbitPublisher struct {
 	available     atomic.Bool
 	watcherStop   chan struct{}
 	watcherDone   chan struct{}
+	channelClosed chan struct{}
 	stopOnce      sync.Once
+	signalOnce    sync.Once
 	closeOnce     sync.Once
 	closeErr      error
 }
@@ -49,6 +52,16 @@ func NewRabbitPublisher(channel *amqp.Channel, exchange string) (*RabbitPublishe
 	return newRabbitPublisher(channel, exchange)
 }
 
+// NewConfirmedRouter creates a confirmed mandatory publisher for raw delivery
+// routing. It is intended for retry/DLQ channels that must not acknowledge the
+// source delivery until RabbitMQ positively confirms the replacement.
+func NewConfirmedRouter(channel *amqp.Channel) (*RabbitPublisher, error) {
+	if channel == nil {
+		return nil, fmt.Errorf("%w: rabbit routing channel is nil", ErrPublisherUnavailable)
+	}
+	return newRabbitPublisher(channel, "")
+}
+
 func newRabbitPublisher(channel rabbitChannel, exchange string) (*RabbitPublisher, error) {
 	if channel == nil {
 		return nil, fmt.Errorf("%w: rabbit channel is nil", ErrPublisherUnavailable)
@@ -63,6 +76,7 @@ func newRabbitPublisher(channel rabbitChannel, exchange string) (*RabbitPublishe
 		returns:       channel.NotifyReturn(make(chan amqp.Return, 1)),
 		watcherStop:   make(chan struct{}),
 		watcherDone:   make(chan struct{}),
+		channelClosed: make(chan struct{}),
 	}
 	publisher.available.Store(true)
 	closeNotifications := channel.NotifyClose(make(chan *amqp.Error, 1))
@@ -108,13 +122,7 @@ func (publisher *RabbitPublisher) Publish(ctx context.Context, event Event) erro
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
 	}
-	publisher.mu.Lock()
-	defer publisher.mu.Unlock()
-	if publisher.retired {
-		return fmt.Errorf("%w: rabbit publisher channel is retired", ErrPublisherUnavailable)
-	}
-	sequence := publisher.channel.GetNextPublishSeqNo()
-	if err := publisher.channel.PublishWithContext(ctx, publisher.exchange, event.Type, true, false, amqp.Publishing{
+	return publisher.Route(ctx, publisher.exchange, event.Type, amqp.Publishing{
 		DeliveryMode: amqp.Persistent,
 		ContentType:  "application/json",
 		MessageId:    event.ID,
@@ -127,11 +135,37 @@ func (publisher *RabbitPublisher) Publish(ctx context.Context, event Event) erro
 			"causation_id":   event.CausationID,
 		},
 		Body: body,
-	}); err != nil {
+	})
+}
+
+// Route publishes a persistent mandatory raw message and waits for the
+// sequence-correlated return/confirmation outcome.
+func (publisher *RabbitPublisher) Route(
+	ctx context.Context,
+	exchange string,
+	key string,
+	message amqp.Publishing,
+) error {
+	if publisher == nil || publisher.channel == nil {
+		return fmt.Errorf("%w: rabbit publisher is nil", ErrPublisherUnavailable)
+	}
+	if message.MessageId == "" {
+		return errors.New("rabbit routed message requires MessageId")
+	}
+	message.DeliveryMode = amqp.Persistent
+	publisher.mu.Lock()
+	defer publisher.mu.Unlock()
+	if publisher.retired {
+		return fmt.Errorf("%w: rabbit publisher channel is retired", ErrPublisherUnavailable)
+	}
+	sequence := publisher.channel.GetNextPublishSeqNo()
+	if err := publisher.channel.PublishWithContext(ctx, exchange, key, true, false, message); err != nil {
 		publisher.retireLocked()
 		return fmt.Errorf("%w: publish event: %w", ErrPublisherUnavailable, err)
 	}
-	err, aligned := awaitAMQPPublishOutcome(ctx, publisher.confirmations, publisher.returns, sequence, event.ID)
+	err, aligned := awaitAMQPPublishOutcome(
+		ctx, publisher.confirmations, publisher.returns, publisher.channelClosed,
+		sequence, message.MessageId)
 	if !aligned {
 		publisher.retireLocked()
 		return fmt.Errorf("%w: %w", ErrPublisherUnavailable, err)
@@ -155,6 +189,7 @@ func (publisher *RabbitPublisher) watchClose(notifications <-chan *amqp.Error) {
 	defer close(publisher.watcherDone)
 	select {
 	case <-notifications:
+		publisher.signalOnce.Do(func() { close(publisher.channelClosed) })
 		publisher.available.Store(false)
 		publisher.mu.Lock()
 		publisher.retired = true
@@ -174,6 +209,7 @@ func awaitAMQPPublishOutcome(
 	ctx context.Context,
 	confirmations <-chan amqp.Confirmation,
 	returns <-chan amqp.Return,
+	channelClosed <-chan struct{},
 	sequence uint64,
 	messageID string,
 ) (error, bool) {
@@ -217,15 +253,29 @@ func awaitAMQPPublishOutcome(
 			return nil, true
 		case <-ctx.Done():
 			return ctx.Err(), false
+		case <-channelClosed:
+			return errors.New("rabbit channel closed before publish outcome"), false
 		}
 	}
 }
 
 // AMQPDelivery adapts RabbitMQ's manual-ack delivery to Delivery. RetryCount
 // reads x-death metadata produced by retry queues instead of using requeue.
-type AMQPDelivery struct{ amqp.Delivery }
+type AMQPDelivery struct {
+	amqp.Delivery
+	RetryQueue  string
+	RetryReason string
+}
 
 func (delivery AMQPDelivery) RetryCount() int {
+	reason := delivery.RetryReason
+	if reason == "" {
+		reason = "expired"
+	}
+	return delivery.RetryCountFor(delivery.RetryQueue, reason)
+}
+
+func (delivery AMQPDelivery) RetryCountFor(queue, reason string) int {
 	value, ok := delivery.Headers["x-death"]
 	if !ok {
 		return 0
@@ -238,6 +288,18 @@ func (delivery AMQPDelivery) RetryCount() int {
 	for _, entry := range entries {
 		table, ok := entry.(amqp.Table)
 		if !ok {
+			continue
+		}
+		entryQueue, _ := table["queue"].(string)
+		entryReason, _ := table["reason"].(string)
+		if reason != "" && entryReason != reason {
+			continue
+		}
+		if queue != "" {
+			if entryQueue != queue {
+				continue
+			}
+		} else if entryQueue == "" || !strings.HasSuffix(entryQueue, ".retry") {
 			continue
 		}
 		switch count := table["count"].(type) {
@@ -255,17 +317,30 @@ func (delivery AMQPDelivery) RetryCount() int {
 // ProcessRabbitDelivery decodes an envelope, runs it transactionally, then
 // manually acknowledges only after commit. Invalid envelopes go straight DLQ.
 func ProcessRabbitDelivery(ctx context.Context, tx pgx.Tx, consumer string, delivery amqp.Delivery, handler func(Event) error, policy RetryPolicy) error {
+	return ProcessRabbitDeliveryForRetryQueue(ctx, tx, consumer, delivery, "", handler, policy)
+}
+
+func ProcessRabbitDeliveryForRetryQueue(
+	ctx context.Context,
+	tx pgx.Tx,
+	consumer string,
+	delivery amqp.Delivery,
+	retryQueue string,
+	handler func(Event) error,
+	policy RetryPolicy,
+) error {
+	adapted := AMQPDelivery{Delivery: delivery, RetryQueue: retryQueue, RetryReason: "expired"}
 	var event Event
 	if err := json.Unmarshal(delivery.Body, &event); err != nil {
-		return rejectMalformed(ctx, tx, AMQPDelivery{Delivery: delivery}, fmt.Errorf("decode event envelope: %w", err))
+		return rejectMalformed(ctx, tx, adapted, fmt.Errorf("decode event envelope: %w", err))
 	}
 	if !validEventID(event.ID) || event.SchemaVersion != CurrentSchemaVersion || event.Type == "" || event.Subject == "" {
-		return rejectMalformed(ctx, tx, AMQPDelivery{Delivery: delivery}, errors.New("invalid event envelope"))
+		return rejectMalformed(ctx, tx, adapted, errors.New("invalid event envelope"))
 	}
 	if handler == nil {
-		return rejectMalformed(ctx, tx, AMQPDelivery{Delivery: delivery}, errors.New("messaging rabbit handler is nil"))
+		return rejectMalformed(ctx, tx, adapted, errors.New("messaging rabbit handler is nil"))
 	}
-	return ProcessDelivery(ctx, tx, consumer, event, func() error { return handler(event) }, AMQPDelivery{Delivery: delivery}, policy)
+	return ProcessDelivery(ctx, tx, consumer, event, func() error { return handler(event) }, adapted, policy)
 }
 
 func rejectMalformed(ctx context.Context, tx pgx.Tx, delivery Delivery, cause error) error {

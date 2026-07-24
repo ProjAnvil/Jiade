@@ -82,6 +82,16 @@ func run() error {
 	if err := declareOrderConsumerTopology(consumerChannel); err != nil {
 		return err
 	}
+	retryPublisherChannel, err := connection.Channel()
+	if err != nil {
+		return fmt.Errorf("open order retry publisher channel: %w", err)
+	}
+	retryRouter, err := messaging.NewConfirmedRouter(retryPublisherChannel)
+	if err != nil {
+		_ = retryPublisherChannel.Close()
+		return err
+	}
+	defer retryRouter.Close()
 
 	resilient := platformclient.New(platformclient.Config{
 		HTTPClient:     &http.Client{},
@@ -89,11 +99,14 @@ func run() error {
 		AttemptTimeout: settings.Clients.AttemptTimeout,
 	})
 	store := order.NewPostgresStore(pool, nil)
+	customerClient := order.NewCustomerHTTPClient(environment("CUSTOMER_URL", "http://customer:8080"), resilient)
+	catalogClient := order.NewCatalogHTTPClient(environment("CATALOG_URL", "http://catalog:8080"), resilient)
+	inventoryClient := order.NewInventoryHTTPClient(environment("INVENTORY_URL", "http://inventory:8080"), resilient)
 	service := order.NewService(
 		store,
-		order.NewCustomerHTTPClient(environment("CUSTOMER_URL", "http://customer:8080"), resilient),
-		order.NewCatalogHTTPClient(environment("CATALOG_URL", "http://catalog:8080"), resilient),
-		order.NewInventoryHTTPClient(environment("INVENTORY_URL", "http://inventory:8080"), resilient),
+		customerClient,
+		catalogClient,
+		inventoryClient,
 		order.ServiceOptions{},
 	)
 	relay := order.NewWorkerLifecycle(processContext, func(ctx context.Context) error {
@@ -102,8 +115,8 @@ func run() error {
 		})
 	})
 	consumer := order.NewWorkerLifecycle(processContext, func(ctx context.Context) error {
-		return order.RunConsumer(ctx, consumerChannel, orderQueue,
-			order.NewConsumer(store, messaging.RetryPolicy{MaxAttempts: 3}),
+		return order.RunConsumer(ctx, consumerChannel, retryRouter, orderQueue,
+			order.NewConsumer(store, messaging.RetryPolicy{MaxAttempts: 3}).WithRetryQueue(retryQueue),
 			order.DeliveryRouting{
 				RetryExchange: retryExchange, RetryRoutingKey: retryRoute,
 				DeadExchange: deadExchange, DeadRoutingKey: deadRoute,
@@ -111,11 +124,17 @@ func run() error {
 	})
 
 	server := httpx.NewServer(httpx.ServerConfig{
-		Service:           settings.Service,
-		Instance:          settings.Instance,
-		Addr:              settings.HTTP.Addr,
-		Handler:           order.NewHandler(service),
-		Ready:             order.NewRuntimeReadiness(pool.Ping, publisher, connection.IsClosed, relay, consumer),
+		Service:  settings.Service,
+		Instance: settings.Instance,
+		Addr:     settings.HTTP.Addr,
+		Handler:  order.NewHandler(service),
+		Ready: order.NewRuntimeReadinessWithDependencies(
+			pool.Ping, order.CombinePublisherAvailability(publisher, retryRouter),
+			connection.IsClosed,
+			[]func(context.Context) error{
+				customerClient.Ready, catalogClient.Ready, inventoryClient.Ready,
+			},
+			relay, consumer),
 		ShutdownTimeout:   settings.Shutdown.Timeout,
 		RequestBodyLimit:  settings.HTTP.RequestBodyLimit,
 		ReadHeaderTimeout: settings.HTTP.ReadHeaderTimeout,
@@ -200,6 +219,12 @@ func orderEventBindings() []string {
 		"payment.paid.v1",
 		"payment.refunded.v1",
 		"refund.succeeded.v1",
+		"inventory.committed.v1",
+		"inventory.reservation-committed.v1",
+		"inventory.released.v1",
+		"inventory.reservation-released.v1",
+		"fulfillment.cancelled.v1",
+		"fulfillment.cancellation-succeeded.v1",
 		"fulfillment.completed.v1",
 		"fulfillment.delivered.v1",
 	}

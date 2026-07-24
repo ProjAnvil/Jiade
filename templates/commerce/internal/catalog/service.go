@@ -60,6 +60,7 @@ type CheckoutSnapshot struct {
 	AvailableForSale bool           `json:"available_for_sale"`
 	UnitPriceMinor   int64          `json:"unit_price_minor"`
 	Currency         string         `json:"currency"`
+	Channel          string         `json:"channel"`
 	WeightGrams      int            `json:"weight_grams,omitempty"`
 	Attributes       map[string]any `json:"attributes,omitempty"`
 }
@@ -113,7 +114,8 @@ func (service *Service) GetCheckoutSnapshot(ctx context.Context, sku string) (Ch
 	}
 	if snapshot.ProductID == "" || snapshot.SKU != sku || snapshot.ProductTitle == "" ||
 		snapshot.VariantTitle == "" || snapshot.UnitPriceMinor < 0 ||
-		len(snapshot.Currency) != 3 || snapshot.Status != "active" {
+		len(snapshot.Currency) != 3 || snapshot.Status != "active" ||
+		(snapshot.Channel != "" && snapshot.Channel != "web") {
 		return CheckoutSnapshot{}, ErrSKUNotSaleable
 	}
 	snapshot.AvailableForSale = true

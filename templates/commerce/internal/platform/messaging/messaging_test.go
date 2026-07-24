@@ -184,14 +184,16 @@ func TestProcessDeliveryRejectsMalformedEventIDWithoutInboxWrite(t *testing.T) {
 func TestAMQPDeliveryXDeathCountBoundsRetry(t *testing.T) {
 	delivery := AMQPDelivery{Delivery: amqp.Delivery{Headers: amqp.Table{
 		"x-death": []interface{}{
-			amqp.Table{"count": int64(2)},
-			amqp.Table{"count": int32(1)},
+			amqp.Table{"count": int64(2), "queue": "order.saga.retry", "reason": "expired"},
+			amqp.Table{"count": int32(1), "queue": "order.saga.retry", "reason": "expired"},
+			amqp.Table{"count": int64(99), "queue": "other.retry", "reason": "rejected"},
+			amqp.Table{"count": int64(50), "queue": "other.retry", "reason": "expired"},
 		},
 	}}}
-	if got := delivery.RetryCount(); got != 3 {
-		t.Fatalf("RetryCount()=%d, want 3", got)
+	if got := delivery.RetryCountFor("order.saga.retry", "expired"); got != 3 {
+		t.Fatalf("RetryCountFor()=%d, want 3", got)
 	}
-	if retryable(errors.New("temporary"), delivery.RetryCount(), RetryPolicy{MaxAttempts: 3}) {
+	if retryable(errors.New("temporary"), delivery.RetryCountFor("order.saga.retry", "expired"), RetryPolicy{MaxAttempts: 3}) {
 		t.Fatal("retryable()=true at x-death retry limit")
 	}
 }

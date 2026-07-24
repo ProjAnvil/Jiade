@@ -22,6 +22,10 @@ func NewCustomerHTTPClient(baseURL string, resilient *platformclient.Client) *Cu
 	return &CustomerHTTPClient{baseURL: strings.TrimRight(baseURL, "/"), client: resilient}
 }
 
+func (client *CustomerHTTPClient) Ready(ctx context.Context) error {
+	return dependencyReady(ctx, client.client, client.baseURL)
+}
+
 func (client *CustomerHTTPClient) Validate(
 	ctx context.Context,
 	customerID string,
@@ -82,6 +86,10 @@ func NewCatalogHTTPClient(baseURL string, resilient *platformclient.Client) *Cat
 	return &CatalogHTTPClient{baseURL: strings.TrimRight(baseURL, "/"), client: resilient}
 }
 
+func (client *CatalogHTTPClient) Ready(ctx context.Context) error {
+	return dependencyReady(ctx, client.client, client.baseURL)
+}
+
 func (client *CatalogHTTPClient) Snapshot(
 	ctx context.Context,
 	skus []string,
@@ -109,14 +117,19 @@ func (client *CatalogHTTPClient) Snapshot(
 }
 
 type catalogSnapshotResponse struct {
-	SKU              string `json:"sku"`
-	Title            string `json:"title"`
-	PriceMinor       int64  `json:"price_minor"`
-	UnitPriceMinor   int64  `json:"unit_price_minor"`
-	Currency         string `json:"currency"`
-	ProductTitle     string `json:"product_title"`
-	Status           string `json:"status"`
-	AvailableForSale bool   `json:"available_for_sale"`
+	ProductID        string         `json:"product_id"`
+	SKU              string         `json:"sku"`
+	Title            string         `json:"title"`
+	VariantTitle     string         `json:"variant_title"`
+	PriceMinor       int64          `json:"price_minor"`
+	UnitPriceMinor   int64          `json:"unit_price_minor"`
+	Currency         string         `json:"currency"`
+	Channel          string         `json:"channel"`
+	ProductTitle     string         `json:"product_title"`
+	WeightGrams      int            `json:"weight_grams"`
+	Attributes       map[string]any `json:"attributes"`
+	Status           string         `json:"status"`
+	AvailableForSale bool           `json:"available_for_sale"`
 }
 
 func (response catalogSnapshotResponse) snapshotFor(sku string) (CatalogSnapshot, error) {
@@ -129,7 +142,10 @@ func (response catalogSnapshotResponse) snapshotFor(sku string) (CatalogSnapshot
 			price = response.PriceMinor
 		}
 		return CatalogSnapshot{
-			SKU: sku, Title: response.Title, UnitPriceMinor: price, Currency: response.Currency,
+			ProductID: response.ProductID, SKU: sku, ProductTitle: response.ProductTitle,
+			VariantTitle: response.VariantTitle, Title: response.Title,
+			Attributes: response.Attributes, WeightGrams: response.WeightGrams,
+			UnitPriceMinor: price, Currency: response.Currency, Channel: response.Channel,
 		}, nil
 	}
 	return CatalogSnapshot{}, fmt.Errorf("%w: catalog did not return SKU %s", ErrInvalidCommand, sku)
@@ -144,18 +160,56 @@ func NewInventoryHTTPClient(baseURL string, resilient *platformclient.Client) *I
 	return &InventoryHTTPClient{baseURL: strings.TrimRight(baseURL, "/"), client: resilient}
 }
 
+func (client *InventoryHTTPClient) Ready(ctx context.Context) error {
+	return dependencyReady(ctx, client.client, client.baseURL)
+}
+
+func dependencyReady(
+	ctx context.Context,
+	resilient *platformclient.Client,
+	baseURL string,
+) error {
+	if resilient == nil || strings.TrimSpace(baseURL) == "" {
+		return ErrUpstreamUnavailable
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/readyz", nil)
+	if err != nil {
+		return err
+	}
+	response, err := resilient.Do(ctx, request, platformclient.Policy{})
+	if err != nil {
+		return fmt.Errorf("%w: readiness: %v", ErrUpstreamUnavailable, err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, response.Body)
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("%w: readiness status %d", ErrUpstreamUnavailable, response.StatusCode)
+	}
+	return nil
+}
+
 func (client *InventoryHTTPClient) Reserve(
 	ctx context.Context,
 	command ReservationCommand,
 	propagation Propagation,
 ) error {
+	_, err := client.ReserveResult(ctx, command, propagation)
+	return err
+}
+
+func (client *InventoryHTTPClient) ReserveResult(
+	ctx context.Context,
+	command ReservationCommand,
+	propagation Propagation,
+) (ReservationResult, error) {
 	if client == nil || client.client == nil {
-		return fmt.Errorf("%w: inventory client is unavailable", ErrUpstreamUnavailable)
+		return ReservationResult{}, fmt.Errorf("%w: inventory client is unavailable", ErrUpstreamUnavailable)
 	}
 	propagation.IdempotencyKey = command.IdempotencyKey
-	var result json.RawMessage
-	return doDependencyJSON(ctx, client.client, client.baseURL, http.MethodPost,
+	var result ReservationResult
+	err := doDependencyJSON(ctx, client.client, client.baseURL, http.MethodPost,
 		"/internal/v1/reservations", command, propagation, &result)
+	return result, err
 }
 
 func (client *InventoryHTTPClient) Release(ctx context.Context, orderID string, propagation Propagation) error {

@@ -57,3 +57,29 @@ func TestCalculateTotalsInvariantRejectsInvalidMoney(t *testing.T) {
 		})
 	}
 }
+
+func TestAllocatePercentageDiscountUsesLargestRemainderDeterministically(t *testing.T) {
+	got, err := AllocatePercentageDiscount([]int64{105, 105, 105}, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []int64{11, 10, 10}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("allocation=%v, want %v", got, want)
+		}
+	}
+}
+
+func TestRegionalTaxUsesDiscountedTaxableAmount(t *testing.T) {
+	rate, tax, err := RegionalTax("CN", "上海市", 9000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rate != 1300 || tax != 1170 {
+		t.Fatalf("rate=%d tax=%d, want 1300 and 1170", rate, tax)
+	}
+	if _, tax, err := RegionalTax("US", "OR", 9000); err != nil || tax != 0 {
+		t.Fatalf("Oregon tax=%d err=%v, want zero", tax, err)
+	}
+}
