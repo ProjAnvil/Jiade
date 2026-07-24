@@ -6,6 +6,16 @@
 
 它脚手架的不是代码片段，而是**整套系统**：一份生产风格架构的可运行微缩版，可用于学习、演示、集成测试，或作为工具实验的基座。
 
+## 内置模板
+
+- `bank`：银行核心系统，7 个服务、7 个库。
+- `commerce`：完整电商后端缩影，覆盖商品/SKU、客户、库存预占、订单、支付退款、拆单履约和物流跟踪，6 个服务、6 个库。
+
+```bash
+jiade init --template commerce --dir ./myshop
+cd myshop && make up
+```
+
 ## 生成物（`bank` 模板）
 
 一个微缩银行核心系统——**7 个 Go 微服务 + 7 个 PostgreSQL 库**（单实例）。每个服务独占自己的库，跨域读取走 HTTP API：
@@ -76,7 +86,7 @@ jiade down
 
 ## 工作原理
 
-- jiade 把模板打成 tar 内嵌（`internal/template/templates.tar`，改动后用 `go generate ./internal/template` 重打包），`init` 逐字拷出——零模板替换，`templates/bank/` 里是什么样，生成物就是什么样。
+- jiade 把所有内置模板打成 tar 内嵌（`internal/template/templates.tar`，改动后用 `go generate ./internal/template` 重打包），`init` 逐字拷出——零模板替换。
 - `jiade up/down` 在目标目录包装 `docker compose up -d` / `down`（先探测 docker/compose/daemon）。
 - `jiade seed` 运行生成物自带的灌数器：建 7 库 → 跑 7 套迁移 → 按依赖序灌各域（core → customer → payment → reward → risk → loan → wealth）。9 个幂等步骤。
 
@@ -88,6 +98,7 @@ internal/cli/        list / init / up / down / seed 命令
 internal/template/   内嵌模板 registry（tar 方案）
 internal/docker/     docker/compose/daemon 探测
 templates/bank/      bank 模板——独立 Go module（`module bank`）
+templates/commerce/  commerce 模板——独立 Go module（`module commerce`）
 docs/superpowers/    设计 spec 与实施计划
 ```
 

@@ -6,6 +6,18 @@
 
 Think of it as scaffolding for *whole systems*, not just code: what you get is a working miniature of a production-style architecture, useful for learning, demos, integration testing, and as a substrate for tooling experiments.
 
+## Built-in templates
+
+- `bank`: core banking, seven services and seven databases.
+- `commerce`: a complete commerce backend microcosm covering catalog/SKUs,
+  customers, inventory reservations, orders, payments/refunds, split
+  fulfillment, and tracking; six services and six databases.
+
+```bash
+jiade init --template commerce --dir ./myshop
+cd myshop && make up
+```
+
 ## What you get (the `bank` template)
 
 A miniature core-banking system — **7 Go microservices + 7 PostgreSQL databases** (single instance). Each service owns its database and cross-domain reads use HTTP APIs:
@@ -76,7 +88,7 @@ Seed scales: `--scale=dev` (~1/4 volume, default) or `--scale=full`. Re-running 
 
 ## How it works
 
-- jiade embeds the template as a tar (`internal/template/templates.tar`, rebuilt with `go generate ./internal/template`) and copies it out verbatim — zero templating/substitution, what you see in `templates/bank/` is what you get.
+- jiade embeds all built-in templates as a tar (`internal/template/templates.tar`, rebuilt with `go generate ./internal/template`) and copies the selected one out verbatim.
 - `jiade up/down` wraps `docker compose up -d` / `down` in the target directory (with a docker/compose/daemon probe first).
 - `jiade seed` runs the generated project's own seeder: create 7 databases → run 7 migrations → seed each domain in dependency order (core → customer → payment → reward → risk → loan → wealth). 9 idempotent steps.
 
@@ -88,6 +100,7 @@ internal/cli/        list / init / up / down / seed commands
 internal/template/   embedded template registry (tar-based)
 internal/docker/     docker/compose/daemon probe
 templates/bank/      the bank template — a standalone Go module (`module bank`)
+templates/commerce/  the commerce template — a standalone Go module (`module commerce`)
 docs/superpowers/    design specs & implementation plans
 ```
 

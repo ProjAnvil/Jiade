@@ -1,0 +1,14 @@
+# Compiled service binaries produced by `go build ./cmd/<svc>` in this directory.
+/catalog
+/customer
+/inventory
+/order
+/payment
+/fulfillment
+/seed
+/jiade
+
+# Go test and coverage artifacts.
+*.test
+*.out
+coverage.txt

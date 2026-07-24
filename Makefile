@@ -1,6 +1,6 @@
 .PHONY: generate test bank-test e2e clean
 
-# Pack templates/bank → templates.tar (required by go:embed; rerun after changing the template)
+# Pack all built-in templates → templates.tar (required by go:embed)
 generate:
 	go generate ./internal/template
 

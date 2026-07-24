@@ -1,7 +1,7 @@
 package template
 
-// go:generate packages the bank root templates/bank into templates.tar in this package directory.
+// go:generate packages all built-in templates into templates.tar.
 // The working directory is the package directory (internal/template/), so -C points to ../../templates.
-// After changing templates/bank, you must re-`go generate ./internal/template`.
+// After changing a template, you must re-`go generate ./internal/template`.
 //
-//go:generate tar -C ../../templates -cf templates.tar bank
+//go:generate tar -C ../../templates -cf templates.tar bank commerce
