@@ -4,6 +4,14 @@
 # Processors: batch + memory_limiter to keep memory bounded.
 # Exporters: Prometheus (for the local prometheus scrape target on :8888)
 # and a debug exporter for early bring-up.
+# Extensions: health_check exposes :13133 for liveness probes. The collector
+# image (otel/opentelemetry-collector-contrib) is distroless and ships no
+# shell/wget, so any probe must hit this HTTP endpoint rather than run a
+# command inside the container.
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
 
 receivers:
   otlp:
@@ -46,6 +54,8 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [debug]
+
+  extensions: [health_check]
 
   telemetry:
     logs:

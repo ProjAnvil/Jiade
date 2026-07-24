@@ -46,12 +46,11 @@ services:
       - /tmp
     security_opt:
       - no-new-privileges:true
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:13133/ >/dev/null 2>&1 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 10s
+    # The collector image is distroless (no shell, no wget/curl), so a
+    # container-local healthcheck cannot run. The health_check extension
+    # (enabled in collector.yaml) exposes :13133 inside the container for
+    # any external probe (e.g. another service or an orchestrator) to poll.
+    # Readiness is otherwise implied by prometheus scraping :8888.
 
   prometheus:
     profiles: ["observability"]

@@ -1,6 +1,5 @@
 {
-  "_comment": "RabbitMQ definitions for the commerce topology. Declares the commerce.events topic exchange plus per-service queues, retry queues (TTL 2000ms, dead-letter back to commerce.events), and dead-letter queues. Bindings match the constants hardcoded in cmd/{order,payment,fulfillment}/main.go. The commerce user is also declared here with a sha256 hash (salt + password 'commerce') because RabbitMQ 4.x skips RABBITMQ_DEFAULT_USER creation when load_definitions is set.",
-  "rabbit_version": "4.0.2",
+  "_comment": "RabbitMQ definitions for the commerce topology. Declares the commerce.events topic exchange plus per-service queues, retry queues (TTL 2000ms, dead-letter back to commerce.events), and dead-letter queues. Bindings match the constants hardcoded in cmd/{order,payment,fulfillment}/main.go. The commerce user is also declared here with a sha256 hash (salt + password 'commerce') because RabbitMQ 4.x skips RABBITMQ_DEFAULT_USER creation when load_definitions is set. rabbit_version intentionally omitted: the compose image tag rabbitmq:4.0-management floats, so pinning a version here would drift from the running broker.",
   "vhosts": [
     {
       "name": "/"
