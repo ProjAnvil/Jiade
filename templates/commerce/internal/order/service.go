@@ -209,11 +209,21 @@ type ReservationCommand struct {
 	Lines          []ReservationLine `json:"lines"`
 }
 
+// ReservationAllocation mirrors inventory's 7-field allocation shape so the
+// order saga can decode real inventory.committed.v1/inventory.released.v1
+// events under DisallowUnknownFields. Order only consumes SKU/Quantity/Status
+// (see validateInventoryResult); OrderID/LocationID/ExpiresAt are accepted to
+// stay in lock-step with the producer contract in internal/inventory/service.go
+// and would otherwise reject every real event. Keep the JSON tags identical to
+// inventory.ReservationAllocation.
 type ReservationAllocation struct {
-	AllocationID string `json:"reservation_id"`
-	SKU          string `json:"sku"`
-	Quantity     int64  `json:"quantity"`
-	Status       string `json:"status"`
+	AllocationID string    `json:"reservation_id"`
+	OrderID      string    `json:"order_id"`
+	SKU          string    `json:"sku"`
+	LocationID   string    `json:"location_id"`
+	Quantity     int64     `json:"quantity"`
+	Status       string    `json:"status"`
+	ExpiresAt    time.Time `json:"expires_at"`
 }
 
 type ReservationResult struct {

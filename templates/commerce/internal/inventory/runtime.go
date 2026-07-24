@@ -83,3 +83,73 @@ func NewRuntimeReadiness(
 		return nil
 	}
 }
+
+type combinedAvailability []publisherAvailability
+
+func (publishers combinedAvailability) Available() bool {
+	if len(publishers) == 0 {
+		return false
+	}
+	for _, publisher := range publishers {
+		if publisher == nil || !publisher.Available() {
+			return false
+		}
+	}
+	return true
+}
+
+// CombinePublisherAvailability returns a single readiness predicate over a set
+// of publishers.
+func CombinePublisherAvailability(publishers ...publisherAvailability) publisherAvailability {
+	return combinedAvailability(publishers)
+}
+
+// workerLifecycle is the minimal completion-signal surface NewRuntimeReadiness
+// probes for both RelayLifecycle and Consumer's WorkerLifecycle.
+type workerLifecycle interface {
+	ErrIfStopped() error
+}
+
+// NewRuntimeReadinessWithDependencies additionally probes a list of external
+// dependency readiness functions and a set of workers (relay + consumer) before
+// reporting ready. Mirrors internal/payment.NewRuntimeReadinessWithDependencies
+// and internal/fulfillment.NewRuntimeReadinessWithDependencies.
+func NewRuntimeReadinessWithDependencies(
+	database func(context.Context) error,
+	publisher publisherAvailability,
+	brokerClosed func() bool,
+	dependencies []func(context.Context) error,
+	workers ...workerLifecycle,
+) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if database == nil {
+			return errors.New("inventory database readiness is unavailable")
+		}
+		if err := database(ctx); err != nil {
+			return err
+		}
+		if brokerClosed != nil && brokerClosed() {
+			return errors.New("inventory broker connection is closed")
+		}
+		if publisher == nil || !publisher.Available() {
+			return errors.New("inventory publisher is unavailable")
+		}
+		for index, dependency := range dependencies {
+			if dependency == nil {
+				return fmt.Errorf("inventory dependency %d readiness is unavailable", index)
+			}
+			if err := dependency(ctx); err != nil {
+				return fmt.Errorf("inventory dependency %d is unavailable: %w", index, err)
+			}
+		}
+		if len(workers) == 0 {
+			return errors.New("inventory workers are unavailable")
+		}
+		for _, worker := range workers {
+			if err := worker.ErrIfStopped(); err != nil {
+				return fmt.Errorf("inventory worker stopped: %w", err)
+			}
+		}
+		return nil
+	}
+}
