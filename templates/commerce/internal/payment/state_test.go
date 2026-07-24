@@ -64,7 +64,6 @@ func TestPaymentInvariantRejectsBackwardAndInvalidTransitions(t *testing.T) {
 		{from: StateFailed, event: EventCapture},
 		{from: StateCancelled, event: EventAuthorize},
 		{from: StateProcessing, event: EventRefund},
-		{from: StateRefunded, event: EventCapture},
 		{from: State("unknown"), event: EventFail},
 		{from: StateProcessing, event: Event("unknown")},
 	}
@@ -72,5 +71,27 @@ func TestPaymentInvariantRejectsBackwardAndInvalidTransitions(t *testing.T) {
 		if _, err := Transition(test.from, test.event); !errors.Is(err, ErrInvalidTransition) {
 			t.Fatalf("Transition(%q, %q) error=%v", test.from, test.event, err)
 		}
+	}
+}
+
+func TestPaymentInvariantRefundedIgnoresLateCaptureAndRefundEvents(t *testing.T) {
+	for _, event := range []Event{EventCapture, EventPartialRefund, EventRefund} {
+		got, err := Transition(StateRefunded, event)
+		if err != nil {
+			t.Fatalf("event=%q error=%v", event, err)
+		}
+		if got != StateRefunded {
+			t.Fatalf("event=%q state=%q, want refunded", event, got)
+		}
+	}
+}
+
+func TestPaymentInvariantPartiallyRefundedIgnoresLateCapture(t *testing.T) {
+	got, err := Transition(StatePartiallyRefunded, EventCapture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != StatePartiallyRefunded {
+		t.Fatalf("state=%q, want partially_refunded", got)
 	}
 }

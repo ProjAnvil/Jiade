@@ -59,6 +59,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_address_one_default
   ON address(customer_id)
   WHERE is_default;
 
+-- Default-address existence is enforced by the Task 5 customer service after
+-- staged address writes. The index above enforces at most one; a row CHECK
+-- cannot enforce at least one child address for every customer.
 CREATE TABLE IF NOT EXISTS customer_consent (
   consent_id text PRIMARY KEY,
   customer_id text NOT NULL REFERENCES customer(customer_id) ON DELETE CASCADE,

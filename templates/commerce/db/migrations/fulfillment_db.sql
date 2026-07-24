@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS fulfillment_order (
 
 CREATE INDEX IF NOT EXISTS idx_fulfillment_order
   ON fulfillment_order(order_id, fulfillment_id);
+CREATE INDEX IF NOT EXISTS idx_fulfillment_created_at
+  ON fulfillment_order(created_at DESC, fulfillment_id);
 CREATE INDEX IF NOT EXISTS idx_fulfillment_location_status
   ON fulfillment_order(location_id, status, created_at, fulfillment_id);
 
@@ -33,7 +35,9 @@ CREATE TABLE IF NOT EXISTS pick_item (
   UNIQUE (fulfillment_id, order_item_id),
   FOREIGN KEY (fulfillment_id, order_item_id)
     REFERENCES fulfillment_item(fulfillment_id, order_item_id) ON DELETE CASCADE,
-  CHECK (picked_quantity <= requested_quantity)
+  CHECK (picked_quantity <= requested_quantity),
+  CHECK (status <> 'picked' OR picked_quantity = requested_quantity),
+  CHECK (status <> 'short' OR picked_quantity < requested_quantity)
 );
 
 CREATE INDEX IF NOT EXISTS idx_pick_item_status
@@ -74,7 +78,12 @@ CREATE TABLE IF NOT EXISTS shipment (
   shipped_at timestamptz,
   delivered_at timestamptz,
   UNIQUE (shipment_id, fulfillment_id),
-  CHECK (delivered_at IS NULL OR (shipped_at IS NOT NULL AND delivered_at >= shipped_at))
+  CHECK (status = 'label_created' OR shipped_at IS NOT NULL),
+  CHECK (
+    (status = 'delivered' AND delivered_at IS NOT NULL)
+    OR (status <> 'delivered' AND delivered_at IS NULL)
+  ),
+  CHECK (delivered_at IS NULL OR delivered_at >= shipped_at)
 );
 
 CREATE INDEX IF NOT EXISTS idx_shipment_fulfillment

@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS inventory_level (
   on_hand integer NOT NULL CHECK (on_hand >= 0),
   reserved integer NOT NULL CHECK (reserved >= 0 AND reserved <= on_hand),
   updated_at timestamptz NOT NULL,
+  available integer GENERATED ALWAYS AS (on_hand - reserved) STORED,
   PRIMARY KEY (sku, location_id)
 );
 
@@ -70,6 +71,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_movement_reference
   ON stock_movement(reason, reference_id, sku, location_id)
   WHERE reference_id IS NOT NULL;
 
+-- Movement/level reconciliation is enforced transactionally by the Task 5
+-- inventory service and rechecked by the Task 8 verifier. A per-row CHECK
+-- cannot aggregate the movement ledger while staged writes are in progress.
 CREATE TABLE IF NOT EXISTS outbox_event (
   event_id uuid PRIMARY KEY,
   event_type text NOT NULL,

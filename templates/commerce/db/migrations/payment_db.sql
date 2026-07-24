@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS payment_intent (
 
 CREATE INDEX IF NOT EXISTS idx_payment_order
   ON payment_intent(order_id, created_at DESC, payment_intent_id);
+CREATE INDEX IF NOT EXISTS idx_payment_created_at
+  ON payment_intent(created_at DESC, payment_intent_id);
 CREATE INDEX IF NOT EXISTS idx_payment_status
   ON payment_intent(status, created_at, payment_intent_id);
 
@@ -40,11 +42,47 @@ CREATE TABLE IF NOT EXISTS payment_attempt (
   failure_code text CHECK (failure_code IS NULL OR failure_code IN ('insufficient_funds', 'card_declined', 'provider_timeout', 'risk_rejection')),
   amount_minor bigint NOT NULL CHECK (amount_minor > 0),
   created_at timestamptz NOT NULL,
-  CHECK ((status = 'failed') OR failure_code IS NULL)
+  CHECK (
+    (status = 'failed' AND failure_code IS NOT NULL)
+    OR (status <> 'failed' AND failure_code IS NULL)
+  )
 );
 
 CREATE INDEX IF NOT EXISTS idx_payment_attempt_intent
   ON payment_attempt(payment_intent_id, created_at, attempt_id);
+
+CREATE OR REPLACE FUNCTION validate_payment_attempt()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  intent_amount bigint;
+BEGIN
+  SELECT amount_minor
+    INTO intent_amount
+    FROM payment_intent
+    WHERE payment_intent_id = NEW.payment_intent_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'payment intent % does not exist', NEW.payment_intent_id;
+  END IF;
+  IF NEW.amount_minor > intent_amount THEN
+    RAISE EXCEPTION 'payment attempt amount exceeds intent amount';
+  END IF;
+  IF NEW.status = 'failed' AND NEW.failure_code IS NULL THEN
+    RAISE EXCEPTION 'failed payment attempt requires failure_code';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_validate_payment_attempt ON payment_attempt;
+CREATE TRIGGER trg_validate_payment_attempt
+BEFORE INSERT OR UPDATE OF payment_intent_id, status, failure_code, amount_minor
+ON payment_attempt
+FOR EACH ROW
+EXECUTE FUNCTION validate_payment_attempt();
 
 CREATE TABLE IF NOT EXISTS refund (
   refund_id text PRIMARY KEY,
@@ -58,6 +96,53 @@ CREATE TABLE IF NOT EXISTS refund (
 
 CREATE INDEX IF NOT EXISTS idx_refund_intent
   ON refund(payment_intent_id, created_at, refund_id);
+
+CREATE OR REPLACE FUNCTION validate_refund()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  intent_amount bigint;
+  intent_status text;
+  refunded_amount bigint;
+BEGIN
+  SELECT amount_minor, status
+    INTO intent_amount, intent_status
+    FROM payment_intent
+    WHERE payment_intent_id = NEW.payment_intent_id
+    FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'payment intent % does not exist', NEW.payment_intent_id;
+  END IF;
+  IF intent_status NOT IN ('succeeded', 'partially_refunded') THEN
+    RAISE EXCEPTION 'refund requires a captured payment intent';
+  END IF;
+
+  IF NEW.status IN ('pending', 'succeeded') THEN
+    SELECT COALESCE(SUM(amount_minor), 0)
+      INTO refunded_amount
+      FROM refund
+      WHERE payment_intent_id = NEW.payment_intent_id
+        AND status IN ('pending', 'succeeded')
+        AND refund_id <> NEW.refund_id;
+
+    IF refunded_amount > intent_amount
+       OR NEW.amount_minor > intent_amount - refunded_amount THEN
+      RAISE EXCEPTION 'cumulative refund amount exceeds intent amount';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_validate_refund ON refund;
+CREATE TRIGGER trg_validate_refund
+BEFORE INSERT OR UPDATE OF payment_intent_id, amount_minor, status
+ON refund
+FOR EACH ROW
+EXECUTE FUNCTION validate_refund();
 
 CREATE TABLE IF NOT EXISTS webhook_inbox (
   provider_event_id text PRIMARY KEY,

@@ -62,6 +62,7 @@ func TestMigrationsApplyTwiceToDedicatedPostgreSQL(t *testing.T) {
 				}
 			}
 			assertInvalidFixtureRejected(t, ctx, pool, schema, filename)
+			assertDomainConstraintFixtures(t, ctx, pool, schema, filename)
 		})
 	}
 }
@@ -86,5 +87,117 @@ func assertInvalidFixtureRejected(t *testing.T, ctx context.Context, pool *pgxpo
 	}
 	if _, err := connection.Exec(ctx, fixtures[filename]); err == nil {
 		t.Fatal(fmt.Sprintf("invalid %s fixture unexpectedly succeeded", filename))
+	}
+}
+
+func assertDomainConstraintFixtures(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema, filename string) {
+	t.Helper()
+	connection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Release()
+	if _, err := connection.Exec(ctx, `SET search_path TO `+schema); err != nil {
+		t.Fatal(err)
+	}
+
+	switch filename {
+	case "inventory_db.sql":
+		if _, err := connection.Exec(ctx, `
+			INSERT INTO location VALUES ('loc-generated', 'Generated Test', 'warehouse', 1);
+			INSERT INTO inventory_level (sku, location_id, on_hand, reserved, updated_at)
+			VALUES ('sku-generated', 'loc-generated', 10, 3, now())`); err != nil {
+			t.Fatal(err)
+		}
+		var available int
+		if err := connection.QueryRow(ctx, `
+			SELECT available FROM inventory_level
+			WHERE sku = 'sku-generated' AND location_id = 'loc-generated'`).Scan(&available); err != nil {
+			t.Fatal(err)
+		}
+		if available != 7 {
+			t.Fatalf("generated availability=%d, want 7", available)
+		}
+	case "order_db.sql":
+		if _, err := connection.Exec(ctx, `
+			INSERT INTO sales_order (
+				order_id, order_no, customer_id, status, payment_status,
+				fulfillment_status, currency, subtotal_minor, discount_minor,
+				shipping_minor, tax_minor, total_minor, shipping_address,
+				idempotency_key, placed_at
+			) VALUES
+				('order-a', 'NO-A', 'customer', 'confirmed', 'paid', 'unfulfilled',
+				 'CNY', 100, 10, 0, 0, 90, '{}', 'order-a-key', now()),
+				('order-b', 'NO-B', 'customer', 'confirmed', 'paid', 'unfulfilled',
+				 'CNY', 100, 0, 0, 0, 100, '{}', 'order-b-key', now());
+			INSERT INTO order_item VALUES
+				('item-a', 'order-a', 'sku-a', 'A', 1, 100, 10, 90),
+				('item-b', 'order-b', 'sku-b', 'B', 1, 100, 0, 100)`); err != nil {
+			t.Fatal(err)
+		}
+		expectRejected(t, ctx, connection, `
+			INSERT INTO order_discount_allocation
+				(allocation_id, order_id, order_item_id, source, amount_minor)
+			VALUES ('bad-owner', 'order-a', 'item-b', 'promo', 10)`)
+		if _, err := connection.Exec(ctx, `
+			INSERT INTO order_discount_allocation
+				(allocation_id, order_id, order_item_id, source, amount_minor)
+			VALUES ('order-discount-1', 'order-a', NULL, 'promo', 10)`); err != nil {
+			t.Fatal(err)
+		}
+		expectRejected(t, ctx, connection, `
+			INSERT INTO order_discount_allocation
+				(allocation_id, order_id, order_item_id, source, amount_minor)
+			VALUES ('order-discount-2', 'order-a', NULL, 'promo', 10)`)
+		expectRejected(t, ctx, connection, `
+			INSERT INTO sales_order (
+				order_id, order_no, customer_id, status, payment_status,
+				fulfillment_status, currency, subtotal_minor, discount_minor,
+				shipping_minor, tax_minor, total_minor, shipping_address,
+				idempotency_key, placed_at
+			) VALUES ('bad-combination', 'NO-BAD', 'customer', 'completed', 'paid',
+				'unfulfilled', 'CNY', 100, 0, 0, 0, 100, '{}', 'bad-combination', now())`)
+	case "payment_db.sql":
+		if _, err := connection.Exec(ctx, `
+			INSERT INTO payment_intent
+				(payment_intent_id, order_id, amount_minor, currency, status, provider, idempotency_key, created_at)
+			VALUES
+				('pi-success', 'order-success', 100, 'CNY', 'succeeded', 'test', 'pi-success-key', now()),
+				('pi-processing', 'order-processing', 100, 'CNY', 'processing', 'test', 'pi-processing-key', now())`); err != nil {
+			t.Fatal(err)
+		}
+		expectRejected(t, ctx, connection, `
+			INSERT INTO payment_attempt VALUES
+				('attempt-too-large', 'pi-success', 'succeeded', NULL, 101, now())`)
+		expectRejected(t, ctx, connection, `
+			INSERT INTO payment_attempt VALUES
+				('attempt-no-code', 'pi-processing', 'failed', NULL, 100, now())`)
+		expectRejected(t, ctx, connection, `
+			INSERT INTO refund VALUES
+				('refund-not-captured', 'pi-processing', 10, 'pending', 'test', 'refund-not-captured-key', now())`)
+		if _, err := connection.Exec(ctx, `
+			INSERT INTO refund VALUES
+				('refund-60', 'pi-success', 60, 'pending', 'test', 'refund-60-key', now())`); err != nil {
+			t.Fatal(err)
+		}
+		expectRejected(t, ctx, connection, `
+			INSERT INTO refund VALUES
+				('refund-41', 'pi-success', 41, 'succeeded', 'test', 'refund-41-key', now())`)
+	case "fulfillment_db.sql":
+		if _, err := connection.Exec(ctx, `
+			INSERT INTO fulfillment_order VALUES
+				('fulfillment-valid', 'order-valid', 'location-valid', 'in_progress', now())`); err != nil {
+			t.Fatal(err)
+		}
+		expectRejected(t, ctx, connection, `
+			INSERT INTO shipment VALUES
+				('shipment-bad', 'fulfillment-valid', 'carrier', 'tracking-bad', 'delivered', NULL, NULL)`)
+	}
+}
+
+func expectRejected(t *testing.T, ctx context.Context, connection *pgxpool.Conn, statement string) {
+	t.Helper()
+	if _, err := connection.Exec(ctx, statement); err == nil {
+		t.Fatalf("invalid fixture unexpectedly succeeded: %s", strings.TrimSpace(statement))
 	}
 }

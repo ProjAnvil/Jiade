@@ -26,6 +26,41 @@ func (level Level) Available() (int64, error) {
 	return level.OnHand - level.Reserved, nil
 }
 
+// Reserve applies an active reservation to a level as one value operation.
+// Persistence code can write both returned values in the same transaction.
+func (level Level) Reserve(reservation Reservation) (Level, Reservation, error) {
+	available, err := level.Available()
+	if err != nil {
+		return level, reservation, err
+	}
+	if reservation.Quantity <= 0 {
+		return level, reservation, fmt.Errorf("%w: reservation quantity must be positive", ErrInvalidInventory)
+	}
+	if reservation.State != ReservationActive {
+		return level, reservation, fmt.Errorf("%w: reservation must be active", ErrInvalidInventory)
+	}
+	if reservation.Quantity > available {
+		return level, reservation, fmt.Errorf("%w: insufficient available stock", ErrInvalidInventory)
+	}
+	level.Reserved += reservation.Quantity
+	return level, reservation, nil
+}
+
+// Release returns held stock without changing on-hand stock.
+func (level Level) Release(reservation Reservation) (Level, Reservation, error) {
+	return level.applyReservationEffect(reservation, ReservationRelease)
+}
+
+// Expire returns held stock and records an expiry.
+func (level Level) Expire(reservation Reservation) (Level, Reservation, error) {
+	return level.applyReservationEffect(reservation, ReservationExpire)
+}
+
+// Commit consumes both on-hand and reserved stock.
+func (level Level) Commit(reservation Reservation) (Level, Reservation, error) {
+	return level.applyReservationEffect(reservation, ReservationCommit)
+}
+
 type ReservationState string
 
 const (
@@ -93,6 +128,40 @@ func (reservation Reservation) Transition(event ReservationEvent) (Reservation, 
 	}
 	reservation.State = target
 	return reservation, nil
+}
+
+func (level Level) applyReservationEffect(reservation Reservation, event ReservationEvent) (Level, Reservation, error) {
+	if _, err := level.Available(); err != nil {
+		return level, reservation, err
+	}
+	target, ok := reservationTarget(event)
+	if !ok || !validReservationState(reservation.State) {
+		return level, reservation, fmt.Errorf("%w: state %q event %q", ErrInvalidTransition, reservation.State, event)
+	}
+	if reservation.State == target {
+		return level, reservation, nil
+	}
+	if reservation.State != ReservationActive {
+		return level, reservation, fmt.Errorf("%w: state %q event %q", ErrInvalidTransition, reservation.State, event)
+	}
+	if reservation.Quantity <= 0 {
+		return level, reservation, fmt.Errorf("%w: reservation quantity must be positive", ErrInvalidInventory)
+	}
+	if reservation.Quantity > level.Reserved {
+		return level, reservation, fmt.Errorf("%w: reservation exceeds reserved stock", ErrInvalidInventory)
+	}
+
+	nextLevel := level
+	nextLevel.Reserved -= reservation.Quantity
+	if event == ReservationCommit {
+		nextLevel.OnHand -= reservation.Quantity
+	}
+	nextReservation := reservation
+	nextReservation.State = target
+	if _, err := nextLevel.Available(); err != nil {
+		return level, reservation, err
+	}
+	return nextLevel, nextReservation, nil
 }
 
 func reservationTarget(event ReservationEvent) (ReservationState, bool) {

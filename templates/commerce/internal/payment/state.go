@@ -66,13 +66,13 @@ func duplicatePaymentEvent(state State, event Event) bool {
 	case EventAuthorize:
 		return state == StateAuthorized
 	case EventCapture:
-		return state == StateSucceeded
+		return state == StateSucceeded || state == StatePartiallyRefunded || state == StateRefunded
 	case EventFail:
 		return state == StateFailed
 	case EventCancel:
 		return state == StateCancelled
 	case EventPartialRefund:
-		return state == StatePartiallyRefunded
+		return state == StatePartiallyRefunded || state == StateRefunded
 	case EventRefund:
 		return state == StateRefunded
 	default:

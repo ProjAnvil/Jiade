@@ -54,7 +54,7 @@ func duplicateOrderEvent(state State, event Event) bool {
 	case EventCheckoutStarted:
 		return state == StatePending
 	case EventPaymentSucceeded:
-		return state == StateConfirmed
+		return state == StateConfirmed || state == StateCompleted
 	case EventPaymentFailed, EventCancellationRequested:
 		return state == StateCancelled
 	case EventFulfillmentCompleted:

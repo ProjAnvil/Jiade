@@ -8,6 +8,8 @@ CREATE TABLE IF NOT EXISTS category (
   CHECK (path LIKE '/%')
 );
 
+-- Category depth is generated and verified by Task 8. A per-row CHECK cannot
+-- prove the depth of a hierarchy assembled across multiple category rows.
 CREATE INDEX IF NOT EXISTS idx_category_parent
   ON category(parent_id, name);
 

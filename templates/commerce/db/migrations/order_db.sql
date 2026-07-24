@@ -39,9 +39,22 @@ CREATE TABLE IF NOT EXISTS sales_order (
   placed_at timestamptz NOT NULL,
   CHECK (discount_minor <= subtotal_minor),
   CHECK (total_minor = subtotal_minor - discount_minor + shipping_minor + tax_minor),
-  CHECK (jsonb_typeof(shipping_address) = 'object')
+  CHECK (jsonb_typeof(shipping_address) = 'object'),
+  CHECK (status <> 'completed' OR (
+    payment_status IN ('paid', 'partially_refunded', 'refunded')
+    AND fulfillment_status = 'fulfilled'
+  )),
+  CHECK (status <> 'cancelled' OR fulfillment_status = 'unfulfilled'),
+  CHECK (payment_status <> 'failed' OR status = 'cancelled'),
+  CHECK (payment_status NOT IN ('partially_refunded', 'refunded') OR status = 'cancelled'),
+  CHECK (fulfillment_status = 'unfulfilled' OR (
+    status IN ('confirmed', 'completed')
+    AND payment_status IN ('paid', 'partially_refunded', 'refunded')
+  ))
 );
 
+CREATE INDEX IF NOT EXISTS idx_order_placed_at
+  ON sales_order(placed_at DESC, order_id);
 CREATE INDEX IF NOT EXISTS idx_order_customer
   ON sales_order(customer_id, placed_at DESC, order_id);
 CREATE INDEX IF NOT EXISTS idx_order_status
@@ -67,6 +80,7 @@ CREATE TABLE IF NOT EXISTS order_item (
   unit_price_minor bigint NOT NULL CHECK (unit_price_minor >= 0),
   discount_minor bigint NOT NULL CHECK (discount_minor >= 0),
   total_minor bigint NOT NULL CHECK (total_minor >= 0),
+  UNIQUE (order_id, order_item_id),
   CHECK (discount_minor <= unit_price_minor * quantity),
   CHECK (total_minor = unit_price_minor * quantity - discount_minor)
 );
@@ -79,15 +93,25 @@ CREATE INDEX IF NOT EXISTS idx_order_item_sku
 CREATE TABLE IF NOT EXISTS order_discount_allocation (
   allocation_id text PRIMARY KEY,
   order_id text NOT NULL REFERENCES sales_order(order_id) ON DELETE CASCADE,
-  order_item_id text REFERENCES order_item(order_item_id) ON DELETE CASCADE,
+  order_item_id text,
   source text NOT NULL,
   amount_minor bigint NOT NULL CHECK (amount_minor > 0),
-  UNIQUE (order_id, order_item_id, source)
+  FOREIGN KEY (order_id, order_item_id)
+    REFERENCES order_item(order_id, order_item_id) ON DELETE CASCADE
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_order_discount_order_key
+  ON order_discount_allocation(order_id, source)
+  WHERE order_item_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_order_discount_line_key
+  ON order_discount_allocation(order_id, order_item_id, source)
+  WHERE order_item_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_order_discount_order
   ON order_discount_allocation(order_id, allocation_id);
 
+-- Allocation-total reconciliation is enforced by the Task 6 order service and
+-- rechecked by the Task 8 verifier. It requires sums across staged line and
+-- order allocations, so a simple per-row constraint would reject valid writes.
 CREATE TABLE IF NOT EXISTS order_status_history (
   event_id text PRIMARY KEY,
   order_id text NOT NULL REFERENCES sales_order(order_id) ON DELETE CASCADE,

@@ -60,6 +60,16 @@ func TestOrderInvariantConfirmedOrderCannotTransitionBackToPending(t *testing.T)
 	}
 }
 
+func TestOrderInvariantCompletedOrderIgnoresLatePaymentSuccess(t *testing.T) {
+	got, err := Transition(StateCompleted, EventPaymentSucceeded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != StateCompleted {
+		t.Fatalf("state=%q, want completed", got)
+	}
+}
+
 func TestOrderInvariantRejectsUnknownStateAndEvent(t *testing.T) {
 	if _, err := Transition(State("unknown"), EventCheckoutStarted); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("unknown state error=%v", err)

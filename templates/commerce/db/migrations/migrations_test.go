@@ -64,7 +64,12 @@ func TestServiceMigrationDDLIsIdempotentByConstruction(t *testing.T) {
 					t.Fatalf("CREATE TABLE/INDEX without IF NOT EXISTS: %q", statement)
 				}
 			}
-			if regexp.MustCompile(`(?m)^\s*(drop|truncate|alter)\b`).MatchString(migration) {
+			for _, statement := range regexp.MustCompile(`(?m)^\s*drop\b[^\n;]*`).FindAllString(migration, -1) {
+				if !regexp.MustCompile(`^\s*drop\s+trigger\s+if\s+exists\b`).MatchString(statement) {
+					t.Fatalf("migration contains unsafe DROP statement: %q", statement)
+				}
+			}
+			if regexp.MustCompile(`(?m)^\s*(truncate|alter)\b`).MatchString(migration) {
 				t.Fatal("migration contains destructive or repeat-sensitive DDL")
 			}
 		})
@@ -84,17 +89,38 @@ func TestServiceMigrationsDeclareDomainConstraintsAndIndexes(t *testing.T) {
 		"inventory_db.sql": {
 			`reserved\s*<=\s*on_hand`, `idx_reservation_active`,
 			`where\s+status\s*=\s*'active'`, `idx_stock_movement_level`,
+			`available\s+integer\s+generated\s+always\s+as\s*\(\s*on_hand\s*-\s*reserved\s*\)\s+stored`,
 		},
 		"order_db.sql": {
 			`total_minor\s*=\s*subtotal_minor\s*-\s*discount_minor\s*\+\s*shipping_minor\s*\+\s*tax_minor`,
+			`unique\s*\(\s*order_id\s*,\s*order_item_id\s*\)`,
+			`foreign\s+key\s*\(\s*order_id\s*,\s*order_item_id\s*\)[\s\S]*?references\s+order_item\s*\(\s*order_id\s*,\s*order_item_id\s*\)`,
+			`create\s+unique\s+index\s+if\s+not\s+exists\s+idx_order_discount_order_key[\s\S]*?\(\s*order_id\s*,\s*source\s*\)[\s\S]*?where\s+order_item_id\s+is\s+null`,
+			`create\s+unique\s+index\s+if\s+not\s+exists\s+idx_order_discount_line_key[\s\S]*?\(\s*order_id\s*,\s*order_item_id\s*,\s*source\s*\)[\s\S]*?where\s+order_item_id\s+is\s+not\s+null`,
+			`status\s*<>\s*'completed'[\s\S]*?fulfillment_status\s*=\s*'fulfilled'`,
+			`idx_order_placed_at[\s\S]*?on\s+sales_order\s*\(\s*placed_at\s+desc`,
 			`idx_order_customer`, `idx_cart_customer_status`, `idx_order_saga_state`,
 		},
 		"payment_db.sql": {
 			`provider_reference\s+text\s+unique`, `provider_event_id\s+text\s+primary\s+key`,
 			`amount_minor\s*>\s*0`, `idx_payment_order`,
+			`create\s+or\s+replace\s+function\s+validate_payment_attempt`,
+			`new\.amount_minor\s*>\s+intent_amount`,
+			`new\.status\s*=\s*'failed'[\s\S]*?new\.failure_code\s+is\s+null`,
+			`drop\s+trigger\s+if\s+exists\s+trg_validate_payment_attempt`,
+			`create\s+trigger\s+trg_validate_payment_attempt`,
+			`create\s+or\s+replace\s+function\s+validate_refund`,
+			`for\s+update`,
+			`coalesce\s*\(\s*sum\s*\(\s*amount_minor\s*\)`,
+			`status\s+in\s*\(\s*'pending'\s*,\s*'succeeded'\s*\)`,
+			`drop\s+trigger\s+if\s+exists\s+trg_validate_refund`,
+			`create\s+trigger\s+trg_validate_refund`,
+			`idx_payment_created_at[\s\S]*?on\s+payment_intent\s*\(\s*created_at\s+desc`,
 		},
 		"fulfillment_db.sql": {
 			`tracking_number\s+text\s+not\s+null\s+unique`, `quantity\s*>\s*0`,
+			`status\s*=\s*'delivered'[\s\S]*?delivered_at\s+is\s+not\s+null`,
+			`idx_fulfillment_created_at[\s\S]*?on\s+fulfillment_order\s*\(\s*created_at\s+desc`,
 			`idx_fulfillment_order`, `idx_tracking_event_shipment`,
 		},
 	}
@@ -106,6 +132,135 @@ func TestServiceMigrationsDeclareDomainConstraintsAndIndexes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSeedPositionalInsertContractsRemainCompatible(t *testing.T) {
+	contracts := map[string]map[string][]string{
+		"catalog_db.sql": {
+			"category": {"category_id", "name", "parent_id", "path"},
+			"product":  {"product_id", "title", "description", "brand", "category_id", "status", "created_at"},
+			"variant":  {"sku", "product_id", "title", "attributes", "barcode", "price_minor", "compare_at_minor", "currency", "weight_grams"},
+		},
+		"customer_db.sql": {
+			"customer": {"customer_id", "email", "name", "phone", "status", "created_at"},
+			"address":  {"address_id", "customer_id", "label", "recipient", "phone", "country_code", "province", "city", "district", "line1", "postal_code", "is_default"},
+		},
+		"inventory_db.sql": {
+			"location":        {"location_id", "name", "type", "priority"},
+			"inventory_level": {"sku", "location_id", "on_hand", "reserved", "updated_at", "available"},
+			"reservation":     {"reservation_id", "order_id", "sku", "location_id", "quantity", "status", "expires_at", "idempotency_key"},
+		},
+		"order_db.sql": {
+			"sales_order":          {"order_id", "order_no", "customer_id", "status", "payment_status", "fulfillment_status", "currency", "subtotal_minor", "discount_minor", "shipping_minor", "tax_minor", "total_minor", "shipping_address", "idempotency_key", "placed_at"},
+			"order_item":           {"order_item_id", "order_id", "sku", "title", "quantity", "unit_price_minor", "discount_minor", "total_minor"},
+			"order_status_history": {"event_id", "order_id", "from_status", "to_status", "reason", "occurred_at"},
+		},
+		"payment_db.sql": {
+			"payment_intent":  {"payment_intent_id", "order_id", "amount_minor", "currency", "status", "provider", "provider_reference", "idempotency_key", "created_at"},
+			"payment_attempt": {"attempt_id", "payment_intent_id", "status", "failure_code", "amount_minor", "created_at"},
+			"refund":          {"refund_id", "payment_intent_id", "amount_minor", "status", "reason", "idempotency_key", "created_at"},
+			"webhook_inbox":   {"provider_event_id", "event_type", "payload", "received_at", "processed_at"},
+		},
+		"fulfillment_db.sql": {
+			"fulfillment_order": {"fulfillment_id", "order_id", "location_id", "status", "created_at"},
+			"fulfillment_item":  {"fulfillment_id", "order_item_id", "sku", "quantity"},
+			"shipment":          {"shipment_id", "fulfillment_id", "carrier", "tracking_number", "status", "shipped_at", "delivered_at"},
+			"tracking_event":    {"tracking_event_id", "shipment_id", "status", "description", "location", "occurred_at"},
+		},
+	}
+
+	for filename, tables := range contracts {
+		migration := readMigration(t, filename)
+		for table, want := range tables {
+			t.Run(filename+"/"+table, func(t *testing.T) {
+				got := tableColumns(t, migration, table)
+				if strings.Join(got, ",") != strings.Join(want, ",") {
+					t.Fatalf("columns=%v, want %v", got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestDeferredCrossRowInvariantsNameTheirEnforcementTasks(t *testing.T) {
+	requirements := map[string][]string{
+		"catalog_db.sql":   {`category depth[\s\S]*?task 8`},
+		"customer_db.sql":  {`default.address existence[\s\S]*?task 5`},
+		"inventory_db.sql": {`movement.level reconciliation[\s\S]*?task 5[\s\S]*?task 8`},
+		"order_db.sql":     {`allocation.total reconciliation[\s\S]*?task 6[\s\S]*?task 8`},
+	}
+	for filename, patterns := range requirements {
+		migration := readMigration(t, filename)
+		for _, pattern := range patterns {
+			requirePattern(t, migration, pattern)
+		}
+	}
+}
+
+func tableColumns(t *testing.T, migration, table string) []string {
+	t.Helper()
+	prefix := "create table if not exists " + table
+	start := strings.Index(migration, prefix)
+	if start < 0 {
+		t.Fatalf("table %s not found", table)
+	}
+	open := strings.Index(migration[start+len(prefix):], "(")
+	if open < 0 {
+		t.Fatalf("table %s opening parenthesis not found", table)
+	}
+	open += start + len(prefix)
+	depth := 0
+	closeAt := -1
+	for index := open; index < len(migration); index++ {
+		switch migration[index] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				closeAt = index
+			}
+		}
+		if closeAt >= 0 {
+			break
+		}
+	}
+	if closeAt < 0 {
+		t.Fatalf("table %s closing parenthesis not found", table)
+	}
+
+	var definitions []string
+	partStart := open + 1
+	depth = 0
+	for index := partStart; index <= closeAt; index++ {
+		if index < closeAt {
+			switch migration[index] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+			}
+		}
+		if index == closeAt || (migration[index] == ',' && depth == 0) {
+			definitions = append(definitions, strings.TrimSpace(migration[partStart:index]))
+			partStart = index + 1
+		}
+	}
+
+	var columns []string
+	for _, definition := range definitions {
+		fields := strings.Fields(definition)
+		if len(fields) == 0 {
+			continue
+		}
+		switch fields[0] {
+		case "check", "primary", "unique", "foreign", "constraint":
+			continue
+		default:
+			columns = append(columns, strings.Trim(fields[0], `"`))
+		}
+	}
+	return columns
 }
 
 func readMigration(t *testing.T, filename string) string {

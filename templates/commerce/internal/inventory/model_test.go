@@ -105,6 +105,117 @@ func TestInventoryInvariantReservationTerminalStatesCannotMove(t *testing.T) {
 	}
 }
 
+func TestInventoryInvariantReserveUpdatesLevelAndReservationTogether(t *testing.T) {
+	level := Level{OnHand: 10, Reserved: 2}
+	reservation := Reservation{Quantity: 3, State: ReservationActive}
+
+	gotLevel, gotReservation, err := level.Reserve(reservation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLevel != (Level{OnHand: 10, Reserved: 5}) {
+		t.Fatalf("level=%+v", gotLevel)
+	}
+	if gotReservation.State != ReservationActive {
+		t.Fatalf("reservation state=%q", gotReservation.State)
+	}
+	if level.Reserved != 2 || reservation.State != ReservationActive {
+		t.Fatal("reserve mutated its input values")
+	}
+}
+
+func TestInventoryInvariantReserveRejectsInsufficientOrInvalidQuantity(t *testing.T) {
+	tests := []struct {
+		name        string
+		level       Level
+		reservation Reservation
+	}{
+		{name: "insufficient", level: Level{OnHand: 5, Reserved: 3}, reservation: Reservation{Quantity: 3, State: ReservationActive}},
+		{name: "zero quantity", level: Level{OnHand: 5}, reservation: Reservation{State: ReservationActive}},
+		{name: "negative quantity", level: Level{OnHand: 5}, reservation: Reservation{Quantity: -1, State: ReservationActive}},
+		{name: "terminal reservation", level: Level{OnHand: 5}, reservation: Reservation{Quantity: 1, State: ReservationReleased}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gotLevel, gotReservation, err := test.level.Reserve(test.reservation)
+			if !errors.Is(err, ErrInvalidInventory) {
+				t.Fatalf("error=%v, want ErrInvalidInventory", err)
+			}
+			if gotLevel != test.level || gotReservation != test.reservation {
+				t.Fatalf("failed reserve changed values: level=%+v reservation=%+v", gotLevel, gotReservation)
+			}
+		})
+	}
+}
+
+func TestInventoryInvariantReleaseAndExpiryReturnReservedStock(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(Level, Reservation) (Level, Reservation, error)
+		want ReservationState
+	}{
+		{name: "release", run: Level.Release, want: ReservationReleased},
+		{name: "expire", run: Level.Expire, want: ReservationExpired},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			level := Level{OnHand: 10, Reserved: 5}
+			reservation := Reservation{Quantity: 3, State: ReservationActive}
+			gotLevel, gotReservation, err := test.run(level, reservation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotLevel != (Level{OnHand: 10, Reserved: 2}) || gotReservation.State != test.want {
+				t.Fatalf("level=%+v reservation=%+v", gotLevel, gotReservation)
+			}
+		})
+	}
+}
+
+func TestInventoryInvariantCommitConsumesOnHandAndReservedStock(t *testing.T) {
+	level := Level{OnHand: 10, Reserved: 5}
+	reservation := Reservation{Quantity: 3, State: ReservationActive}
+
+	gotLevel, gotReservation, err := level.Commit(reservation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLevel != (Level{OnHand: 7, Reserved: 2}) || gotReservation.State != ReservationCommitted {
+		t.Fatalf("level=%+v reservation=%+v", gotLevel, gotReservation)
+	}
+}
+
+func TestInventoryInvariantEffectsRejectUnderflowAndDuplicateTerminalEventsAreNoOps(t *testing.T) {
+	level := Level{OnHand: 10, Reserved: 2}
+	active := Reservation{Quantity: 3, State: ReservationActive}
+	for _, run := range []func(Level, Reservation) (Level, Reservation, error){Level.Release, Level.Expire, Level.Commit} {
+		gotLevel, gotReservation, err := run(level, active)
+		if !errors.Is(err, ErrInvalidInventory) {
+			t.Fatalf("underflow error=%v", err)
+		}
+		if gotLevel != level || gotReservation != active {
+			t.Fatal("failed effect changed values")
+		}
+	}
+
+	terminal := []struct {
+		run         func(Level, Reservation) (Level, Reservation, error)
+		reservation Reservation
+	}{
+		{run: Level.Release, reservation: Reservation{Quantity: 3, State: ReservationReleased}},
+		{run: Level.Expire, reservation: Reservation{Quantity: 3, State: ReservationExpired}},
+		{run: Level.Commit, reservation: Reservation{Quantity: 3, State: ReservationCommitted}},
+	}
+	for _, test := range terminal {
+		gotLevel, gotReservation, err := test.run(level, test.reservation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gotLevel != level || gotReservation != test.reservation {
+			t.Fatal("duplicate terminal effect was not a no-op")
+		}
+	}
+}
+
 func targetState(event ReservationEvent) ReservationState {
 	switch event {
 	case ReservationCommit:
