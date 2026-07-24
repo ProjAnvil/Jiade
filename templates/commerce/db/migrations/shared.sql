@@ -1,4 +1,6 @@
--- Include this idempotent shared schema in every service-owned migration.
+-- TASK 4 ACCEPTANCE DEPENDENCY: every replacement service migration must
+-- include this idempotent schema (or equivalent Outbox/Inbox DDL). Do not
+-- deploy a service migration that omits these tables and indexes.
 -- Domain writes insert outbox_event in the same transaction as their state;
 -- each consumer records its own inbox_event key before applying its mutation.
 

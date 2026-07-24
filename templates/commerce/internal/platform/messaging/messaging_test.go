@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 func fixedClock() time.Time { return time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC) }
@@ -35,16 +37,29 @@ func TestEventRoundTripPreservesTracingFields(t *testing.T) {
 
 func TestNewEventUsesCurrentSchemaAndClock(t *testing.T) {
 	event := testEvent()
-	if event.SchemaVersion != CurrentSchemaVersion || !event.OccurredAt.Equal(fixedClock()) || event.ID == "" {
+	if event.SchemaVersion != CurrentSchemaVersion || !event.OccurredAt.Equal(fixedClock()) || !validEventID(event.ID) {
 		t.Fatalf("event = %#v", event)
 	}
 }
 
+func TestNewEventPanicsInsteadOfReturningInvalidIDWhenEntropyFails(t *testing.T) {
+	original := randomRead
+	randomRead = func([]byte) (int, error) { return 0, errors.New("entropy unavailable") }
+	t.Cleanup(func() { randomRead = original })
+	defer func() {
+		if recovered := recover(); recovered == nil {
+			t.Fatal("NewEvent() did not panic when UUID entropy failed")
+		}
+	}()
+	_ = testEvent()
+}
+
 func TestHandleOnceSkipsDuplicateEventForSameConsumer(t *testing.T) {
-	tx := &inboxTx{rows: []int64{1, 0}}
+	tx := &inboxTx{}
+	event := testEvent()
 	calls := 0
 	for range 2 {
-		if err := HandleOnce(context.Background(), tx, "inventory-projection", testEvent(), func() error {
+		if err := HandleOnce(context.Background(), tx, "inventory-projection", event, func() error {
 			calls++
 			return nil
 		}); err != nil {
@@ -57,10 +72,11 @@ func TestHandleOnceSkipsDuplicateEventForSameConsumer(t *testing.T) {
 }
 
 func TestHandleOnceDoesNotCrossDeduplicateConsumers(t *testing.T) {
-	tx := &inboxTx{rows: []int64{1, 1}}
+	tx := &inboxTx{}
+	event := testEvent()
 	calls := 0
 	for _, consumer := range []string{"inventory-projection", "analytics"} {
-		if err := HandleOnce(context.Background(), tx, consumer, testEvent(), func() error {
+		if err := HandleOnce(context.Background(), tx, consumer, event, func() error {
 			calls++
 			return nil
 		}); err != nil {
@@ -98,35 +114,8 @@ func TestRelayRecordsPublishFailureForRetry(t *testing.T) {
 	}
 }
 
-func TestPublishOutcomeRejectsReturnedOrNegativelyConfirmedMessage(t *testing.T) {
-	tests := []struct {
-		name     string
-		confirm  bool
-		returned bool
-		wantErr  bool
-	}{
-		{name: "confirmed", confirm: true},
-		{name: "nack", confirm: false, wantErr: true},
-		{name: "returned", confirm: true, returned: true, wantErr: true},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			confirms := make(chan bool, 1)
-			returns := make(chan error, 1)
-			confirms <- test.confirm
-			if test.returned {
-				returns <- errors.New("unroutable")
-			}
-			err := awaitPublishOutcome(context.Background(), confirms, returns)
-			if (err != nil) != test.wantErr {
-				t.Fatalf("awaitPublishOutcome() error = %v, wantErr %v", err, test.wantErr)
-			}
-		})
-	}
-}
-
 func TestProcessDeliveryAcksOnlyAfterCommit(t *testing.T) {
-	tx := &inboxTx{rows: []int64{1}}
+	tx := &inboxTx{}
 	delivery := &testDelivery{}
 	if err := ProcessDelivery(context.Background(), tx, "projection", testEvent(), func() error { return nil }, delivery, RetryPolicy{MaxAttempts: 3}); err != nil {
 		t.Fatal(err)
@@ -161,7 +150,7 @@ func TestProcessDeliveryNeverRequeuesAndClassifiesTerminalFailures(t *testing.T)
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			tx := &inboxTx{rows: []int64{1}}
+			tx := &inboxTx{}
 			delivery := &testDelivery{attempts: test.attempts}
 			err := ProcessDelivery(context.Background(), tx, "projection", testEvent(), func() error { return test.handlerErr }, delivery, RetryPolicy{MaxAttempts: 3})
 			if !errors.Is(err, test.handlerErr) {
@@ -174,17 +163,60 @@ func TestProcessDeliveryNeverRequeuesAndClassifiesTerminalFailures(t *testing.T)
 	}
 }
 
+func TestProcessDeliveryRejectsMalformedEventIDWithoutInboxWrite(t *testing.T) {
+	tx := &inboxTx{}
+	delivery := &testDelivery{}
+	event := testEvent()
+	event.ID = "not-a-uuid"
+
+	err := ProcessDelivery(context.Background(), tx, "projection", event, func() error {
+		t.Fatal("handler called for malformed event ID")
+		return nil
+	}, delivery, RetryPolicy{MaxAttempts: 3})
+	if err == nil {
+		t.Fatal("ProcessDelivery() error = nil, want malformed-ID error")
+	}
+	if tx.execCalls != 0 || !tx.rolledBack || delivery.rejects != 1 || delivery.nacks != 0 {
+		t.Fatalf("execCalls=%d rolledBack=%v rejects=%d nacks=%d", tx.execCalls, tx.rolledBack, delivery.rejects, delivery.nacks)
+	}
+}
+
+func TestAMQPDeliveryXDeathCountBoundsRetry(t *testing.T) {
+	delivery := AMQPDelivery{Delivery: amqp.Delivery{Headers: amqp.Table{
+		"x-death": []interface{}{
+			amqp.Table{"count": int64(2)},
+			amqp.Table{"count": int32(1)},
+		},
+	}}}
+	if got := delivery.RetryCount(); got != 3 {
+		t.Fatalf("RetryCount()=%d, want 3", got)
+	}
+	if retryable(errors.New("temporary"), delivery.RetryCount(), RetryPolicy{MaxAttempts: 3}) {
+		t.Fatal("retryable()=true at x-death retry limit")
+	}
+}
+
 type inboxTx struct {
 	pgx.Tx
-	rows       []int64
+	seen       map[string]struct{}
+	execCalls  int
 	committed  bool
 	rolledBack bool
 }
 
-func (tx *inboxTx) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
-	rows := tx.rows[0]
-	tx.rows = tx.rows[1:]
-	return pgconn.NewCommandTag("INSERT 0 " + string(rune('0'+rows))), nil
+func (tx *inboxTx) Exec(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
+	tx.execCalls++
+	if tx.seen == nil {
+		tx.seen = make(map[string]struct{})
+	}
+	key := fmt.Sprint(args[0], "/", args[1])
+	rows := int64(1)
+	if _, exists := tx.seen[key]; exists {
+		rows = 0
+	} else {
+		tx.seen[key] = struct{}{}
+	}
+	return pgconn.NewCommandTag(fmt.Sprintf("INSERT 0 %d", rows)), nil
 }
 
 func (tx *inboxTx) Commit(context.Context) error   { tx.committed = true; return nil }

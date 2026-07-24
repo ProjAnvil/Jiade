@@ -21,6 +21,9 @@ func HandleOnce(ctx context.Context, tx pgx.Tx, consumer string, event Event, ha
 	if event.ID == "" {
 		return errors.New("messaging event ID is required")
 	}
+	if !validEventID(event.ID) {
+		return errors.New("messaging event ID must be a UUID")
+	}
 	if handler == nil {
 		return errors.New("messaging inbox handler is required")
 	}
@@ -78,6 +81,9 @@ func ProcessDelivery(ctx context.Context, tx pgx.Tx, consumer string, event Even
 	}
 	if tx == nil {
 		return settleFailure(errors.New("messaging inbox transaction is nil"), delivery, policy)
+	}
+	if !validEventID(event.ID) {
+		return rejectMalformed(ctx, tx, delivery, errors.New("messaging event ID must be a UUID"))
 	}
 	if err := HandleOnce(ctx, tx, consumer, event, handler); err != nil {
 		_ = tx.Rollback(ctx)

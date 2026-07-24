@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -44,13 +45,26 @@ func NewEvent(eventType, subject, correlationID, causationID string, data json.R
 
 func newEventID() string {
 	var raw [16]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		// crypto/rand failures are exceptional; retain a unique-enough fallback
-		// rather than preventing a caller from recording its transaction.
-		return time.Now().UTC().Format("20060102150405.000000000")
+	count, err := randomRead(raw[:])
+	if err != nil {
+		panic(fmt.Errorf("generate event UUID: %w", err))
+	}
+	if count != len(raw) {
+		panic(fmt.Sprintf("generate event UUID: read %d bytes, want %d", count, len(raw)))
 	}
 	raw[6] = raw[6]&0x0f | 0x40
 	raw[8] = raw[8]&0x3f | 0x80
 	encoded := hex.EncodeToString(raw[:])
 	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:]
+}
+
+var randomRead = rand.Read
+
+func validEventID(id string) bool {
+	if len(id) != 36 || id[8] != '-' || id[13] != '-' || id[18] != '-' || id[23] != '-' {
+		return false
+	}
+	compact := id[0:8] + id[9:13] + id[14:18] + id[19:23] + id[24:36]
+	decoded, err := hex.DecodeString(compact)
+	return err == nil && len(decoded) == 16
 }

@@ -35,6 +35,9 @@ const (
 // InsertOutbox records an event inside the domain transaction that produced
 // it. The relay can only observe it after that transaction commits.
 func InsertOutbox(ctx context.Context, tx pgx.Tx, event Event) error {
+	if !validEventID(event.ID) {
+		return errors.New("messaging event ID must be a UUID")
+	}
 	if tx == nil {
 		return errors.New("messaging outbox transaction is nil")
 	}

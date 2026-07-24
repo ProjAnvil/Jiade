@@ -14,17 +14,34 @@ import (
 // RabbitPublisher publishes persistent, mandatory messages and considers an
 // event delivered only after RabbitMQ positively confirms it.
 type RabbitPublisher struct {
-	channel       *amqp.Channel
+	channel       rabbitChannel
 	exchange      string
 	confirmations <-chan amqp.Confirmation
 	returns       <-chan amqp.Return
 	mu            sync.Mutex
+	retired       bool
+}
+
+type rabbitChannel interface {
+	Confirm(noWait bool) error
+	NotifyPublish(chan amqp.Confirmation) chan amqp.Confirmation
+	NotifyReturn(chan amqp.Return) chan amqp.Return
+	GetNextPublishSeqNo() uint64
+	PublishWithContext(context.Context, string, string, bool, bool, amqp.Publishing) error
+	Close() error
 }
 
 // NewRabbitPublisher enables confirms and return notifications on channel. A
 // publisher serializes calls because confirms and returns are ordered per
 // channel; use one publisher per relay worker for concurrency.
 func NewRabbitPublisher(channel *amqp.Channel, exchange string) (*RabbitPublisher, error) {
+	if channel == nil {
+		return nil, errors.New("messaging rabbit channel is nil")
+	}
+	return newRabbitPublisher(channel, exchange)
+}
+
+func newRabbitPublisher(channel rabbitChannel, exchange string) (*RabbitPublisher, error) {
 	if channel == nil {
 		return nil, errors.New("messaging rabbit channel is nil")
 	}
@@ -45,12 +62,19 @@ func (publisher *RabbitPublisher) Publish(ctx context.Context, event Event) erro
 	if publisher == nil || publisher.channel == nil {
 		return errors.New("messaging rabbit publisher is nil")
 	}
+	if !validEventID(event.ID) {
+		return errors.New("messaging event ID must be a UUID")
+	}
 	body, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
 	}
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()
+	if publisher.retired {
+		return errors.New("messaging rabbit publisher channel is retired")
+	}
+	sequence := publisher.channel.GetNextPublishSeqNo()
 	if err := publisher.channel.PublishWithContext(ctx, publisher.exchange, event.Type, true, false, amqp.Publishing{
 		DeliveryMode: amqp.Persistent,
 		ContentType:  "application/json",
@@ -65,59 +89,72 @@ func (publisher *RabbitPublisher) Publish(ctx context.Context, event Event) erro
 		},
 		Body: body,
 	}); err != nil {
+		publisher.retireLocked()
 		return fmt.Errorf("publish event: %w", err)
 	}
-	return awaitAMQPPublishOutcome(ctx, publisher.confirmations, publisher.returns)
+	err, aligned := awaitAMQPPublishOutcome(ctx, publisher.confirmations, publisher.returns, sequence, event.ID)
+	if !aligned {
+		publisher.retireLocked()
+	}
+	return err
 }
 
-func awaitAMQPPublishOutcome(ctx context.Context, confirmations <-chan amqp.Confirmation, returns <-chan amqp.Return) error {
-	select {
-	case returnedMessage, ok := <-returns:
-		if !ok {
-			return errors.New("rabbit return notification closed")
-		}
-		return fmt.Errorf("rabbit returned mandatory message: %d %s", returnedMessage.ReplyCode, returnedMessage.ReplyText)
-	default:
+func (publisher *RabbitPublisher) retireLocked() {
+	if publisher.retired {
+		return
 	}
-	select {
-	case returnedMessage, ok := <-returns:
-		if !ok {
-			return errors.New("rabbit return notification closed")
-		}
-		return fmt.Errorf("rabbit returned mandatory message: %d %s", returnedMessage.ReplyCode, returnedMessage.ReplyText)
-	case confirmation, ok := <-confirmations:
-		if !ok || !confirmation.Ack {
-			return errors.New("rabbit negatively confirmed publish")
-		}
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	publisher.retired = true
+	_ = publisher.channel.Close()
 }
 
-// awaitPublishOutcome is separate from amqp.Channel so confirmation/return
-// state transitions can be tested without a broker.
-func awaitPublishOutcome(ctx context.Context, confirmations <-chan bool, returns <-chan error) error {
-	select {
-	case returned := <-returns:
-		if returned != nil {
-			return returned
+func awaitAMQPPublishOutcome(
+	ctx context.Context,
+	confirmations <-chan amqp.Confirmation,
+	returns <-chan amqp.Return,
+	sequence uint64,
+	messageID string,
+) (error, bool) {
+	var returnedErr error
+	for {
+		select {
+		case returnedMessage, ok := <-returns:
+			if !ok {
+				return errors.New("rabbit return notification closed"), false
+			}
+			if returnedMessage.MessageId != messageID {
+				return fmt.Errorf("rabbit return correlation lost: got message %q, want %q", returnedMessage.MessageId, messageID), false
+			}
+			returnedErr = fmt.Errorf("rabbit returned mandatory message: %d %s", returnedMessage.ReplyCode, returnedMessage.ReplyText)
+		case confirmation, ok := <-confirmations:
+			if !ok {
+				return errors.New("rabbit confirmation notification closed"), false
+			}
+			if confirmation.DeliveryTag != sequence {
+				return fmt.Errorf("rabbit confirmation correlation lost: got sequence %d, want %d", confirmation.DeliveryTag, sequence), false
+			}
+			if returnedErr == nil {
+				select {
+				case returnedMessage, ok := <-returns:
+					if !ok {
+						return errors.New("rabbit return notification closed"), false
+					}
+					if returnedMessage.MessageId != messageID {
+						return fmt.Errorf("rabbit return correlation lost: got message %q, want %q", returnedMessage.MessageId, messageID), false
+					}
+					returnedErr = fmt.Errorf("rabbit returned mandatory message: %d %s", returnedMessage.ReplyCode, returnedMessage.ReplyText)
+				default:
+				}
+			}
+			if returnedErr != nil {
+				return returnedErr, true
+			}
+			if !confirmation.Ack {
+				return errors.New("rabbit negatively confirmed publish"), true
+			}
+			return nil, true
+		case <-ctx.Done():
+			return ctx.Err(), false
 		}
-	default:
-	}
-	select {
-	case returned := <-returns:
-		if returned != nil {
-			return returned
-		}
-		return errors.New("rabbit return notification closed")
-	case confirmed := <-confirmations:
-		if !confirmed {
-			return errors.New("rabbit negatively confirmed publish")
-		}
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 
@@ -159,7 +196,7 @@ func ProcessRabbitDelivery(ctx context.Context, tx pgx.Tx, consumer string, deli
 	if err := json.Unmarshal(delivery.Body, &event); err != nil {
 		return rejectMalformed(ctx, tx, AMQPDelivery{Delivery: delivery}, fmt.Errorf("decode event envelope: %w", err))
 	}
-	if event.ID == "" || event.SchemaVersion != CurrentSchemaVersion || event.Type == "" || event.Subject == "" {
+	if !validEventID(event.ID) || event.SchemaVersion != CurrentSchemaVersion || event.Type == "" || event.Subject == "" {
 		return rejectMalformed(ctx, tx, AMQPDelivery{Delivery: delivery}, errors.New("invalid event envelope"))
 	}
 	if handler == nil {
