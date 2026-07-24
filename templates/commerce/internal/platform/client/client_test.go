@@ -136,6 +136,52 @@ func TestClientClosesSourceBodyWhenUsingGetBody(t *testing.T) {
 	}
 }
 
+func TestClientRejectsUnreplayableBodyBeforeAnyAttempt(t *testing.T) {
+	sourceBody := &trackingBody{Reader: strings.NewReader(`{"sku":"SKU-1"}`)}
+	client := newTestClient(func(config *Config) {
+		config.HTTPClient = newHandlerHTTPClient(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("transport must not be called for an unreplayable retry body")
+		}))
+	})
+	req, err := http.NewRequest(http.MethodPost, "http://upstream.test/reservations", sourceBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Idempotency-Key", "reserve-1")
+
+	_, err = client.Do(context.Background(), req, Policy{MaxAttempts: 2})
+	if !errors.Is(err, ErrBodyNotReplayable) {
+		t.Fatalf("Do() error=%v, want ErrBodyNotReplayable", err)
+	}
+	if sourceBody.read != 0 || sourceBody.closed {
+		t.Fatalf("source body read=%d closed=%t, want untouched", sourceBody.read, sourceBody.closed)
+	}
+}
+
+func TestClientUsesOriginalUnreplayableBodyForSingleAttempt(t *testing.T) {
+	sourceBody := &trackingBody{Reader: strings.NewReader(`{"sku":"SKU-1"}`)}
+	usedOriginal := false
+	client := newTestClient(func(config *Config) {
+		config.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			usedOriginal = request.Body == sourceBody
+			return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+		})}
+	})
+	req, err := http.NewRequest(http.MethodPost, "http://upstream.test/reservations", sourceBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := client.Do(context.Background(), req, Policy{MaxAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if !usedOriginal || sourceBody.read != 0 || sourceBody.closed {
+		t.Fatalf("usedOriginal=%t read=%d closed=%t, want original untouched before transport", usedOriginal, sourceBody.read, sourceBody.closed)
+	}
+}
+
 func TestClientRetriesConnectionErrorsAndRetryableStatuses(t *testing.T) {
 	for _, status := range []int{http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -283,10 +329,11 @@ func TestClientUsesRetryAfter(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusNoContent)
 		}))
-		config.Sleep = func(context.Context, time.Duration) error {
-			slept = 2 * time.Second
+		config.Sleep = func(_ context.Context, delay time.Duration) error {
+			slept = delay
 			return nil
 		}
+		config.TotalTimeout = 3 * time.Second
 	})
 	req, err := http.NewRequest(http.MethodGet, "http://upstream.test/resource", nil)
 	if err != nil {
@@ -299,6 +346,161 @@ func TestClientUsesRetryAfter(t *testing.T) {
 	defer response.Body.Close()
 	if slept != 2*time.Second {
 		t.Fatalf("sleep=%s, want 2s", slept)
+	}
+}
+
+func TestRetryAfterParsesDatesAndSaturatesLargeDeltaSeconds(t *testing.T) {
+	now := time.Date(2026, time.July, 24, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "delta seconds", value: "2", want: 2 * time.Second},
+		{name: "HTTP date", value: now.Add(3 * time.Second).Format(http.TimeFormat), want: 3 * time.Second},
+		{name: "oversized delta seconds", value: "999999999999999999999999", want: time.Duration(1<<63 - 1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := retryAfter(test.value, now); got != test.want {
+				t.Fatalf("retryAfter(%q)=%s, want %s", test.value, got, test.want)
+			}
+		})
+	}
+}
+
+func TestClientBoundsRetryAfterByRemainingTotalDeadline(t *testing.T) {
+	var slept time.Duration
+	var calls atomic.Int32
+	client := newTestClient(func(config *Config) {
+		config.TotalTimeout = 250 * time.Millisecond
+		config.AttemptTimeout = 100 * time.Millisecond
+		config.Sleep = func(_ context.Context, delay time.Duration) error {
+			slept = delay
+			return nil
+		}
+		config.HTTPClient = newHandlerHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if calls.Add(1) == 1 {
+				w.Header().Set("Retry-After", "999999999999999999999999")
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+	})
+	req, err := http.NewRequest(http.MethodGet, "http://upstream.test/resource", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(context.Background(), req, Policy{MaxAttempts: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if slept < 100*time.Millisecond || slept > 250*time.Millisecond {
+		t.Fatalf("sleep=%s, want bounded by the remaining 250ms total deadline", slept)
+	}
+}
+
+func TestDefaultJitterDoesNotOverflowNearMaximumDuration(t *testing.T) {
+	max := time.Duration(1<<63 - 1)
+	for range 100 {
+		got := defaultJitter(max)
+		if got < max/2 || got > max {
+			t.Fatalf("defaultJitter(max)=%s, want [%s, %s]", got, max/2, max)
+		}
+	}
+}
+
+func TestClientClampsAttemptTimeoutBelowTotalTimeout(t *testing.T) {
+	client := New(Config{TotalTimeout: 20 * time.Millisecond, AttemptTimeout: 100 * time.Millisecond})
+	for _, policy := range []Policy{{}, {AttemptTimeout: 100 * time.Millisecond}} {
+		if got, want := client.attemptTimeoutFor(policy), 20*time.Millisecond-time.Nanosecond; got != want {
+			t.Fatalf("attemptTimeoutFor(%+v)=%s, want %s", policy, got, want)
+		}
+	}
+}
+
+func TestClientDoesNotOpenBreakerForContextTermination(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		context func() (context.Context, context.CancelFunc)
+	}{
+		{name: "caller cancellation", context: func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) }},
+		{name: "caller deadline", context: func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), time.Millisecond)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := test.context()
+			defer cancel()
+			var calls atomic.Int32
+			client := newTestClient(func(config *Config) {
+				config.TotalTimeout = time.Second
+				config.AttemptTimeout = 100 * time.Millisecond
+				config.Breaker = BreakerConfig{FailureThreshold: 1, OpenFor: time.Second}
+				config.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					if calls.Add(1) == 1 {
+						if test.name == "caller cancellation" {
+							cancel()
+						}
+						<-request.Context().Done()
+						return nil, request.Context().Err()
+					}
+					return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+				})}
+			})
+			request, err := http.NewRequest(http.MethodGet, "http://upstream.test/resource", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Do(ctx, request, Policy{MaxAttempts: 1}); !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Do() error=%v, want context termination", err)
+			}
+			response, err := client.Do(context.Background(), request, Policy{MaxAttempts: 1})
+			if err != nil {
+				t.Fatalf("second Do() error=%v, breaker recorded context termination", err)
+			}
+			defer response.Body.Close()
+		})
+	}
+}
+
+func TestClientDoesNotOpenBreakerForAttemptOrTotalDeadline(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		totalTimeout   time.Duration
+		attemptTimeout time.Duration
+	}{
+		{name: "attempt deadline", totalTimeout: 100 * time.Millisecond, attemptTimeout: 5 * time.Millisecond},
+		{name: "total deadline", totalTimeout: 5 * time.Millisecond, attemptTimeout: time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			client := newTestClient(func(config *Config) {
+				config.TotalTimeout = test.totalTimeout
+				config.AttemptTimeout = test.attemptTimeout
+				config.Breaker = BreakerConfig{FailureThreshold: 1, OpenFor: time.Second}
+				config.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					if calls.Add(1) == 1 {
+						<-request.Context().Done()
+						return nil, request.Context().Err()
+					}
+					return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+				})}
+			})
+			request, err := http.NewRequest(http.MethodGet, "http://upstream.test/resource", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Do(context.Background(), request, Policy{MaxAttempts: 1}); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Do() error=%v, want deadline exceeded", err)
+			}
+			response, err := client.Do(context.Background(), request, Policy{MaxAttempts: 1})
+			if err != nil {
+				t.Fatalf("second Do() error=%v, breaker recorded deadline expiration", err)
+			}
+			defer response.Body.Close()
+		})
 	}
 }
 

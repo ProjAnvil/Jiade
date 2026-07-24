@@ -97,3 +97,15 @@ func (breaker *Breaker) Record(success bool) {
 		breaker.openedTo = breaker.config.Now().Add(breaker.config.OpenFor)
 	}
 }
+
+// Abandon releases a half-open probe that ended because the caller's context
+// was canceled or expired. It intentionally does not count as an upstream
+// failure or reset the breaker.
+func (breaker *Breaker) Abandon() {
+	breaker.mu.Lock()
+	defer breaker.mu.Unlock()
+
+	if breaker.state == breakerHalfOpen {
+		breaker.probing = false
+	}
+}

@@ -2,7 +2,6 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -12,6 +11,10 @@ import (
 	"sync"
 	"time"
 )
+
+// ErrBodyNotReplayable reports that a retry-eligible request needs multiple
+// attempts but its body cannot be replayed safely.
+var ErrBodyNotReplayable = errors.New("client request body is not replayable")
 
 const (
 	defaultTotalTimeout   = 10 * time.Second
@@ -65,9 +68,15 @@ func New(config Config) *Client {
 	if config.TotalTimeout <= 0 {
 		config.TotalTimeout = defaultTotalTimeout
 	}
+	// A sub-nanosecond duration cannot be represented, so reserve one nanosecond
+	// for a strictly shorter attempt timeout.
+	if config.TotalTimeout <= time.Nanosecond {
+		config.TotalTimeout = 2 * time.Nanosecond
+	}
 	if config.AttemptTimeout <= 0 {
 		config.AttemptTimeout = defaultAttemptTimeout
 	}
+	config.AttemptTimeout = attemptTimeoutBelow(config.TotalTimeout, config.AttemptTimeout)
 	if config.BaseBackoff <= 0 {
 		config.BaseBackoff = defaultBackoff
 	}
@@ -113,12 +122,12 @@ func (client *Client) Do(ctx context.Context, request *http.Request, policy Poli
 		}
 	}()
 
-	body, err := replayableBody(request)
+	attempts := client.attempts(policy)
+	retryAllowed := isRetryEligible(request)
+	body, err := requestBodyForAttempts(request, retryAllowed, attempts)
 	if err != nil {
 		return nil, err
 	}
-	attempts := client.attempts(policy)
-	retryAllowed := isRetryEligible(request)
 	breaker := client.breakerFor(request)
 
 	for attempt := 1; attempt <= attempts; attempt++ {
@@ -141,8 +150,13 @@ func (client *Client) Do(ctx context.Context, request *http.Request, policy Poli
 		}
 		if err != nil {
 			drainAndClose(response)
+			contextTerminated := isContextTermination(err, ctx, totalContext, attemptContext)
 			cancelAttempt()
-			breaker.Record(false)
+			if contextTerminated {
+				breaker.Abandon()
+			} else {
+				breaker.Record(false)
+			}
 			if !retryAllowed || attempt == attempts {
 				if totalContext.Err() != nil {
 					return nil, totalContext.Err()
@@ -169,6 +183,7 @@ func (client *Client) Do(ctx context.Context, request *http.Request, policy Poli
 		if delay <= 0 {
 			delay = client.retryDelay(attempt)
 		}
+		delay = boundedDelay(totalContext, delay)
 		if err := client.sleep(totalContext, delay); err != nil {
 			return nil, err
 		}
@@ -219,10 +234,21 @@ func (client *Client) attempts(policy Policy) int {
 }
 
 func (client *Client) attemptTimeoutFor(policy Policy) time.Duration {
+	timeout := client.attemptTimeout
 	if policy.AttemptTimeout > 0 {
-		return policy.AttemptTimeout
+		timeout = policy.AttemptTimeout
 	}
-	return client.attemptTimeout
+	return attemptTimeoutBelow(client.totalTimeout, timeout)
+}
+
+func attemptTimeoutBelow(total, timeout time.Duration) time.Duration {
+	if total <= time.Nanosecond {
+		return time.Nanosecond
+	}
+	if timeout <= 0 || timeout >= total {
+		return total - time.Nanosecond
+	}
+	return timeout
 }
 
 func (client *Client) breakerFor(request *http.Request) *Breaker {
@@ -262,26 +288,27 @@ func isRetryableResponse(response *http.Response) bool {
 	}
 }
 
-func replayableBody(request *http.Request) (func() (io.ReadCloser, error), error) {
+func requestBodyForAttempts(request *http.Request, retryAllowed bool, attempts int) (func() (io.ReadCloser, error), error) {
 	if request.Body == nil || request.Body == http.NoBody {
 		return func() (io.ReadCloser, error) { return nil, nil }, nil
 	}
-	if request.GetBody != nil {
+	if retryAllowed && attempts > 1 {
+		if request.GetBody == nil {
+			return nil, ErrBodyNotReplayable
+		}
 		if err := request.Body.Close(); err != nil {
 			return nil, err
 		}
 		return request.GetBody, nil
 	}
-	contents, err := io.ReadAll(request.Body)
-	closeErr := request.Body.Close()
-	if err != nil {
-		return nil, err
-	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
+
+	used := false
 	return func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(contents)), nil
+		if used {
+			return nil, ErrBodyNotReplayable
+		}
+		used = true
+		return request.Body, nil
 	}, nil
 }
 
@@ -305,11 +332,15 @@ func drainAndClose(response *http.Response) {
 }
 
 func retryAfter(value string, now time.Time) time.Duration {
-	if seconds, err := strconv.Atoi(value); err == nil {
-		if seconds > 0 {
-			return time.Duration(seconds) * time.Second
+	seconds, parseErr := strconv.ParseInt(value, 10, 64)
+	if parseErr == nil || errors.Is(parseErr, strconv.ErrRange) {
+		if seconds <= 0 {
+			return 0
 		}
-		return 0
+		if seconds > int64((time.Duration(1<<63-1))/time.Second) {
+			return time.Duration(1<<63 - 1)
+		}
+		return time.Duration(seconds) * time.Second
 	}
 	when, err := http.ParseTime(value)
 	if err != nil {
@@ -320,6 +351,29 @@ func retryAfter(value string, now time.Time) time.Duration {
 		return 0
 	}
 	return delay
+}
+
+func boundedDelay(ctx context.Context, delay time.Duration) time.Duration {
+	if delay <= 0 {
+		return 0
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return delay
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0
+	}
+	if delay > remaining {
+		return remaining
+	}
+	return delay
+}
+
+func isContextTermination(err error, caller, total, attempt context.Context) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		caller.Err() != nil || total.Err() != nil || attempt.Err() != nil
 }
 
 func sleep(ctx context.Context, delay time.Duration) error {
@@ -341,5 +395,9 @@ func defaultJitter(delay time.Duration) time.Duration {
 	if _, err := rand.Read(random[:]); err != nil {
 		return delay
 	}
-	return delay/2 + time.Duration(random[0])*delay/(2*255)
+	lower := delay / 2
+	span := delay - lower
+	randomness := time.Duration(random[0])
+	offset := (span/255)*randomness + (span%255)*randomness/255
+	return lower + offset
 }
