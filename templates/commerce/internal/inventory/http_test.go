@@ -97,6 +97,37 @@ func TestTerminalBeforeReservePersistsFenceAndRejectsLateMutations(t *testing.T)
 	assertInventoryProblem(t, reserve, http.StatusConflict, "order_terminal")
 }
 
+func TestReserveReplayAndConflictTakePrecedenceAfterTerminal(t *testing.T) {
+	tests := []struct {
+		action string
+		status ReservationState
+	}{
+		{action: "release", status: ReservationReleased},
+		{action: "commit", status: ReservationCommitted},
+		{action: "expire", status: ReservationExpired},
+	}
+	for _, test := range tests {
+		t.Run(test.action, func(t *testing.T) {
+			store := newInventoryStoreStub()
+			handler := NewHandler(NewService(store, fixedInventoryClock))
+			body := `{"order_id":"ORD-REPLAY","lines":[{"sku":"SKU-1","quantity":1}]}`
+			if response := postInventoryJSON(handler, "/internal/v1/reservations", body, "replay-key"); response.Code != http.StatusCreated {
+				t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
+			}
+			if response := postInventoryJSON(handler, "/internal/v1/reservations/ORD-REPLAY/"+test.action, `{}`, ""); response.Code != http.StatusOK {
+				t.Fatalf("terminal status=%d body=%s", response.Code, response.Body.String())
+			}
+			replay := postInventoryJSON(handler, "/internal/v1/reservations", body, "replay-key")
+			if replay.Code != http.StatusOK || !strings.Contains(replay.Body.String(), `"status":"`+string(test.status)+`"`) {
+				t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
+			}
+			conflict := postInventoryJSON(handler, "/internal/v1/reservations",
+				`{"order_id":"ORD-REPLAY","lines":[{"sku":"SKU-1","quantity":2}]}`, "replay-key")
+			assertInventoryProblem(t, conflict, http.StatusConflict, "idempotency_conflict")
+		})
+	}
+}
+
 func TestInventoryPublicReadsUseStablePagination(t *testing.T) {
 	store := newInventoryStoreStub()
 	store.levels = []InventoryLevel{
@@ -208,15 +239,15 @@ func (store *inventoryStoreStub) Reserve(_ context.Context, command ReserveComma
 	if store.reserveErr != nil {
 		return ReservationResult{}, store.reserveErr
 	}
-	if _, terminal := store.terminals[command.OrderID]; terminal {
-		return ReservationResult{}, ErrOrderTerminal
-	}
 	if existing, ok := store.reservations[command.IdempotencyKey]; ok {
 		if !sameReservePayload(existing, command) {
 			return ReservationResult{}, ErrIdempotencyConflict
 		}
 		existing.Existing = true
 		return existing, nil
+	}
+	if _, terminal := store.terminals[command.OrderID]; terminal {
+		return ReservationResult{}, ErrOrderTerminal
 	}
 	result := ReservationResult{
 		OrderID: command.OrderID,

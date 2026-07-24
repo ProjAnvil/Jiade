@@ -108,11 +108,6 @@ func (store *PostgresStore) Reserve(ctx context.Context, command ReserveCommand)
 	if err := lockIdempotencyKey(ctx, tx, command.IdempotencyKey); err != nil {
 		return ReservationResult{}, err
 	}
-	if terminal, err := terminalOrderState(ctx, tx, command.OrderID); err != nil {
-		return ReservationResult{}, err
-	} else if terminal != "" {
-		return ReservationResult{}, ErrOrderTerminal
-	}
 	keyPrefix := reservationKeyPrefix(command.IdempotencyKey)
 	existing, err := existingAllocations(ctx, tx, keyPrefix)
 	if err != nil {
@@ -123,6 +118,11 @@ func (store *PostgresStore) Reserve(ctx context.Context, command ReserveCommand)
 			return ReservationResult{}, ErrIdempotencyConflict
 		}
 		return ReservationResult{OrderID: command.OrderID, Allocations: existing, Existing: true}, nil
+	}
+	if terminal, err := terminalOrderState(ctx, tx, command.OrderID); err != nil {
+		return ReservationResult{}, err
+	} else if terminal != "" {
+		return ReservationResult{}, ErrOrderTerminal
 	}
 
 	allocations := make([]ReservationAllocation, 0, len(command.Lines))

@@ -98,6 +98,25 @@ func TestPostgresReservationStoreDoesNotEnableMissingProfiles(t *testing.T) {
 	}
 }
 
+func TestReserveChecksIdempotentReplayBeforeTerminalFence(t *testing.T) {
+	source, err := os.ReadFile("store.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	reserveStart := strings.Index(text, "func (store *PostgresStore) Reserve")
+	reserveEnd := strings.Index(text[reserveStart:], "type candidateLevel")
+	if reserveStart < 0 || reserveEnd < 0 {
+		t.Fatal("Reserve implementation not found")
+	}
+	reserve := text[reserveStart : reserveStart+reserveEnd]
+	existing := strings.Index(reserve, "existingAllocations")
+	terminal := strings.Index(reserve, "terminalOrderState")
+	if existing < 0 || terminal < 0 || existing > terminal {
+		t.Fatalf("Reserve ordering existing=%d terminal=%d, want existing allocation lookup first", existing, terminal)
+	}
+}
+
 func TestHandlersContainNoSQL(t *testing.T) {
 	source, err := os.ReadFile("http.go")
 	if err != nil {

@@ -47,14 +47,16 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("open inventory publisher channel: %w", err)
 	}
-	defer channel.Close()
 	if err := channel.ExchangeDeclare(eventExchange, "topic", true, false, false, false, nil); err != nil {
+		_ = channel.Close()
 		return fmt.Errorf("declare inventory event exchange: %w", err)
 	}
 	publisher, err := messaging.NewRabbitPublisher(channel, eventExchange)
 	if err != nil {
+		_ = channel.Close()
 		return err
 	}
+	defer publisher.Close()
 	relay := inventory.NewRelayLifecycle(processContext, func(ctx context.Context) error {
 		return messaging.RunRelay(ctx, pool, publisher, messaging.RelayConfig{
 			BatchSize: settings.Outbox.BatchSize, PollInterval: settings.Outbox.PollInterval,

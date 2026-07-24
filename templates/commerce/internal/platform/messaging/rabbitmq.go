@@ -22,12 +22,18 @@ type RabbitPublisher struct {
 	mu            sync.Mutex
 	retired       bool
 	available     atomic.Bool
+	watcherStop   chan struct{}
+	watcherDone   chan struct{}
+	stopOnce      sync.Once
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 type rabbitChannel interface {
 	Confirm(noWait bool) error
 	NotifyPublish(chan amqp.Confirmation) chan amqp.Confirmation
 	NotifyReturn(chan amqp.Return) chan amqp.Return
+	NotifyClose(chan *amqp.Error) chan *amqp.Error
 	GetNextPublishSeqNo() uint64
 	PublishWithContext(context.Context, string, string, bool, bool, amqp.Publishing) error
 	Close() error
@@ -55,8 +61,12 @@ func newRabbitPublisher(channel rabbitChannel, exchange string) (*RabbitPublishe
 		exchange:      exchange,
 		confirmations: channel.NotifyPublish(make(chan amqp.Confirmation, 1)),
 		returns:       channel.NotifyReturn(make(chan amqp.Return, 1)),
+		watcherStop:   make(chan struct{}),
+		watcherDone:   make(chan struct{}),
 	}
 	publisher.available.Store(true)
+	closeNotifications := channel.NotifyClose(make(chan *amqp.Error, 1))
+	go publisher.watchClose(closeNotifications)
 	return publisher, nil
 }
 
@@ -64,6 +74,25 @@ func newRabbitPublisher(channel rabbitChannel, exchange string) (*RabbitPublishe
 // It is nonblocking so readiness checks cannot wait behind an in-flight publish.
 func (publisher *RabbitPublisher) Available() bool {
 	return publisher != nil && publisher.available.Load()
+}
+
+// Close retires the publisher, closes its channel once, and waits for the
+// asynchronous close watcher to terminate.
+func (publisher *RabbitPublisher) Close() error {
+	if publisher == nil {
+		return nil
+	}
+	publisher.mu.Lock()
+	publisher.retired = true
+	publisher.available.Store(false)
+	publisher.stopWatcher()
+	publisher.closeOnce.Do(func() {
+		publisher.closeErr = publisher.channel.Close()
+	})
+	closeErr := publisher.closeErr
+	publisher.mu.Unlock()
+	<-publisher.watcherDone
+	return closeErr
 }
 
 // Publish sends event using its type as the topic routing key. mandatory=true
@@ -116,7 +145,29 @@ func (publisher *RabbitPublisher) retireLocked() {
 	}
 	publisher.retired = true
 	publisher.available.Store(false)
-	_ = publisher.channel.Close()
+	publisher.stopWatcher()
+	publisher.closeOnce.Do(func() {
+		publisher.closeErr = publisher.channel.Close()
+	})
+}
+
+func (publisher *RabbitPublisher) watchClose(notifications <-chan *amqp.Error) {
+	defer close(publisher.watcherDone)
+	select {
+	case <-notifications:
+		publisher.available.Store(false)
+		publisher.mu.Lock()
+		publisher.retired = true
+		publisher.mu.Unlock()
+		publisher.stopWatcher()
+	case <-publisher.watcherStop:
+	}
+}
+
+func (publisher *RabbitPublisher) stopWatcher() {
+	publisher.stopOnce.Do(func() {
+		close(publisher.watcherStop)
+	})
 }
 
 func awaitAMQPPublishOutcome(

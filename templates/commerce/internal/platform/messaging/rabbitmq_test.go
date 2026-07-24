@@ -4,10 +4,57 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
+
+func TestRabbitPublisherObservesIdleAsynchronousChannelClosure(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel.asyncClose()
+	select {
+	case <-publisher.watcherDone:
+	case <-time.After(time.Second):
+		t.Fatal("publisher close watcher did not terminate")
+	}
+	if publisher.Available() {
+		t.Fatal("publisher reports available after asynchronous channel closure")
+	}
+	if err := publisher.Publish(context.Background(), testEvent()); !errors.Is(err, ErrPublisherUnavailable) {
+		t.Fatalf("Publish() after asynchronous closure error=%v", err)
+	}
+	if channel.publishCalls != 0 {
+		t.Fatalf("publishCalls=%d after idle channel closure", channel.publishCalls)
+	}
+}
+
+func TestRabbitPublisherCloseStopsWatcherOnce(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-publisher.watcherDone:
+	case <-time.After(time.Second):
+		t.Fatal("publisher watcher leaked after Close")
+	}
+	if err := publisher.Close(); err != nil {
+		t.Fatalf("second Close() error=%v", err)
+	}
+	if publisher.Available() || channel.closeCalls != 1 {
+		t.Fatalf("available=%v closeCalls=%d", publisher.Available(), channel.closeCalls)
+	}
+}
 
 func TestRabbitPublisherConsumesReturnedPublishConfirmBeforeNextPublish(t *testing.T) {
 	channel := newFakeRabbitChannel()
@@ -180,6 +227,9 @@ type fakeRabbitChannel struct {
 	closeReturnOnPublish   bool
 	wrongSequenceOnPublish bool
 	onPublish              func()
+	closes                 chan *amqp.Error
+	closeOnce              sync.Once
+	closeCalls             int
 }
 
 func newFakeRabbitChannel() *fakeRabbitChannel {
@@ -194,6 +244,10 @@ func (channel *fakeRabbitChannel) NotifyPublish(confirm chan amqp.Confirmation) 
 func (channel *fakeRabbitChannel) NotifyReturn(returned chan amqp.Return) chan amqp.Return {
 	channel.returns = returned
 	return returned
+}
+func (channel *fakeRabbitChannel) NotifyClose(closes chan *amqp.Error) chan *amqp.Error {
+	channel.closes = closes
+	return closes
 }
 func (channel *fakeRabbitChannel) GetNextPublishSeqNo() uint64 { return channel.nextSeq }
 func (channel *fakeRabbitChannel) PublishWithContext(_ context.Context, _, _ string, _, _ bool, message amqp.Publishing) error {
@@ -229,6 +283,23 @@ func (channel *fakeRabbitChannel) PublishWithContext(_ context.Context, _, _ str
 	return nil
 }
 func (channel *fakeRabbitChannel) Close() error {
-	channel.closed = true
+	channel.closeOnce.Do(func() {
+		channel.closeCalls++
+		channel.closed = true
+		if channel.closes != nil {
+			close(channel.closes)
+		}
+	})
 	return nil
+}
+
+func (channel *fakeRabbitChannel) asyncClose() {
+	channel.closeOnce.Do(func() {
+		channel.closeCalls++
+		channel.closed = true
+		if channel.closes != nil {
+			channel.closes <- &amqp.Error{Code: 504, Reason: "channel closed"}
+			close(channel.closes)
+		}
+	})
 }

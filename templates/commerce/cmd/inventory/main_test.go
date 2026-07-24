@@ -39,6 +39,7 @@ func TestInventoryMainSupervisesAndWaitsForRelay(t *testing.T) {
 		"inventory.NewRuntimeReadiness",
 		"relay.Done()",
 		"relay.Wait(shutdownContext)",
+		"defer publisher.Close()",
 	} {
 		if !strings.Contains(text, contract) {
 			t.Errorf("inventory main missing lifecycle contract %q", contract)

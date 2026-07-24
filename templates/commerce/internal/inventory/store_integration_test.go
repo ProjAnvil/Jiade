@@ -174,6 +174,53 @@ func TestPostgresTerminalBeforeReserveFencesOrder(t *testing.T) {
 	assertIntegrationCount(t, pool, "outbox_event", 1)
 }
 
+func TestPostgresTerminalReservationRetainsIdempotencySemantics(t *testing.T) {
+	tests := []struct {
+		event ReservationEvent
+		state ReservationState
+	}{
+		{event: ReservationRelease, state: ReservationReleased},
+		{event: ReservationCommit, state: ReservationCommitted},
+		{event: ReservationExpire, state: ReservationExpired},
+	}
+	for _, test := range tests {
+		t.Run(string(test.event), func(t *testing.T) {
+			store, pool := newIntegrationInventoryStore(t)
+			seedIntegrationLevels(t, pool, "SKU-REPLAY", []integrationLevel{
+				{location: "LOC-1", priority: 1, onHand: 5},
+			})
+			now := fixedInventoryClock()
+			command := ReserveCommand{
+				OrderID: "ORD-REPLAY", IdempotencyKey: "replay-key", CorrelationID: "replay-request",
+				Lines:      []ReserveLine{{SKU: "SKU-REPLAY", Quantity: 1}},
+				OccurredAt: now, ExpiresAt: now.Add(DefaultReservationTTL),
+			}
+			if _, err := store.Reserve(context.Background(), command); err != nil {
+				t.Fatal(err)
+			}
+			terminalAt := now
+			if test.event == ReservationExpire {
+				terminalAt = command.ExpiresAt
+			}
+			if _, changed, err := store.TransitionOrder(context.Background(), command.OrderID, test.event, terminalAt); err != nil || !changed {
+				t.Fatalf("terminal changed=%v err=%v", changed, err)
+			}
+			replay, err := store.Reserve(context.Background(), command)
+			if err != nil || !replay.Existing || len(replay.Allocations) != 1 ||
+				replay.Allocations[0].State != test.state {
+				t.Fatalf("replay=%+v err=%v", replay, err)
+			}
+			changed := command
+			changed.Lines = []ReserveLine{{SKU: "SKU-REPLAY", Quantity: 2}}
+			if _, err := store.Reserve(context.Background(), changed); !errors.Is(err, ErrIdempotencyConflict) {
+				t.Fatalf("changed payload error=%v", err)
+			}
+			assertIntegrationCount(t, pool, "reservation", 1)
+			assertIntegrationCount(t, pool, "reservation_order_state", 1)
+		})
+	}
+}
+
 func TestPostgresConcurrentReserveAndTerminalLeaveNoActiveStock(t *testing.T) {
 	store, pool := newIntegrationInventoryStore(t)
 	seedIntegrationLevels(t, pool, "SKU-FENCE-RACE", []integrationLevel{
