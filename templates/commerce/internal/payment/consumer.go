@@ -73,32 +73,48 @@ func (consumer *Consumer) applyEvent(event messaging.Event) error {
 	}
 }
 
+// orderPlacedPayload mirrors the exact shape order emits in
+// internal/order/service.go:orderPlacedPayload so the strict
+// DisallowUnknownFields decoder accepts it. Lines is captured as raw JSON
+// because payment only needs the order total.
+type orderPlacedPayload struct {
+	OrderID    string          `json:"order_id"`
+	CustomerID string          `json:"customer_id"`
+	Currency   string          `json:"currency"`
+	TotalMinor int64           `json:"total_minor"`
+	Lines      json.RawMessage `json:"lines"`
+}
+
 func (consumer *Consumer) applyOrderPlaced(event messaging.Event) error {
-	var payload struct {
-		OrderID     string `json:"order_id"`
-		Currency    string `json:"currency"`
-		AmountMinor int64  `json:"amount_minor"`
-	}
+	var payload orderPlacedPayload
 	if err := decodePaymentEnvelope(event, &payload); err != nil {
 		return err
 	}
 	if err := validatePaymentSubject(event, payload.OrderID); err != nil {
 		return err
 	}
-	if payload.AmountMinor <= 0 || len(payload.Currency) != 3 {
+	if payload.TotalMinor <= 0 || len(payload.Currency) != 3 {
 		return messaging.NonRetryable(fmt.Errorf("invalid order.placed money %s/%d",
-			payload.Currency, payload.AmountMinor))
+			payload.Currency, payload.TotalMinor))
 	}
 	_, err := consumer.service.CaptureOrder(context.Background(), CaptureCommand{
 		OrderID:        payload.OrderID,
 		Currency:       payload.Currency,
-		AmountMinor:    payload.AmountMinor,
-		IdempotencyKey: "place:" + payload.OrderID,
+		AmountMinor:    payload.TotalMinor,
+		IdempotencyKey: placeIntentKey(payload.OrderID),
 		CorrelationID:  event.CorrelationID,
 		CausationID:    event.ID,
 		OccurredAt:     event.OccurredAt,
 	})
 	return err
+}
+
+// placeIntentKey is the shared idempotency-key namespace for "create the
+// capture intent for this order". The webhook handler and the order.placed.v1
+// consumer both use it so a webhook replay converges on the same intent rather
+// than inserting a duplicate.
+func placeIntentKey(orderID string) string {
+	return "place:" + orderID
 }
 
 func (consumer *Consumer) applyRefundRequested(event messaging.Event) error {

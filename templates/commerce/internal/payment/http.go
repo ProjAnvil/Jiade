@@ -79,7 +79,7 @@ func NewHandler(service *Service, store *PostgresStore) http.Handler {
 			OrderID:        body.OrderID,
 			Currency:       body.Currency,
 			AmountMinor:    body.AmountMinor,
-			IdempotencyKey: "webhook:" + body.OrderID,
+			IdempotencyKey: placeIntentKey(body.OrderID),
 		})
 		if writePaymentServiceError(w, r, err) {
 			return

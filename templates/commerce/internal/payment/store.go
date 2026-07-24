@@ -124,7 +124,7 @@ func (store *PostgresStore) SaveCapture(ctx context.Context, outcome CaptureOutc
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	intent := outcome.Intent
-	if _, err := tx.Exec(ctx, `
+	inserted, err := tx.Exec(ctx, `
 		INSERT INTO payment_intent (
 			payment_intent_id, order_id, amount_minor, currency, status,
 			provider, provider_reference, idempotency_key, created_at
@@ -132,10 +132,38 @@ func (store *PostgresStore) SaveCapture(ctx context.Context, outcome CaptureOutc
 		ON CONFLICT (idempotency_key) DO NOTHING`,
 		intent.PaymentIntentID, intent.OrderID, intent.AmountMinor, intent.Currency,
 		string(intent.Status), intent.Provider, intent.ProviderReference,
-		intent.IdempotencyKey, store.clock().UTC()); err != nil {
+		intent.IdempotencyKey, store.clock().UTC())
+	if err != nil {
 		return CaptureResult{}, fmt.Errorf("insert payment intent: %w", err)
 	}
-	if err := insertPaymentMethod(ctx, tx, intent, defaultMethodType); err != nil {
+	// A concurrent replay (e.g. duplicate delivery on a second queue, or the
+	// webhook racing the consumer) already created the intent under this
+	// idempotency_key. Reload the canonical intent + attempts and return a
+	// replay result WITHOUT inserting a new outbox event — the original writer
+	// already emitted the capture/failed event.
+	if inserted.RowsAffected() == 0 {
+		existing, err := scanIntent(ctx, tx, `
+			SELECT payment_intent_id, order_id, amount_minor, currency, status,
+			       provider, COALESCE(provider_reference, ''), idempotency_key
+			FROM payment_intent
+			WHERE idempotency_key = $1`, intent.IdempotencyKey)
+		if err != nil {
+			return CaptureResult{}, fmt.Errorf("reload payment intent after replay: %w", err)
+		}
+		existing.RefundedMinor, err = store.sumRefunded(ctx, tx, existing.PaymentIntentID)
+		if err != nil {
+			return CaptureResult{}, err
+		}
+		attempts, err := store.listAttemptsInTx(ctx, tx, existing.PaymentIntentID)
+		if err != nil {
+			return CaptureResult{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return CaptureResult{}, fmt.Errorf("commit payment capture replay: %w", err)
+		}
+		return CaptureResult{Intent: existing, Attempts: attempts, Replayed: true}, nil
+	}
+	if err := insertPaymentMethod(ctx, tx, intent, defaultMethodType, store.clock); err != nil {
 		return CaptureResult{}, err
 	}
 	for _, attempt := range outcome.Attempts {
@@ -158,6 +186,36 @@ func (store *PostgresStore) SaveCapture(ctx context.Context, outcome CaptureOutc
 		return CaptureResult{}, fmt.Errorf("commit payment capture: %w", err)
 	}
 	return CaptureResult{Intent: intent, Attempts: outcome.Attempts, Events: outcome.Events}, nil
+}
+
+// listAttemptsInTx reads attempts inside the caller's transaction so the
+// SaveCapture replay path observes a consistent snapshot.
+func (store *PostgresStore) listAttemptsInTx(ctx context.Context, tx pgx.Tx, intentID string) ([]Attempt, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT attempt_id, payment_intent_id, status,
+		       COALESCE(failure_code, ''), amount_minor
+		FROM payment_attempt
+		WHERE payment_intent_id = $1
+		ORDER BY created_at, attempt_id`, intentID)
+	if err != nil {
+		return nil, fmt.Errorf("list payment attempts in tx: %w", err)
+	}
+	defer rows.Close()
+	attempts := make([]Attempt, 0)
+	for rows.Next() {
+		var attempt Attempt
+		var code string
+		if err := rows.Scan(&attempt.AttemptID, &attempt.PaymentIntentID,
+			&attempt.Status, &code, &attempt.AmountMinor); err != nil {
+			return nil, fmt.Errorf("scan payment attempt in tx: %w", err)
+		}
+		attempt.FailureCode = FailureCode(code)
+		attempts = append(attempts, attempt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate payment attempts in tx: %w", err)
+	}
+	return attempts, nil
 }
 
 func (store *PostgresStore) SaveRefund(ctx context.Context, outcome RefundOutcome) (RefundResult, error) {
@@ -206,13 +264,29 @@ func (store *PostgresStore) SaveCancel(ctx context.Context, outcome CancelOutcom
 	if err := store.assert(); err != nil {
 		return CancelResult{}, err
 	}
+	tx, err := store.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return CancelResult{}, fmt.Errorf("begin payment cancel: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	intent := outcome.Intent
-	if _, err := store.pool.Exec(ctx, `
+	// The WHERE clause guards against regressing a terminal status (e.g. a
+	// raced capture that flipped the row to succeeded). The update is a no-op
+	// in that case and we still emit no outbox event.
+	if _, err := tx.Exec(ctx, `
 		UPDATE payment_intent
 		SET status = $2
 		WHERE payment_intent_id = $1 AND status <> $2`,
 		intent.PaymentIntentID, string(intent.Status)); err != nil {
 		return CancelResult{}, fmt.Errorf("cancel payment intent: %w", err)
+	}
+	for _, event := range outcome.Events {
+		if err := messaging.InsertOutbox(ctx, tx, event); err != nil {
+			return CancelResult{}, fmt.Errorf("insert cancel outbox: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return CancelResult{}, fmt.Errorf("commit payment cancel: %w", err)
 	}
 	return CancelResult{Intent: intent, Events: outcome.Events}, nil
 }
@@ -316,14 +390,17 @@ func scanRefund(ctx context.Context, queryer interface {
 	return refund, err
 }
 
-func insertPaymentMethod(ctx context.Context, tx pgx.Tx, intent Intent, methodType MethodType) error {
+func insertPaymentMethod(ctx context.Context, tx pgx.Tx, intent Intent, methodType MethodType, clock func() time.Time) error {
+	if clock == nil {
+		clock = time.Now
+	}
 	methodID := deterministicMethodID(intent.PaymentIntentID)
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO payment_method_snapshot (
 			payment_method_id, payment_intent_id, method_type, created_at
 		) VALUES ($1, $2, $3, $4)
 		ON CONFLICT (payment_method_id) DO NOTHING`,
-		methodID, intent.PaymentIntentID, string(methodType), time.Now().UTC()); err != nil {
+		methodID, intent.PaymentIntentID, string(methodType), clock().UTC()); err != nil {
 		return fmt.Errorf("insert payment method: %w", err)
 	}
 	return nil
@@ -332,11 +409,6 @@ func insertPaymentMethod(ctx context.Context, tx pgx.Tx, intent Intent, methodTy
 func deterministicMethodID(intentID string) string {
 	sum := sha256.Sum256([]byte("payment_method\x00" + intentID))
 	return "pm_" + hex.EncodeToString(sum[:12])
-}
-
-func simpleHash(input string) string {
-	sum := sha256.Sum256([]byte(input))
-	return hex.EncodeToString(sum[:12])
 }
 
 func uniqueViolation(err error) bool {

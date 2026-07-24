@@ -44,10 +44,26 @@ func TestPostgresCaptureIsAtomicAndIdempotent(t *testing.T) {
 	if first.Intent.Status != StateSucceeded {
 		t.Fatalf("status=%q, want succeeded", first.Intent.Status)
 	}
-	// Replay must not duplicate rows or raise an error.
-	_, err = store.SaveCapture(ctx, outcome)
+	if first.Replayed {
+		t.Fatalf("first capture must not be flagged as a replay")
+	}
+	// Replay must not duplicate rows or raise an error, and must return a
+	// replay result (Replayed=true) carrying the persisted attempts without
+	// inserting a new outbox event — the regression for the SaveCapture
+	// replay race (Important 3).
+	replay, err := store.SaveCapture(ctx, outcome)
 	if err != nil {
 		t.Fatalf("replay SaveCapture error: %v", err)
+	}
+	if !replay.Replayed {
+		t.Fatalf("replay SaveCapture must return Replayed=true")
+	}
+	if replay.Intent.PaymentIntentID != first.Intent.PaymentIntentID {
+		t.Fatalf("replay intent_id=%q, want %q", replay.Intent.PaymentIntentID,
+			first.Intent.PaymentIntentID)
+	}
+	if len(replay.Attempts) != 2 {
+		t.Fatalf("replay attempts=%d, want 2 (loaded from store)", len(replay.Attempts))
 	}
 	assertPaymentCount(t, pool, "payment_intent", 1)
 	assertPaymentCount(t, pool, "payment_method_snapshot", 1)
