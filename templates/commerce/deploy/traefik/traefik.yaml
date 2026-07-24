@@ -35,7 +35,10 @@ providers:
     # on the host are not picked up.
     exposedByDefault: false
     network: commerce-edge
-    watch: false
+    # Watch the Docker event stream so Traefik discovers services as they come
+    # up, independent of compose start ordering (Traefik may start before the
+    # app replicas are healthy).
+    watch: true
 
 # Logs go to stdout for `docker compose logs traefik`. Access logs disabled by
 # default to keep the noise low; flip via env if needed.

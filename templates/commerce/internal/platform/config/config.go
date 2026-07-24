@@ -149,7 +149,7 @@ func Load(service string) (Config, error) {
 	}
 	return Config{
 		Service:  service,
-		Instance: stringEnv("INSTANCE_ID", service),
+		Instance: stringEnv("INSTANCE_ID", defaultInstance(service)),
 		Database: Database{
 			Host: stringEnv("DB_HOST", "localhost"), Port: dbPort,
 			User: stringEnv("DB_USER", "commerce"), Password: stringEnv("DB_PASSWORD", "commerce"),
@@ -171,6 +171,17 @@ func stringEnv(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// defaultInstance returns a per-process identity for X-Service-Instance when
+// INSTANCE_ID is unset. The OS hostname is unique per container, so scaled
+// replicas of the same service report distinct instance IDs without per-replica
+// environment configuration.
+func defaultInstance(service string) string {
+	if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
+		return host
+	}
+	return service
 }
 
 func intEnv(name string, fallback, minimum int) (int, error) {

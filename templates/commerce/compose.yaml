@@ -52,9 +52,6 @@ x-service-common: &service-common
     DB_MIN_CONNS: "1"
     BROKER_URL: amqp://commerce:commerce@rabbitmq:5672/
     HTTP_ADDR: ":8080"
-    # Per-service environment overrides INSTANCE_ID; the placeholder here keeps
-    # the global interpolation warning-free.
-    INSTANCE_ID: local
     CLIENT_REQUEST_TIMEOUT: 8s
     CLIENT_ATTEMPT_TIMEOUT: 3s
     OUTBOX_BATCH_SIZE: "100"
@@ -144,21 +141,11 @@ services:
   # --------------------- Infrastructure ----------------------------------
 
   traefik:
-    image: traefik:v3.3
+    image: traefik:v3.7.8
     init: true
     restart: unless-stopped
-    environment:
-      # Pin the Docker Engine API version so the in-container client negotiates
-      # with the host daemon regardless of the daemon's default minimum.
-      DOCKER_API_VERSION: "1.45"
     command:
       - --configFile=/etc/traefik/traefik.yaml
-      - --entryPoints.web.address=:8080
-      - --providers.docker=true
-      - --providers.docker.exposedByDefault=false
-      - --providers.docker.network=commerce-edge
-      - --ping=true
-      - --log.level=INFO
     ports:
       # The ONLY published host port: the gateway. App/db ports stay internal.
       - "18100:8080"
@@ -389,7 +376,6 @@ services:
       SERVICE: catalog
       DB_HOST: catalog-db
       DB_NAME: catalog
-      INSTANCE_ID: ${COMMERCE_INSTANCE_PREFIX:-local}-catalog-${COMMERCE_INSTANCE_SUFFIX:-1}
     deploy:
       replicas: 2
       restart_policy:
@@ -432,7 +418,6 @@ services:
       SERVICE: customer
       DB_HOST: customer-db
       DB_NAME: customer
-      INSTANCE_ID: ${COMMERCE_INSTANCE_PREFIX:-local}-customer-${COMMERCE_INSTANCE_SUFFIX:-1}
     deploy:
       replicas: 1
       restart_policy:
@@ -473,7 +458,6 @@ services:
       SERVICE: inventory
       DB_HOST: inventory-db
       DB_NAME: inventory
-      INSTANCE_ID: ${COMMERCE_INSTANCE_PREFIX:-local}-inventory-${COMMERCE_INSTANCE_SUFFIX:-1}
     deploy:
       replicas: 2
       restart_policy:
@@ -514,7 +498,6 @@ services:
       SERVICE: order
       DB_HOST: order-db
       DB_NAME: order
-      INSTANCE_ID: ${COMMERCE_INSTANCE_PREFIX:-local}-order-${COMMERCE_INSTANCE_SUFFIX:-1}
       CUSTOMER_URL: http://customer:8080
       CATALOG_URL: http://catalog:8080
       INVENTORY_URL: http://inventory:8080
@@ -558,7 +541,6 @@ services:
       SERVICE: payment
       DB_HOST: payment-db
       DB_NAME: payment
-      INSTANCE_ID: ${COMMERCE_INSTANCE_PREFIX:-local}-payment-${COMMERCE_INSTANCE_SUFFIX:-1}
     deploy:
       replicas: 1
       restart_policy:
@@ -599,7 +581,6 @@ services:
       SERVICE: fulfillment
       DB_HOST: fulfillment-db
       DB_NAME: fulfillment
-      INSTANCE_ID: ${COMMERCE_INSTANCE_PREFIX:-local}-fulfillment-${COMMERCE_INSTANCE_SUFFIX:-1}
       INVENTORY_URL: http://inventory:8080
     deploy:
       replicas: 1

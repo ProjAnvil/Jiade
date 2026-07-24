@@ -52,15 +52,18 @@ gate_instance_ids() {
 # Helpers
 # ---------------------------------------------------------------------------
 # Pick a seeded product/SKU from the catalog. The dev scale seeds 80 products;
-# we read the first SKU deterministically.
+# we read the first SKU deterministically. The product LIST omits variants, so
+# resolve the SKU via the product DETAIL endpoint.
 pick_sku() {
-  curl -fsS "${GATEWAY}/api/v1/products?limit=1" |
-    jq -r '.items[0].variants[0].sku // .items[0].sku // empty'
+  local pid
+  pid=$(curl -fsS "${GATEWAY}/api/v1/products?limit=1" | jq -r '.items[0].product_id // empty')
+  [ -n "$pid" ] || return 1
+  curl -fsS "${GATEWAY}/api/v1/products/${pid}" | jq -r '.variants[0].sku // empty'
 }
 
 # Resolve the deterministic seeded customer id by listing customers.
 pick_customer_id() {
-  curl -fsS "${GATEWAY}/api/v1/customers?limit=1" | jq -r '.items[0].id // empty'
+  curl -fsS "${GATEWAY}/api/v1/customers?limit=1" | jq -r '.items[0].customer_id // empty'
 }
 
 # Discover the order_id of the first seeded order whose payment_status matches
@@ -104,11 +107,13 @@ gate_checkout_success() {
 
   cart=$(curl -fsS -X POST "${GATEWAY}/api/v1/carts" \
         -H 'Content-Type: application/json' \
-        -d "{\"customer_id\":\"${customer}\"}" | jq -r '.id // empty')
+        -H "Idempotency-Key: smoke-cart-${SEED_INT}" \
+        -d "{\"customer_id\":\"${customer}\",\"currency\":\"USD\"}" | jq -r '.cart_id // empty')
   test -n "${cart}" || fail "cart creation returned no id"
 
   curl -fsS -X POST "${GATEWAY}/api/v1/carts/${cart}/items" \
        -H 'Content-Type: application/json' \
+       -H "Idempotency-Key: smoke-item-${SEED_INT}" \
        -d "{\"sku\":\"${sku}\",\"quantity\":1}" >/dev/null
 
   checkout=$(curl -fsS -X POST "${GATEWAY}/api/v1/checkouts" \
