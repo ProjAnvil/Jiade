@@ -325,6 +325,44 @@ func TestCancelOpenFulfillmentFlipsStatusToCancelled(t *testing.T) {
 	}
 }
 
+func TestCancelAlreadyTerminalFulfillmentStillEmitsCancelledEvent(t *testing.T) {
+	// Regression guard: when EVERY fulfillment order for the order is already
+	// terminal (fulfilled), the cancel UPDATE would flip zero rows. The store
+	// MUST still emit fulfillment.cancelled.v1 because the order saga cannot
+	// advance its compensation step without the acknowledgement. The pre-fix
+	// fakeStore unconditionally appended events and so hid this bug; this test
+	// drives the corrected fakeStore through Service.CancelOrder with a seeded
+	// fulfilled projection and asserts the cancelled event survives.
+	fixture := newFulfillmentFixture()
+	fulfilled := FulfillmentOrder{
+		FulfillmentID: deterministicFulfillmentID("ORD-9C", "LOC-1"),
+		OrderID:       "ORD-9C", LocationID: "LOC-1", Status: StatusFulfilled,
+		CreatedAt: fixedFulfillmentClock(),
+	}
+	fixture.store.seedOrder(fulfilled)
+	result, err := fixture.service.CancelOrder(context.Background(), CancelCommand{
+		OrderID: "ORD-9C", Reason: "buyer_cancelled",
+		IdempotencyKey: "cancel-9c", CorrelationID: "request-9c",
+	})
+	if err != nil {
+		t.Fatalf("CancelOrder error: %v", err)
+	}
+	if len(result.Events) != 1 || result.Events[0].Type != EventFulfillmentCancelled {
+		t.Fatalf("events=%+v, want single %s (terminal projection must still acknowledge)",
+			eventTypes(result.Events), EventFulfillmentCancelled)
+	}
+	if result.Events[0].Subject != "ORD-9C" {
+		t.Fatalf("subject=%q, want ORD-9C", result.Events[0].Subject)
+	}
+	var payload orderIDPayload
+	if err := decodeStrict(result.Events[0].Data, &payload); err != nil {
+		t.Fatalf("decode cancelled payload: %v", err)
+	}
+	if payload.OrderID != "ORD-9C" {
+		t.Fatalf("payload order_id=%q, want ORD-9C", payload.OrderID)
+	}
+}
+
 func TestCancelOrderIsIdempotentForAlreadyCancelled(t *testing.T) {
 	fixture := newFulfillmentFixture()
 	fixture.inventory.seed("ORD-10", allocationList{
@@ -560,18 +598,36 @@ func (store *fakeStore) SaveCancel(ctx context.Context, outcome CancelOutcome) (
 		return existing, nil
 	}
 	orders := store.byOrder[outcome.OrderID]
+	// Mirror PostgresStore: capture whether the order has any non-cancelled
+	// projection BEFORE flipping open rows. This is the emit predicate and must
+	// stay true for terminal-fulfilled rows (the saga-hang bug) while staying
+	// false for an already-fully-cancelled order (idempotent replay) and for an
+	// order with no prior projection (silent no-op).
+	hasUncancelled := false
 	for index := range orders {
-		if orders[index].Status != StatusFulfilled {
+		if orders[index].Status != StatusCancelled {
+			hasUncancelled = true
+		}
+	}
+	for index := range orders {
+		if orders[index].Status != StatusFulfilled && orders[index].Status != StatusCancelled {
 			orders[index].Status = StatusCancelled
 		}
 	}
+	var events []messaging.Event
+	if hasUncancelled && len(outcome.Events) > 0 {
+		events = append([]messaging.Event(nil), outcome.Events...)
+		store.capturedEvents = append(store.capturedEvents, outcome.Events...)
+	}
 	result := CancelResult{
 		FulfillmentOrders: cloneFulfillmentOrders(orders),
-		Events:            append([]messaging.Event(nil), outcome.Events...),
+		Events:            events,
+	}
+	if !hasUncancelled {
+		result.Replayed = true
 	}
 	store.cancelsByKey[outcome.IdempotencyKey] = result
 	store.byOrder[outcome.OrderID] = orders
-	store.capturedEvents = append(store.capturedEvents, outcome.Events...)
 	return result, nil
 }
 

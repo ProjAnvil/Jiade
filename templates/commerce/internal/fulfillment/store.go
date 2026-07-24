@@ -382,7 +382,18 @@ func saveShipment(ctx context.Context, tx pgx.Tx, shipment Shipment, order Fulfi
 // SaveCancel flips still-open fulfillment orders to 'cancelled' and writes the
 // derived Outbox event in one transaction. Replays of the same idempotency key
 // are a no-op: the Inbox on consumer-side records the inbound event_id, and a
-// duplicate SaveCancel finds no open orders and emits no new Outbox row.
+// duplicate SaveCancel finds every row already 'cancelled' and emits no new
+// Outbox row.
+//
+// The cancelled event fires whenever the order has any row that is NOT already
+// 'cancelled' — including the case where every row is 'fulfilled'
+// (terminal-delivered) and the UPDATE below flips zero rows. The order saga,
+// after emitting fulfillment.cancel-requested.v1 for a paid order, requires
+// fulfillment.cancelled.v1 to advance its compensation step; suppressing the
+// event when shipments were already delivered would hang the saga forever. The
+// existence check runs BEFORE the UPDATE so the open-row flips do not erase the
+// signal; the UPDATE's state guard is preserved (already-terminal rows are not
+// re-flipped).
 func (store *PostgresStore) SaveCancel(ctx context.Context, outcome CancelOutcome) (CancelResult, error) {
 	if err := store.assert(); err != nil {
 		return CancelResult{}, err
@@ -392,6 +403,18 @@ func (store *PostgresStore) SaveCancel(ctx context.Context, outcome CancelOutcom
 		return CancelResult{}, fmt.Errorf("begin fulfillment cancel: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// Capture whether the order has any non-cancelled projection BEFORE the
+	// UPDATE flips open rows. This is the emit predicate: true when any row is
+	// open / in_progress / on_hold / fulfilled. Already-cancelled rows do not
+	// count (a prior SaveCancel already emitted the event for this order).
+	var hasUncancelled bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM fulfillment_order
+			WHERE order_id = $1 AND status <> 'cancelled'
+		)`, outcome.OrderID).Scan(&hasUncancelled); err != nil {
+		return CancelResult{}, fmt.Errorf("check uncancelled fulfillment order: %w", err)
+	}
 	rows, err := tx.Query(ctx, `
 		UPDATE fulfillment_order
 		SET status = 'cancelled'
@@ -415,7 +438,7 @@ func (store *PostgresStore) SaveCancel(ctx context.Context, outcome CancelOutcom
 	if err := rows.Err(); err != nil {
 		return CancelResult{}, fmt.Errorf("iterate cancelled orders: %w", err)
 	}
-	emitEvent := len(cancelled) > 0 && len(outcome.Events) > 0
+	emitEvent := hasUncancelled && len(outcome.Events) > 0
 	if emitEvent {
 		for _, event := range outcome.Events {
 			if err := messaging.InsertOutbox(ctx, tx, event); err != nil {

@@ -117,6 +117,102 @@ func TestPostgresCancelFlipsOpenOrdersAndEmitsEvent(t *testing.T) {
 	assertFulfillmentCount(t, pool, "outbox_event", 1)
 }
 
+func TestPostgresCancelEmitsEventEvenWhenAlreadyFulfilled(t *testing.T) {
+	// Regression test for the saga-hang bug: when every fulfillment_order for
+	// the order is already terminal (fulfilled), the cancel UPDATE flips zero
+	// rows. The store MUST still write exactly one fulfillment.cancelled.v1
+	// outbox row so the order saga can advance its compensation step. Before
+	// the fix, PostgresStore.SaveCancel keyed the emit predicate on
+	// len(cancelled) > 0 and silently dropped the event.
+	store, pool := newIntegrationFulfillmentStore(t)
+	ctx := context.Background()
+	now := integrationFulfillmentClock()
+	// Seed a single FULFILLED fulfillment_order directly — no open rows to flip.
+	terminal := FulfillmentOrder{
+		FulfillmentID: deterministicFulfillmentID("ORD-INT-5", "LOC-1"),
+		OrderID:       "ORD-INT-5", LocationID: "LOC-1",
+		Status: StatusFulfilled, CreatedAt: now,
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO fulfillment_order (
+			fulfillment_id, order_id, location_id, status, created_at
+		) VALUES ($1, $2, $3, $4, $5)`,
+		terminal.FulfillmentID, terminal.OrderID, terminal.LocationID,
+		string(terminal.Status), terminal.CreatedAt); err != nil {
+		t.Fatalf("seed terminal order: %v", err)
+	}
+	cancelledEvent := messaging.NewEvent(EventFulfillmentCancelled, "ORD-INT-5", "corr-int-5", "",
+		mustFulfillmentJSON(orderIDPayload{OrderID: "ORD-INT-5"}),
+		func() time.Time { return now })
+	result, err := store.SaveCancel(ctx, CancelOutcome{
+		IdempotencyKey: "cancel-int-5", OrderID: "ORD-INT-5",
+		Reason: "buyer_cancelled", Events: []messaging.Event{cancelledEvent},
+	})
+	if err != nil {
+		t.Fatalf("SaveCancel error: %v", err)
+	}
+	if len(result.Events) != 1 || result.Events[0].Type != EventFulfillmentCancelled {
+		t.Fatalf("events=%+v, want single %s (terminal projection must still acknowledge)",
+			eventTypes(result.Events), EventFulfillmentCancelled)
+	}
+	if result.Replayed {
+		t.Fatalf("first cancel of a fulfilled order must not be a replay")
+	}
+	// The terminal row must NOT have been re-flipped (state guard preserved).
+	assertFulfillmentCount(t, pool, "outbox_event", 1)
+	var status string
+	if err := pool.QueryRow(ctx,
+		`SELECT status FROM fulfillment_order WHERE fulfillment_id = $1`,
+		terminal.FulfillmentID).Scan(&status); err != nil {
+		t.Fatalf("reload terminal order: %v", err)
+	}
+	if status != string(StatusFulfilled) {
+		t.Fatalf("terminal order status=%q, want %q (state guard must preserve fulfilled)",
+			status, StatusFulfilled)
+	}
+	// Replay with the same idempotency key must not duplicate the outbox row.
+	replay, err := store.SaveCancel(ctx, CancelOutcome{
+		IdempotencyKey: "cancel-int-5", OrderID: "ORD-INT-5",
+		Reason: "buyer_cancelled", Events: []messaging.Event{cancelledEvent},
+	})
+	if err != nil {
+		t.Fatalf("replay SaveCancel error: %v", err)
+	}
+	if !replay.Replayed {
+		t.Fatalf("replay SaveCancel must return Replayed=true")
+	}
+	if len(replay.Events) != 0 {
+		t.Fatalf("replay events=%d, want 0 (no duplicates)", len(replay.Events))
+	}
+	assertFulfillmentCount(t, pool, "outbox_event", 1)
+}
+
+func TestPostgresCancelEmitsNothingForOrderWithNoProjection(t *testing.T) {
+	// Negative control: cancelling an order that has NO fulfillment_order rows
+	// must stay a silent no-op (no outbox row). This is what makes an
+	// order.cancelled.v1 for an order that was never paid safe to ack.
+	store, pool := newIntegrationFulfillmentStore(t)
+	ctx := context.Background()
+	now := integrationFulfillmentClock()
+	cancelledEvent := messaging.NewEvent(EventFulfillmentCancelled, "ORD-INT-6", "corr-int-6", "",
+		mustFulfillmentJSON(orderIDPayload{OrderID: "ORD-INT-6"}),
+		func() time.Time { return now })
+	result, err := store.SaveCancel(ctx, CancelOutcome{
+		IdempotencyKey: "cancel-int-6", OrderID: "ORD-INT-6",
+		Reason: "buyer_cancelled", Events: []messaging.Event{cancelledEvent},
+	})
+	if err != nil {
+		t.Fatalf("SaveCancel error: %v", err)
+	}
+	if !result.Replayed {
+		t.Fatalf("cancel of unknown order must be a replay no-op")
+	}
+	if len(result.Events) != 0 {
+		t.Fatalf("events=%d, want 0 (no prior fulfillment)", len(result.Events))
+	}
+	assertFulfillmentCount(t, pool, "outbox_event", 0)
+}
+
 func TestPostgresCompletedEventPayloadIsExact(t *testing.T) {
 	store, pool := newIntegrationFulfillmentStore(t)
 	ctx := context.Background()
