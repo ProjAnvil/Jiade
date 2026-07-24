@@ -1,0 +1,662 @@
+# Production-shaped topology for the commerce template.
+#
+# Topology
+#   - 6 services: catalog, customer, inventory, order, payment, fulfillment.
+#   - Each service owns a dedicated PostgreSQL 16 container, database, schema,
+#     and named volume (no shared database).
+#   - RabbitMQ 4 management image with the pre-declared commerce.events
+#     exchange and per-service queues (deploy/rabbitmq/definitions.json).
+#   - Traefik 3 gateway is the only published entrypoint (host 18100). No app
+#     or database ports are published; no fixed container names are set.
+#   - Default replica counts: catalog=2, customer=1, inventory=2, order=2,
+#     payment=1, fulfillment=1.
+#
+# Default memory budget targets 4-6 GB. Adjust per replica via the compose
+# `mem_limit` / `mem_reservation` keys in `x-service-defaults`.
+
+name: commerce
+
+# ---------------------------------------------------------------------------
+# Extension fields (compose YAML anchors).
+# ---------------------------------------------------------------------------
+
+# Shared fields for the six Go services. Each service derives its database
+# host/user from `x-service-common.<svc>.db` and binds the broker.
+x-service-common: &service-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:rw,size=64m,mode=1777
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  stop_grace_period: 30s
+  # Resource envelope sized for the dev scale; the load overlay raises this.
+  mem_reservation: 128m
+  mem_limit: 512m
+  cpus: 1.0
+  networks:
+    data: {}
+    edge: {}
+  environment: &service-env
+    DB_PORT: "5432"
+    DB_USER: commerce
+    DB_PASSWORD: commerce
+    DB_SSLMODE: disable
+    DB_MAX_CONNS: "10"
+    DB_MIN_CONNS: "1"
+    BROKER_URL: amqp://commerce:commerce@rabbitmq:5672/
+    HTTP_ADDR: ":8080"
+    # Per-service environment overrides INSTANCE_ID; the placeholder here keeps
+    # the global interpolation warning-free.
+    INSTANCE_ID: local
+    CLIENT_REQUEST_TIMEOUT: 8s
+    CLIENT_ATTEMPT_TIMEOUT: 3s
+    OUTBOX_BATCH_SIZE: "100"
+    OUTBOX_POLL_INTERVAL: 1s
+    SHUTDOWN_TIMEOUT: 25s
+
+# Shared PostgreSQL 16 service definition.
+x-postgres-common: &postgres-common
+  image: postgres:16-bookworm
+  init: true
+  restart: unless-stopped
+  environment:
+    POSTGRES_USER: commerce
+    POSTGRES_PASSWORD: commerce
+  read_only: false
+  cap_drop:
+    - ALL
+  cap_add:
+    - CHOWN
+    - SETUID
+    - SETGID
+    - DAC_OVERRIDE
+  security_opt:
+    - no-new-privileges:true
+  stop_grace_period: 30s
+  mem_reservation: 128m
+  mem_limit: 768m
+  cpus: 1.0
+  networks:
+    data: {}
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U commerce -d $$POSTGRES_DB"]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+    start_period: 10s
+
+# Shared migration job: applies db/migrations/<svc>_db.sql to the service's
+# database before the service is allowed to start.
+x-migration-common: &migration-common
+  image: postgres:16-bookworm
+  depends_on:
+    rabbitmq:
+      condition: service_healthy
+  restart: "no"
+  networks:
+    data: {}
+  environment:
+    PGPASSWORD: commerce
+  mem_reservation: 32m
+  mem_limit: 128m
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+
+networks:
+  # The Traefik-facing network. Services attach here so Traefik can route
+  # traffic to them via Docker discovery on the `commerce-edge` network.
+  edge:
+    name: commerce-edge
+    driver: bridge
+  # The data network carries app <-> PostgreSQL and app <-> RabbitMQ traffic.
+  # Traefik does NOT attach here, so the databases are not reachable from edge.
+  data:
+    name: commerce-data
+    driver: bridge
+
+# ---------------------------------------------------------------------------
+# Volumes (one per service database + RabbitMQ mnesia)
+# ---------------------------------------------------------------------------
+
+volumes:
+  pg-catalog:
+  pg-customer:
+  pg-inventory:
+  pg-order:
+  pg-payment:
+  pg-fulfillment:
+  rabbitmq-data:
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+services:
+  # --------------------- Infrastructure ----------------------------------
+
+  traefik:
+    image: traefik:v3.3
+    init: true
+    restart: unless-stopped
+    environment:
+      # Pin the Docker Engine API version so the in-container client negotiates
+      # with the host daemon regardless of the daemon's default minimum.
+      DOCKER_API_VERSION: "1.45"
+    command:
+      - --configFile=/etc/traefik/traefik.yaml
+      - --entryPoints.web.address=:8080
+      - --providers.docker=true
+      - --providers.docker.exposedByDefault=false
+      - --providers.docker.network=commerce-edge
+      - --ping=true
+      - --log.level=INFO
+    ports:
+      # The ONLY published host port: the gateway. App/db ports stay internal.
+      - "18100:8080"
+    volumes:
+      - ./deploy/traefik/traefik.yaml:/etc/traefik/traefik.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      edge:
+        aliases:
+          - gateway
+    mem_reservation: 64m
+    mem_limit: 256m
+    cpus: 0.5
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # /ping lives on the internal `traefik` entrypoint (:9000), never published.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9000/ping >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  rabbitmq:
+    image: rabbitmq:4.0-management
+    init: true
+    restart: unless-stopped
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: commerce
+      RABBITMQ_DEFAULT_PASS: commerce
+      RABBITMQ_DEFAULT_VHOST: "/"
+      # Load the pre-declared commerce topology on every (re)start so the
+      # services always see the expected exchanges/queues/bindings.
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit load_definitions \"/etc/rabbitmq/definitions.json\""
+    volumes:
+      - ./deploy/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      data:
+        aliases:
+          - rabbitmq
+    mem_reservation: 256m
+    mem_limit: 768m
+    cpus: 1.0
+    # RabbitMQ needs to write to /var/lib/rabbitmq; the container default fs
+    # is therefore left writable. tmpfs absorbs transient writes elsewhere.
+    read_only: false
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # --------------------- Per-service PostgreSQL --------------------------
+
+  catalog-db:
+    <<: *postgres-common
+    environment:
+      POSTGRES_USER: commerce
+      POSTGRES_PASSWORD: commerce
+      POSTGRES_DB: catalog
+    volumes:
+      - pg-catalog:/var/lib/postgresql/data
+
+  customer-db:
+    <<: *postgres-common
+    environment:
+      POSTGRES_USER: commerce
+      POSTGRES_PASSWORD: commerce
+      POSTGRES_DB: customer
+    volumes:
+      - pg-customer:/var/lib/postgresql/data
+
+  inventory-db:
+    <<: *postgres-common
+    environment:
+      POSTGRES_USER: commerce
+      POSTGRES_PASSWORD: commerce
+      POSTGRES_DB: inventory
+    volumes:
+      - pg-inventory:/var/lib/postgresql/data
+
+  order-db:
+    <<: *postgres-common
+    environment:
+      POSTGRES_USER: commerce
+      POSTGRES_PASSWORD: commerce
+      POSTGRES_DB: order
+    volumes:
+      - pg-order:/var/lib/postgresql/data
+
+  payment-db:
+    <<: *postgres-common
+    environment:
+      POSTGRES_USER: commerce
+      POSTGRES_PASSWORD: commerce
+      POSTGRES_DB: payment
+    volumes:
+      - pg-payment:/var/lib/postgresql/data
+
+  fulfillment-db:
+    <<: *postgres-common
+    environment:
+      POSTGRES_USER: commerce
+      POSTGRES_PASSWORD: commerce
+      POSTGRES_DB: fulfillment
+    volumes:
+      - pg-fulfillment:/var/lib/postgresql/data
+
+  # --------------------- Migrations (one-shot per service) ---------------
+
+  migrate-catalog:
+    <<: *migration-common
+    depends_on: { catalog-db: { condition: service_healthy } }
+    environment:
+      PGPASSWORD: commerce
+    volumes:
+      - ./db/migrations:/migrations:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        psql -v ON_ERROR_STOP=1 -h catalog-db -U commerce -d catalog \
+          -f /migrations/shared.sql -f /migrations/catalog_db.sql
+
+  migrate-customer:
+    <<: *migration-common
+    depends_on: { customer-db: { condition: service_healthy } }
+    environment:
+      PGPASSWORD: commerce
+    volumes:
+      - ./db/migrations:/migrations:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        psql -v ON_ERROR_STOP=1 -h customer-db -U commerce -d customer \
+          -f /migrations/shared.sql -f /migrations/customer_db.sql
+
+  migrate-inventory:
+    <<: *migration-common
+    depends_on: { inventory-db: { condition: service_healthy } }
+    environment:
+      PGPASSWORD: commerce
+    volumes:
+      - ./db/migrations:/migrations:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        psql -v ON_ERROR_STOP=1 -h inventory-db -U commerce -d inventory \
+          -f /migrations/shared.sql -f /migrations/inventory_db.sql
+
+  migrate-order:
+    <<: *migration-common
+    depends_on: { order-db: { condition: service_healthy } }
+    environment:
+      PGPASSWORD: commerce
+    volumes:
+      - ./db/migrations:/migrations:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        psql -v ON_ERROR_STOP=1 -h order-db -U commerce -d order \
+          -f /migrations/shared.sql -f /migrations/order_db.sql
+
+  migrate-payment:
+    <<: *migration-common
+    depends_on: { payment-db: { condition: service_healthy } }
+    environment:
+      PGPASSWORD: commerce
+    volumes:
+      - ./db/migrations:/migrations:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        psql -v ON_ERROR_STOP=1 -h payment-db -U commerce -d payment \
+          -f /migrations/shared.sql -f /migrations/payment_db.sql
+
+  migrate-fulfillment:
+    <<: *migration-common
+    depends_on: { fulfillment-db: { condition: service_healthy } }
+    environment:
+      PGPASSWORD: commerce
+    volumes:
+      - ./db/migrations:/migrations:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        psql -v ON_ERROR_STOP=1 -h fulfillment-db -U commerce -d fulfillment \
+          -f /migrations/shared.sql -f /migrations/fulfillment_db.sql
+
+  # --------------------- Go services -------------------------------------
+
+  catalog:
+    <<: *service-common
+    image: ${COMMERCE_IMAGE_PREFIX:-}commerce-catalog:${COMMERCE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: catalog
+    depends_on:
+      catalog-db: { condition: service_healthy }
+      migrate-catalog: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+    environment:
+      <<: *service-env
+      SERVICE: catalog
+      DB_HOST: catalog-db
+      DB_NAME: catalog
+      INSTANCE_ID: ${COMMERCE_INSTANCE_PREFIX:-local}-catalog-${COMMERCE_INSTANCE_SUFFIX:-1}
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+        max_attempts: 5
+        window: 120s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=commerce-edge
+      - traefik.http.routers.catalog.rule=PathPrefix(`/api/v1/products`) || PathPrefix(`/internal/v1/catalog`)
+      - traefik.http.routers.catalog.entrypoints=web
+      - traefik.http.routers.catalog.service=catalog
+      - traefik.http.services.catalog.loadbalancer.server.port=8080
+      - traefik.http.services.catalog.loadbalancer.healthcheck.path=/livez
+      - traefik.http.services.catalog.loadbalancer.healthcheck.interval=5s
+      - traefik.http.services.catalog.loadbalancer.healthcheck.port=8080
+    healthcheck:
+      # CMD form (not CMD-SHELL) because distroless has no /bin/sh. The static
+      # busybox wget returns non-zero on connection failure.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/livez"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  customer:
+    <<: *service-common
+    image: ${COMMERCE_IMAGE_PREFIX:-}commerce-customer:${COMMERCE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: customer
+    depends_on:
+      customer-db: { condition: service_healthy }
+      migrate-customer: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+    environment:
+      <<: *service-env
+      SERVICE: customer
+      DB_HOST: customer-db
+      DB_NAME: customer
+      INSTANCE_ID: ${COMMERCE_INSTANCE_PREFIX:-local}-customer-${COMMERCE_INSTANCE_SUFFIX:-1}
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        max_attempts: 5
+        window: 120s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=commerce-edge
+      - traefik.http.routers.customer.rule=PathPrefix(`/api/v1/customers`) || PathPrefix(`/internal/v1/customer`)
+      - traefik.http.routers.customer.entrypoints=web
+      - traefik.http.routers.customer.service=customer
+      - traefik.http.services.customer.loadbalancer.server.port=8080
+      - traefik.http.services.customer.loadbalancer.healthcheck.path=/livez
+      - traefik.http.services.customer.loadbalancer.healthcheck.interval=5s
+      - traefik.http.services.customer.loadbalancer.healthcheck.port=8080
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/livez"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  inventory:
+    <<: *service-common
+    image: ${COMMERCE_IMAGE_PREFIX:-}commerce-inventory:${COMMERCE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: inventory
+    depends_on:
+      inventory-db: { condition: service_healthy }
+      migrate-inventory: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+    environment:
+      <<: *service-env
+      SERVICE: inventory
+      DB_HOST: inventory-db
+      DB_NAME: inventory
+      INSTANCE_ID: ${COMMERCE_INSTANCE_PREFIX:-local}-inventory-${COMMERCE_INSTANCE_SUFFIX:-1}
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+        max_attempts: 5
+        window: 120s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=commerce-edge
+      - traefik.http.routers.inventory.rule=PathPrefix(`/api/v1/inventory`) || PathPrefix(`/api/v1/reservations`) || PathPrefix(`/internal/v1/reservations`)
+      - traefik.http.routers.inventory.entrypoints=web
+      - traefik.http.routers.inventory.service=inventory
+      - traefik.http.services.inventory.loadbalancer.server.port=8080
+      - traefik.http.services.inventory.loadbalancer.healthcheck.path=/livez
+      - traefik.http.services.inventory.loadbalancer.healthcheck.interval=5s
+      - traefik.http.services.inventory.loadbalancer.healthcheck.port=8080
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/livez"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  order:
+    <<: *service-common
+    image: ${COMMERCE_IMAGE_PREFIX:-}commerce-order:${COMMERCE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: order
+    depends_on:
+      order-db: { condition: service_healthy }
+      migrate-order: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+    environment:
+      <<: *service-env
+      SERVICE: order
+      DB_HOST: order-db
+      DB_NAME: order
+      INSTANCE_ID: ${COMMERCE_INSTANCE_PREFIX:-local}-order-${COMMERCE_INSTANCE_SUFFIX:-1}
+      CUSTOMER_URL: http://customer:8080
+      CATALOG_URL: http://catalog:8080
+      INVENTORY_URL: http://inventory:8080
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+        max_attempts: 5
+        window: 120s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=commerce-edge
+      - traefik.http.routers.order.rule=PathPrefix(`/api/v1/carts`) || PathPrefix(`/api/v1/checkouts`) || PathPrefix(`/api/v1/orders`)
+      - traefik.http.routers.order.entrypoints=web
+      - traefik.http.routers.order.service=order
+      - traefik.http.services.order.loadbalancer.server.port=8080
+      - traefik.http.services.order.loadbalancer.healthcheck.path=/livez
+      - traefik.http.services.order.loadbalancer.healthcheck.interval=5s
+      - traefik.http.services.order.loadbalancer.healthcheck.port=8080
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/livez"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  payment:
+    <<: *service-common
+    image: ${COMMERCE_IMAGE_PREFIX:-}commerce-payment:${COMMERCE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: payment
+    depends_on:
+      payment-db: { condition: service_healthy }
+      migrate-payment: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+    environment:
+      <<: *service-env
+      SERVICE: payment
+      DB_HOST: payment-db
+      DB_NAME: payment
+      INSTANCE_ID: ${COMMERCE_INSTANCE_PREFIX:-local}-payment-${COMMERCE_INSTANCE_SUFFIX:-1}
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        max_attempts: 5
+        window: 120s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=commerce-edge
+      - traefik.http.routers.payment.rule=PathPrefix(`/api/v1/payments`)
+      - traefik.http.routers.payment.entrypoints=web
+      - traefik.http.routers.payment.service=payment
+      - traefik.http.services.payment.loadbalancer.server.port=8080
+      - traefik.http.services.payment.loadbalancer.healthcheck.path=/livez
+      - traefik.http.services.payment.loadbalancer.healthcheck.interval=5s
+      - traefik.http.services.payment.loadbalancer.healthcheck.port=8080
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/livez"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  fulfillment:
+    <<: *service-common
+    image: ${COMMERCE_IMAGE_PREFIX:-}commerce-fulfillment:${COMMERCE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: fulfillment
+    depends_on:
+      fulfillment-db: { condition: service_healthy }
+      migrate-fulfillment: { condition: service_completed_successfully }
+      rabbitmq: { condition: service_healthy }
+    environment:
+      <<: *service-env
+      SERVICE: fulfillment
+      DB_HOST: fulfillment-db
+      DB_NAME: fulfillment
+      INSTANCE_ID: ${COMMERCE_INSTANCE_PREFIX:-local}-fulfillment-${COMMERCE_INSTANCE_SUFFIX:-1}
+      INVENTORY_URL: http://inventory:8080
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        max_attempts: 5
+        window: 120s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=commerce-edge
+      - traefik.http.routers.fulfillment.rule=PathPrefix(`/api/v1/fulfillment`)
+      - traefik.http.routers.fulfillment.entrypoints=web
+      - traefik.http.routers.fulfillment.service=fulfillment
+      - traefik.http.services.fulfillment.loadbalancer.server.port=8080
+      - traefik.http.services.fulfillment.loadbalancer.healthcheck.path=/livez
+      - traefik.http.services.fulfillment.loadbalancer.healthcheck.interval=5s
+      - traefik.http.services.fulfillment.loadbalancer.healthcheck.port=8080
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/livez"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  # --------------------- Seed CLI ---------------------------------------
+
+  # One-shot seed job. The Makefile `make up` target waits for healthy services
+  # then invokes `compose run --rm seed generate`. Declared here so the image
+  # is built alongside the services. SEED_DATABASES_JSON is injected by the
+  # Makefile so the seed CLI knows where each service DB lives.
+  seed:
+    profiles: ["seed"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: seed
+    image: ${COMMERCE_IMAGE_PREFIX:-}commerce-seed:${COMMERCE_TAG:-latest}
+    init: true
+    restart: "no"
+    networks:
+      data: {}
+    depends_on:
+      catalog-db: { condition: service_healthy }
+      customer-db: { condition: service_healthy }
+      inventory-db: { condition: service_healthy }
+      order-db: { condition: service_healthy }
+      payment-db: { condition: service_healthy }
+      fulfillment-db: { condition: service_healthy }
+      migrate-catalog: { condition: service_completed_successfully }
+      migrate-customer: { condition: service_completed_successfully }
+      migrate-inventory: { condition: service_completed_successfully }
+      migrate-order: { condition: service_completed_successfully }
+      migrate-payment: { condition: service_completed_successfully }
+      migrate-fulfillment: { condition: service_completed_successfully }
+    environment:
+      SEED_DATABASES_JSON: '{"catalog":"postgres://commerce:commerce@catalog-db:5432/catalog","customer":"postgres://commerce:commerce@customer-db:5432/customer","inventory":"postgres://commerce:commerce@inventory-db:5432/inventory","order":"postgres://commerce:commerce@order-db:5432/order","payment":"postgres://commerce:commerce@payment-db:5432/payment","fulfillment":"postgres://commerce:commerce@fulfillment-db:5432/fulfillment"}'
+    mem_reservation: 64m
+    mem_limit: 256m
+    cpus: 0.5

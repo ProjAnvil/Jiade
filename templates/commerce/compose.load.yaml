@@ -1,0 +1,101 @@
+# Load profile overlay.
+#
+# Raises each Go service's memory budget to absorb the load scale (1M orders,
+# streamed via CopyFrom). Raises PostgreSQL shared_buffers and per-instance
+# memory, and increases the order replica count to exercise a wider fan-out
+# behind Traefik. Activate with:
+#
+#   docker compose -f compose.yaml -f compose.load.yaml \
+#       --profile load up -d --scale order=4 --scale inventory=3 --wait
+#
+# Only resource overrides and the load seed wrapper are defined here; the base
+# file owns the topology.
+
+name: commerce
+
+services:
+  catalog:
+    mem_reservation: 256m
+    mem_limit: 1g
+    cpus: 1.5
+    environment:
+      DB_MAX_CONNS: "30"
+
+  customer:
+    mem_reservation: 256m
+    mem_limit: 1g
+    cpus: 1.5
+    environment:
+      DB_MAX_CONNS: "30"
+
+  inventory:
+    mem_reservation: 256m
+    mem_limit: 1g
+    cpus: 1.5
+    environment:
+      DB_MAX_CONNS: "40"
+
+  order:
+    mem_reservation: 512m
+    mem_limit: 2g
+    cpus: 2.0
+    environment:
+      DB_MAX_CONNS: "40"
+      OUTBOX_BATCH_SIZE: "500"
+
+  payment:
+    mem_reservation: 256m
+    mem_limit: 1g
+    cpus: 1.5
+    environment:
+      DB_MAX_CONNS: "30"
+
+  fulfillment:
+    mem_reservation: 256m
+    mem_limit: 1g
+    cpus: 1.5
+    environment:
+      DB_MAX_CONNS: "30"
+
+  catalog-db:
+    mem_reservation: 256m
+    mem_limit: 1g
+    cpus: 1.5
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "max_connections=100"]
+
+  customer-db:
+    mem_reservation: 256m
+    mem_limit: 1g
+    cpus: 1.5
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "max_connections=100"]
+
+  inventory-db:
+    mem_reservation: 256m
+    mem_limit: 1g
+    cpus: 1.5
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "max_connections=100"]
+
+  order-db:
+    mem_reservation: 512m
+    mem_limit: 2g
+    cpus: 2.0
+    command: ["postgres", "-c", "shared_buffers=512MB", "-c", "max_connections=150"]
+
+  payment-db:
+    mem_reservation: 256m
+    mem_limit: 1g
+    cpus: 1.5
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "max_connections=100"]
+
+  fulfillment-db:
+    mem_reservation: 256m
+    mem_limit: 1g
+    cpus: 1.5
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "max_connections=100"]
+
+  # Load-scale seed runner. `make load` invokes this in place of the dev seed.
+  seed:
+    profiles: ["seed"]
+    mem_reservation: 256m
+    mem_limit: 2g
+    cpus: 2.0

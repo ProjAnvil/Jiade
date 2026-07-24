@@ -1,0 +1,48 @@
+# Traefik 3 static configuration for the commerce topology.
+#
+# Design:
+#   - Single public entrypoint `web` on container port 8080 (host 18100).
+#   - Internal `traefik` entrypoint on :9000 carries the /ping healthcheck and
+#     is never published to the host.
+#   - Docker provider auto-discovers the six services via compose labels.
+#   - API/dashboard disabled by default.
+#
+# Only the web entrypoint is published on the host (18100). App and database
+# container ports are never published.
+
+entryPoints:
+  web:
+    address: ":8080"
+    transport:
+      respondingTimeouts:
+        readTimeout: 30s
+        writeTimeout: 30s
+        idleTimeout: 60s
+  # Move the default traefik entrypoint off :8080 so it cannot clash with web.
+  traefik:
+    address: ":9000"
+
+# /ping endpoint for the docker healthcheck. It lives on the internal
+# `traefik` entrypoint so it never collides with the public web port and never
+# shows up as a published host port.
+ping:
+  entryPoint: traefik
+  manualRouting: false
+
+providers:
+  docker:
+    # Restrict discovery to the compose project network so unrelated containers
+    # on the host are not picked up.
+    exposedByDefault: false
+    network: commerce-edge
+    watch: false
+
+# Logs go to stdout for `docker compose logs traefik`. Access logs disabled by
+# default to keep the noise low; flip via env if needed.
+log:
+  level: INFO
+  format: common
+
+api:
+  dashboard: false
+  insecure: false

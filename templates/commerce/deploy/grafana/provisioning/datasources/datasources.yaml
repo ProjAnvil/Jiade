@@ -1,0 +1,26 @@
+# Grafana datasource provisioning for the commerce observability overlay.
+#
+# Auto-provisions Prometheus as the default datasource. The grafana container
+# is started with GF_AUTH_ANONYMOUS_ENABLED=true so the local UI is open.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+      httpMethod: GET
+
+  - name: Jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    editable: false
+    jsonData:
+      tracesToMetrics:
+        datasourceUid: prometheus

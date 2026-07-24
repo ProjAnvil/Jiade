@@ -1,0 +1,45 @@
+# Prometheus scrape configuration for the commerce observability overlay.
+#
+# The six Go services expose /metrics on their HTTP port via the standard
+# promhttp handler. We use DNS service discovery over the commerce-data
+# network so all service replicas are scraped. The otel collector also exposes
+# its own converted metrics on :8888.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+  external_labels:
+    cluster: commerce-local
+
+scrape_configs:
+  - job_name: commerce-services
+    dns_sd_configs:
+      - names:
+          - catalog
+          - customer
+          - inventory
+          - order
+          - payment
+          - fulfillment
+        type: A
+        port: 8080
+        refresh_interval: 15s
+    metrics_path: /metrics
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: service
+        regex: '^([a-z\-]+):.*'
+        replacement: '${1}'
+
+  - job_name: commerce-otel-collector
+    static_configs:
+      - targets: ['otel-collector:8888']
+        labels:
+          service: otel-collector
+
+  - job_name: commerce-rabbitmq
+    static_configs:
+      - targets: ['rabbitmq:15692']
+        labels:
+          service: rabbitmq

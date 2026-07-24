@@ -1,0 +1,140 @@
+# Observability overlay: otel collector, prometheus, grafana, jaeger.
+#
+# Bring up alongside the base file:
+#   docker compose -f compose.yaml -f compose.observability.yaml --profile observability up -d
+#
+# The overlay only adds containers; it does not change the base service
+# definitions. The base compose.yaml already exposes /metrics on each service.
+
+name: commerce
+
+networks:
+  edge:
+    name: commerce-edge
+    driver: bridge
+  data:
+    name: commerce-data
+    driver: bridge
+  # Dedicated observability network so prometheus/grafana can talk to each
+  # other and to the data-plane services without polluting the edge.
+  obs:
+    name: commerce-obs
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  jaeger-data:
+
+services:
+  otel-collector:
+    profiles: ["observability"]
+    image: otel/opentelemetry-collector-contrib:0.108.0
+    init: true
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/collector.yaml"]
+    volumes:
+      - ./deploy/otel/collector.yaml:/etc/otelcol/collector.yaml:ro
+    networks:
+      data: {}
+      obs: {}
+    mem_reservation: 128m
+    mem_limit: 512m
+    cpus: 0.5
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:13133/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v2.54.1
+    init: true
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yaml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2h
+      - --web.listen-address=:9090
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - prometheus-data:/prometheus
+    networks:
+      data: {}
+      obs: {}
+    mem_reservation: 128m
+    mem_limit: 512m
+    cpus: 0.5
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9090/-/ready >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  grafana:
+    profiles: ["observability"]
+    image: grafana/grafana:11.2.0
+    init: true
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      obs: {}
+    mem_reservation: 128m
+    mem_limit: 512m
+    cpus: 0.5
+    # Grafana writes to its data dir; keep fs writable.
+    read_only: false
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  jaeger:
+    profiles: ["observability"]
+    image: jaegertracing/all-in-one:1.60
+    init: true
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      MEMORY_MAX_TRACES: 50000
+    networks:
+      data: {}
+      obs: {}
+    mem_reservation: 128m
+    mem_limit: 512m
+    cpus: 0.5
+    read_only: false
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:14269/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
