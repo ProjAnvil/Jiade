@@ -37,7 +37,7 @@ services:
       <<: *svcenv
       DB_NAME: cust_db
       API_PORT: "8080"
-      CORE_BANKING_URL: http://core-banking:8080
+      CORE_BANKING_GRPC_TARGET: dns:///core-banking:9090
     ports: ["18081:8080"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -52,8 +52,8 @@ services:
       <<: *svcenv
       DB_NAME: pay_db
       API_PORT: "18082"
-      CORE_BANKING_URL: http://core-banking:8080
-      CUSTOMER_URL: http://customer:8080
+      CORE_BANKING_GRPC_TARGET: dns:///core-banking:9090
+      CUSTOMER_GRPC_TARGET: dns:///customer:9090
     ports: ["18082:18082"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -69,7 +69,7 @@ services:
       <<: *svcenv
       DB_NAME: reward_db
       API_PORT: "18083"
-      CUSTOMER_URL: http://customer:8080
+      CUSTOMER_GRPC_TARGET: dns:///customer:9090
     ports: ["18083:18083"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -84,7 +84,7 @@ services:
       <<: *svcenv
       DB_NAME: risk_db
       API_PORT: "18084"
-      CUSTOMER_URL: http://customer:8080
+      CUSTOMER_GRPC_TARGET: dns:///customer:9090
     ports: ["18084:18084"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -99,7 +99,7 @@ services:
       <<: *svcenv
       DB_NAME: loan_db
       API_PORT: "18085"
-      CUSTOMER_URL: http://customer:8080
+      CUSTOMER_GRPC_TARGET: dns:///customer:9090
     ports: ["18085:18085"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -114,7 +114,7 @@ services:
       <<: *svcenv
       DB_NAME: wealth_db
       API_PORT: "18086"
-      CUSTOMER_URL: http://customer:8080
+      CUSTOMER_GRPC_TARGET: dns:///customer:9090
     ports: ["18086:18086"]
     depends_on:
       postgres: {condition: service_healthy}

@@ -1,26 +1,24 @@
-// Package repo is the data access layer of the customer service: this library SQL + core-banking HTTP API.
+// Package repo is the data access layer of the customer service: this library SQL + core-banking gRPC query.
 package repo
 
 import (
+	"bank/internal/customer/domain"
+	"bank/internal/platform/serviceclient"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
-
-	"bank/internal/customer/domain"
-	"bank/internal/platform/serviceclient"
 )
 
 // CustomerRepo Customer repository. This library only queries cust_info / cust_account_rel.
 type CustomerRepo struct {
 	db   *sql.DB
-	core *serviceclient.Client
+	core serviceclient.AccountReader
 }
 
 // NewCustomerRepo Constructs CustomerRepo.
-func NewCustomerRepo(db *sql.DB) *CustomerRepo {
-	return &CustomerRepo{db: db, core: serviceclient.New(getenv("CORE_BANKING_URL", "http://localhost:18080"))}
+func NewCustomerRepo(db *sql.DB, core serviceclient.AccountReader) *CustomerRepo {
+	return &CustomerRepo{db: db, core: core}
 }
 
 // GetCustomer checks a single customer. There is no return wrapped sql.ErrNoRows.
@@ -103,30 +101,16 @@ func (r *CustomerRepo) GetCustAccounts(ctx context.Context, custID string) ([]do
 		if err := rows.Scan(&accountNo, &role); err != nil {
 			return nil, fmt.Errorf("repo: 查客户账户关系 %s scan: %w", custID, err)
 		}
-		var account struct {
-			AccountNo   string `json:"account_no"`
-			Ccy         string `json:"ccy"`
-			Status      string `json:"status"`
-			OpenBizDate string `json:"open_biz_date"`
-			BranchCode  string `json:"branch_code"`
-		}
-		if err := r.core.Get(ctx, "/api/v1/accounts/"+serviceclient.EscapePath(accountNo), &account); err != nil {
+		account, err := r.core.GetAccount(ctx, accountNo, "")
+		if err != nil {
 			return nil, fmt.Errorf("repo: 从 core-banking 查账户 %s: %w", accountNo, err)
 		}
 		out = append(out, domain.CustAccount{
-			AccountNo: account.AccountNo, Ccy: account.Ccy, Status: account.Status,
-			OpenBizDate: account.OpenBizDate, BranchCode: account.BranchCode, Role: role,
+			AccountNo: account.AccountNo, Ccy: account.Currency, Status: account.Status, Role: role,
 		})
 	}
 	if err := rows.Err(); err != nil {
 		return out, fmt.Errorf("repo: 查客户账户关系 %s: %w", custID, err)
 	}
 	return out, nil
-}
-
-func getenv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
 }

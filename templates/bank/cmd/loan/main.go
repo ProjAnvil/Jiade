@@ -10,10 +10,13 @@ import (
 	"syscall"
 	"time"
 
+	customerv1 "bank/gen/bank/customer/v1"
 	"bank/internal/loan/api"
 	"bank/internal/loan/repo"
 	"bank/internal/loan/service"
+	"bank/internal/platform/grpcx"
 	"bank/internal/platform/pg"
+	"bank/internal/platform/serviceclient"
 )
 
 func main() {
@@ -26,9 +29,14 @@ func main() {
 	if err := waitForDB(db, 5, time.Second); err != nil {
 		log.Fatalf("连 %s 失败: %v（请先 make up 再 make seed）", dbName, err)
 	}
+	customerConn, err := grpcx.Dial(context.Background(), grpcx.ClientConfig{Target: getenv("CUSTOMER_GRPC_TARGET", "dns:///customer:9090"), Timeout: 3 * time.Second})
+	if err != nil {
+		log.Fatalf("连接 customer gRPC 失败: %v", err)
+	}
+	defer customerConn.Close()
 
 	handlers := &api.Handlers{
-		Svc: service.NewLoanService(repo.NewLoanRepo(db)),
+		Svc: service.NewLoanService(repo.NewLoanRepo(db, serviceclient.NewCustomerReader(customerv1.NewCustomerQueryServiceClient(customerConn)))),
 	}
 	port := getenv("API_PORT", "18085")
 	srv := &http.Server{Addr: ":" + port, Handler: api.NewRouter(handlers)}

@@ -8,8 +8,17 @@ import (
 	"testing"
 
 	"bank/internal/platform/pg"
+	"bank/internal/platform/serviceclient"
 	"bank/internal/reward/repo"
 )
+
+type deterministicCustomerReader struct{}
+
+var _ serviceclient.CustomerReader = deterministicCustomerReader{}
+
+func (deterministicCustomerReader) GetCustomer(_ context.Context, customerID, _ string) (serviceclient.Customer, error) {
+	return serviceclient.Customer{CustomerID: customerID, Name: "测试客户", CustomerType: "个人", KYCStatus: "passed", Status: "active"}, nil
+}
 
 func setupRewardDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -27,7 +36,7 @@ func TestRewardRepo_GetPointsAcct(t *testing.T) {
 	db := setupRewardDB(t)
 	defer db.Close()
 	ctx := context.Background()
-	r := repo.NewRewardRepo(db)
+	r := repo.NewRewardRepo(db, deterministicCustomerReader{})
 	db.ExecContext(ctx, "DELETE FROM points_acct WHERE cust_id='IT-RC'")
 	db.ExecContext(ctx, `INSERT INTO points_acct(cust_id,points_balance,frozen_points,member_level,update_biz_date)
 		VALUES ('IT-RC',300,0,'L2','2026-01-01')`)
@@ -43,7 +52,7 @@ func TestRewardRepo_GetPointsAcct(t *testing.T) {
 func TestRewardRepo_ListPointsAccts(t *testing.T) {
 	db := setupRewardDB(t)
 	defer db.Close()
-	list, err := repo.NewRewardRepo(db).ListPointsAccts(context.Background(), "L2", 0, 10)
+	list, err := repo.NewRewardRepo(db, deterministicCustomerReader{}).ListPointsAccts(context.Background(), "L2", 0, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +62,7 @@ func TestRewardRepo_ListPointsAccts(t *testing.T) {
 func TestRewardRepo_ListCoupons(t *testing.T) {
 	db := setupRewardDB(t)
 	defer db.Close()
-	_, err := repo.NewRewardRepo(db).ListCoupons(context.Background(), "IT-RC", "", 0, 10)
+	_, err := repo.NewRewardRepo(db, deterministicCustomerReader{}).ListCoupons(context.Background(), "IT-RC", "", 0, 10)
 	if err != nil {
 		t.Fatalf("ListCoupons 失败: %v", err)
 	}
@@ -62,8 +71,8 @@ func TestRewardRepo_ListCoupons(t *testing.T) {
 func TestRewardRepo_GetProfile_ServiceCall(t *testing.T) {
 	db := setupRewardDB(t)
 	defer db.Close()
-	// Cross-service aggregation only requires no error reporting (depending on seed data and customer services).
-	_, err := repo.NewRewardRepo(db).GetProfile(context.Background(), "C0000001")
+	// Customer lookup is deterministic; only the reward profile is database-backed.
+	_, err := repo.NewRewardRepo(db, deterministicCustomerReader{}).GetProfile(context.Background(), "C0000001")
 	if err != nil {
 		t.Errorf("GetProfile 跨服务聚合失败（先 make up）: %v", err)
 	}

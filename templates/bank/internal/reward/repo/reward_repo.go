@@ -1,27 +1,25 @@
-// Package repo is the data access layer of reward service: this library SQL + customer HTTP API.
+// Package repo is the data access layer of reward service: this library SQL + customer gRPC query.
 package repo
 
 import (
+	"bank/internal/platform/serviceclient"
+	"bank/internal/reward/domain"
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-
-	"bank/internal/platform/serviceclient"
-	"bank/internal/reward/domain"
 )
 
 // RewardRepo reward warehousing. This library only queries points_acct/coupon.
 type RewardRepo struct {
 	db       *sql.DB
-	customer *serviceclient.Client
+	customer serviceclient.CustomerReader
 }
 
 // NewRewardRepo constructs RewardRepo.
-func NewRewardRepo(db *sql.DB) *RewardRepo {
+func NewRewardRepo(db *sql.DB, customer serviceclient.CustomerReader) *RewardRepo {
 	return &RewardRepo{
 		db:       db,
-		customer: serviceclient.New(getenv("CUSTOMER_URL", "http://localhost:18081")),
+		customer: customer,
 	}
 }
 
@@ -93,14 +91,11 @@ func (r *RewardRepo) GetProfile(ctx context.Context, custID string) (domain.Rewa
 	if err != nil {
 		return domain.RewardProfile{}, fmt.Errorf("repo: 查积分档案 %s: %w", custID, err)
 	}
-	var customer struct {
-		Name     string `json:"name"`
-		CustType string `json:"cust_type"`
-	}
-	if err := r.customer.Get(ctx, "/api/v1/customers/"+serviceclient.EscapePath(custID), &customer); err != nil {
+	customer, err := r.customer.GetCustomer(ctx, custID, "")
+	if err != nil {
 		return domain.RewardProfile{}, fmt.Errorf("repo: 从 customer 查客户 %s: %w", custID, err)
 	}
-	p.MemberLevel, p.CustName, p.CustType = level.String, customer.Name, customer.CustType
+	p.MemberLevel, p.CustName, p.CustType = level.String, customer.Name, customer.CustomerType
 	return p, nil
 }
 
@@ -128,11 +123,4 @@ func scanCoupons(rows *sql.Rows) ([]domain.Coupon, error) {
 		return out, fmt.Errorf("repo: 列优惠券: %w", err)
 	}
 	return out, nil
-}
-
-func getenv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
 }

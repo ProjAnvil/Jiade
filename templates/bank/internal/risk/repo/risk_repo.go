@@ -1,27 +1,25 @@
-// Package repo is the data access layer of risk service: this library SQL + customer HTTP API.
+// Package repo is the data access layer of risk service: this library SQL + customer gRPC query.
 package repo
 
 import (
+	"bank/internal/platform/serviceclient"
+	"bank/internal/risk/domain"
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-
-	"bank/internal/platform/serviceclient"
-	"bank/internal/risk/domain"
 )
 
 // RiskRepo risk warehousing. This library only queries risk_event/risk_rule/blacklist.
 type RiskRepo struct {
 	db       *sql.DB
-	customer *serviceclient.Client
+	customer serviceclient.CustomerReader
 }
 
 // NewRiskRepo constructs RiskRepo.
-func NewRiskRepo(db *sql.DB) *RiskRepo {
+func NewRiskRepo(db *sql.DB, customer serviceclient.CustomerReader) *RiskRepo {
 	return &RiskRepo{
 		db:       db,
-		customer: serviceclient.New(getenv("CUSTOMER_URL", "http://localhost:18081")),
+		customer: customer,
 	}
 }
 
@@ -68,14 +66,11 @@ func (r *RiskRepo) GetEvent(ctx context.Context, eventID string) (domain.RiskEve
 	d.CustID, d.AccountNo, d.RuleID, d.RiskScore = cust.String, acct.String, rule.String, score.String
 	d.ActionTaken, d.TxnRef, d.Summary = action.String, txnRef.String, summary.String
 	if d.CustID != "" {
-		var customer struct {
-			Name     string `json:"name"`
-			CustType string `json:"cust_type"`
-		}
-		if err := r.customer.Get(ctx, "/api/v1/customers/"+serviceclient.EscapePath(d.CustID), &customer); err != nil {
+		customer, err := r.customer.GetCustomer(ctx, d.CustID, "")
+		if err != nil {
 			return domain.RiskEventDetail{}, fmt.Errorf("repo: 从 customer 查客户 %s: %w", d.CustID, err)
 		}
-		d.CustName, d.CustType = customer.Name, customer.CustType
+		d.CustName, d.CustType = customer.Name, customer.CustomerType
 	}
 	return d, nil
 }
@@ -142,11 +137,4 @@ func scanEvent(scan func(dest ...any) error) (domain.RiskEvent, error) {
 	e.CustID, e.AccountNo, e.RuleID, e.RiskScore = cust.String, acct.String, rule.String, score.String
 	e.ActionTaken, e.TxnRef, e.Summary = action.String, txnRef.String, summary.String
 	return e, nil
-}
-
-func getenv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
 }
