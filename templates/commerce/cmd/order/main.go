@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"commerce/internal/order"
 	platformclient "commerce/internal/platform/client"
@@ -17,6 +19,7 @@ import (
 	"commerce/internal/platform/httpx"
 	"commerce/internal/platform/messaging"
 	"commerce/internal/platform/postgres"
+	"commerce/internal/platform/telemetry"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -48,6 +51,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	observability, err := telemetry.New(processContext, telemetry.Config{
+		Service: settings.Service, Instance: settings.Instance,
+		Enabled: settings.Telemetry.Enabled, Endpoint: settings.Telemetry.Endpoint,
+		Insecure: settings.Telemetry.Insecure,
+	})
+	if err != nil {
+		slog.Warn("telemetry disabled after initialization failure", "error", err)
+		observability = telemetry.Disabled()
+	}
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = observability.Shutdown(shutdownContext)
+	}()
 	pool, err := postgres.Open(processContext, settings.Database)
 	if err != nil {
 		return err

@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"commerce/internal/catalog"
 	"commerce/internal/platform/config"
 	"commerce/internal/platform/httpx"
 	"commerce/internal/platform/postgres"
+	"commerce/internal/platform/telemetry"
 )
 
 func main() {
@@ -26,6 +29,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	observability, err := telemetry.New(processContext, telemetry.Config{
+		Service: settings.Service, Instance: settings.Instance,
+		Enabled: settings.Telemetry.Enabled, Endpoint: settings.Telemetry.Endpoint,
+		Insecure: settings.Telemetry.Insecure,
+	})
+	if err != nil {
+		slog.Warn("telemetry disabled after initialization failure", "error", err)
+		observability = telemetry.Disabled()
+	}
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = observability.Shutdown(shutdownContext)
+	}()
 	pool, err := postgres.Open(processContext, settings.Database)
 	if err != nil {
 		return err

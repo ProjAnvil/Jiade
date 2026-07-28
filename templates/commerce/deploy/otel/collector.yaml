@@ -31,6 +31,10 @@ processors:
     spike_limit_percentage: 25
 
 exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
   prometheus:
     endpoint: 0.0.0.0:8888
     namespace: commerce
@@ -45,7 +49,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [debug]
+      exporters: [otlp/jaeger]
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch]
