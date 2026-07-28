@@ -1,4 +1,7 @@
-.PHONY: up down seed test integration-test
+.PHONY: up down seed test integration-test proto
+
+proto:
+	docker run --rm -v "$(CURDIR):/workspace" -w /workspace bufbuild/buf:1.47.2 generate
 
 up:
 	docker compose up -d --build postgres

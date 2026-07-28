@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package bank.customer.v1;
+
+option go_package = "bank/gen/bank/customer/v1;customerv1";
+
+service CustomerQueryService {
+  rpc GetCustomer(GetCustomerRequest) returns (CustomerSnapshot);
+}
+
+message GetCustomerRequest {
+  string customer_id = 1;
+  string request_id = 2;
+}
+
+message CustomerSnapshot {
+  string customer_id = 1;
+  string name = 2;
+  string customer_type = 3;
+  string kyc_status = 4;
+  string status = 5;
+  repeated string risk_tags = 6;
+}
