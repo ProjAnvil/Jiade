@@ -22,7 +22,8 @@ type Config struct {
 
 // Provider owns the process trace provider and its shutdown lifecycle.
 type Provider struct {
-	tracer *sdktrace.TracerProvider
+	tracer   *sdktrace.TracerProvider
+	resource *resource.Resource
 }
 
 // New creates and installs an OpenTelemetry trace provider.
@@ -45,7 +46,7 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		options = append(options, sdktrace.WithBatcher(exporter))
 	}
 
-	provider := &Provider{tracer: sdktrace.NewTracerProvider(options...)}
+	provider := &Provider{tracer: sdktrace.NewTracerProvider(options...), resource: res}
 	otel.SetTracerProvider(provider.tracer)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
@@ -62,7 +63,7 @@ func newResource(cfg Config) *resource.Resource {
 	)
 }
 
-// Disabled returns and installs a provider that records no spans.
+// Disabled returns and installs a provider that exports no spans.
 func Disabled() *Provider {
 	provider := &Provider{tracer: sdktrace.NewTracerProvider()}
 	otel.SetTracerProvider(provider.tracer)

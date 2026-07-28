@@ -4,7 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
 )
 
 func TestNewDisabledProviderDoesNotExport(t *testing.T) {
@@ -25,14 +27,64 @@ func TestDisabledProviderShutsDown(t *testing.T) {
 }
 
 func TestNewSetsServiceResourceIdentity(t *testing.T) {
-	resource := newResource(Config{
+	provider, err := New(context.Background(), Config{
 		Service:  "catalog",
 		Instance: "catalog-1",
+		Enabled:  false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
+		}
 	})
 
-	attributes := resource.Attributes()
+	attributes := provider.resource.Attributes()
 	assertResourceAttribute(t, attributes, "service.name", "catalog")
 	assertResourceAttribute(t, attributes, "service.instance.id", "catalog-1")
+}
+
+func TestNewInstallsBaggagePropagation(t *testing.T) {
+	provider, err := New(context.Background(), Config{Service: "catalog", Enabled: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	member, err := baggage.NewMember("tenant", "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bag, err := baggage.New(member)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := baggage.ContextWithBaggage(context.Background(), bag)
+	headers := mapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, headers)
+	if got, want := headers["baggage"], "tenant=acme"; got != want {
+		t.Fatalf("baggage header=%q, want %q", got, want)
+	}
+}
+
+type mapCarrier map[string]string
+
+func (c mapCarrier) Get(key string) string { return c[key] }
+
+func (c mapCarrier) Set(key, value string) { c[key] = value }
+
+func (c mapCarrier) Keys() []string {
+	keys := make([]string, 0, len(c))
+	for key := range c {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func assertResourceAttribute(t *testing.T, attributes []attribute.KeyValue, key, want string) {

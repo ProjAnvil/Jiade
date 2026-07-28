@@ -25,14 +25,20 @@ func (c amqpCarrier) Get(key string) string {
 	if !ok {
 		return ""
 	}
-	stringValue, ok := value.(string)
-	if !ok {
+	switch value := value.(type) {
+	case string:
+		return value
+	case []byte:
+		return string(value)
+	default:
 		return ""
 	}
-	return stringValue
 }
 
 func (c amqpCarrier) Set(key, value string) {
+	if c == nil {
+		return
+	}
 	c[key] = value
 }
 
