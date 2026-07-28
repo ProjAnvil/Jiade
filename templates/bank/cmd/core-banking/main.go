@@ -4,15 +4,18 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	corev1 "bank/gen/bank/core/v1"
 	"bank/internal/corebanking/api"
 	"bank/internal/corebanking/repo"
 	"bank/internal/corebanking/service"
+	"bank/internal/platform/grpcx"
 	"bank/internal/platform/pg"
 )
 
@@ -32,20 +35,33 @@ func main() {
 	ledgerRepo := repo.NewLedgerRepo(db)
 	ledgerSvc := service.NewLedgerService(ledgerRepo)
 	txnRepo := repo.NewTxnRepo(db)
-	txnSvc := service.NewTxnService(db, repo.NewAccountRepo(db), ledgerSvc, ledgerRepo).WithReader(txnRepo)
+	accountRepo := repo.NewAccountRepo(db)
+	txnSvc := service.NewTxnService(db, accountRepo, ledgerSvc, ledgerRepo).WithReader(txnRepo)
 
 	handlers := &api.Handlers{
-		Accounts: repo.NewAccountRepo(db),
+		Accounts: accountRepo,
 		TxnSvc:   txnSvc,
 		Ledger:   ledgerRepo,
 	}
-	port := getenv("API_PORT", "18080")
+	port := getenv("API_PORT", "8080")
 	srv := &http.Server{Addr: ":" + port, Handler: api.NewRouter(handlers)}
+
+	grpcServer := grpcx.NewServer(grpcx.ServerConfig{Ready: func(ctx context.Context) error { return db.PingContext(ctx) }})
+	corev1.RegisterAccountQueryServiceServer(grpcServer, api.NewAccountQueryServer(accountRepo, txnRepo))
+	grpcListener, err := net.Listen("tcp", ":"+getenv("GRPC_PORT", "9090"))
+	if err != nil {
+		log.Fatalf("core-banking gRPC 监听失败: %v", err)
+	}
 
 	go func() {
 		log.Printf("core-banking 监听 :%s (db=%s)", port, dbName)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
+		}
+	}()
+	go func() {
+		if err := grpcServer.Serve(grpcListener); err != nil {
+			log.Printf("core-banking gRPC 服务停止: %v", err)
 		}
 	}()
 
@@ -55,6 +71,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
+	grpcServer.GracefulStop()
 }
 
 type pinger interface{ Ping() error }

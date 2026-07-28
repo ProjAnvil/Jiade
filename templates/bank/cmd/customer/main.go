@@ -4,15 +4,18 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	customerv1 "bank/gen/bank/customer/v1"
 	"bank/internal/customer/api"
 	"bank/internal/customer/repo"
 	"bank/internal/customer/service"
+	"bank/internal/platform/grpcx"
 	"bank/internal/platform/pg"
 )
 
@@ -29,16 +32,27 @@ func main() {
 		log.Fatalf("连 %s 失败: %v（请先 make up 再 make seed）", dbName, err)
 	}
 
-	handlers := &api.Handlers{
-		Svc: service.NewCustomerService(repo.NewCustomerRepo(db)),
-	}
-	port := getenv("API_PORT", "18081")
+	customerRepo := repo.NewCustomerRepo(db)
+	handlers := &api.Handlers{Svc: service.NewCustomerService(customerRepo)}
+	port := getenv("API_PORT", "8080")
 	srv := &http.Server{Addr: ":" + port, Handler: api.NewRouter(handlers)}
+
+	grpcServer := grpcx.NewServer(grpcx.ServerConfig{Ready: func(ctx context.Context) error { return db.PingContext(ctx) }})
+	customerv1.RegisterCustomerQueryServiceServer(grpcServer, api.NewCustomerQueryServer(customerRepo))
+	grpcListener, err := net.Listen("tcp", ":"+getenv("GRPC_PORT", "9090"))
+	if err != nil {
+		log.Fatalf("customer gRPC 监听失败: %v", err)
+	}
 
 	go func() {
 		log.Printf("customer 监听 :%s (db=%s)", port, dbName)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
+		}
+	}()
+	go func() {
+		if err := grpcServer.Serve(grpcListener); err != nil {
+			log.Printf("customer gRPC 服务停止: %v", err)
 		}
 	}()
 
@@ -48,6 +62,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
+	grpcServer.GracefulStop()
 }
 
 type pinger interface{ Ping() error }
