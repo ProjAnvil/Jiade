@@ -337,3 +337,19 @@ main() {
 }
 
 main "$@"
+
+gate_internal_routes_are_private() {
+  local path code
+  for path in \
+    /internal/v1/catalog/products/does-not-matter \
+    /internal/v1/customer/customers/does-not-matter \
+    /internal/v1/reservations/does-not-matter
+  do
+    code=$(curl -sS -o /dev/null -w '%{http_code}' "${GATEWAY}${path}")
+    if [[ "${code}" != "404" ]]; then
+      fail "gateway exposed ${path}: status=${code}, want 404"
+    fi
+  done
+}
+
+gate_internal_routes_are_private

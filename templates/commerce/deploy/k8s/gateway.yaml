@@ -62,16 +62,8 @@ spec:
             pathType: Prefix
             backend:
               service: { name: catalog, port: { number: 8080 } }
-          - path: /internal/v1/catalog
-            pathType: Prefix
-            backend:
-              service: { name: catalog, port: { number: 8080 } }
           # customer.
           - path: /api/v1/customers
-            pathType: Prefix
-            backend:
-              service: { name: customer, port: { number: 8080 } }
-          - path: /internal/v1/customer
             pathType: Prefix
             backend:
               service: { name: customer, port: { number: 8080 } }
@@ -81,10 +73,6 @@ spec:
             backend:
               service: { name: inventory, port: { number: 8080 } }
           - path: /api/v1/reservations
-            pathType: Prefix
-            backend:
-              service: { name: inventory, port: { number: 8080 } }
-          - path: /internal/v1/reservations
             pathType: Prefix
             backend:
               service: { name: inventory, port: { number: 8080 } }

@@ -385,7 +385,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=commerce-edge
-      - traefik.http.routers.catalog.rule=PathPrefix(`/api/v1/products`) || PathPrefix(`/internal/v1/catalog`)
+      - traefik.http.routers.catalog.rule=PathPrefix(`/api/v1/products`)
       - traefik.http.routers.catalog.entrypoints=web
       - traefik.http.routers.catalog.service=catalog
       - traefik.http.services.catalog.loadbalancer.server.port=8080
@@ -427,7 +427,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=commerce-edge
-      - traefik.http.routers.customer.rule=PathPrefix(`/api/v1/customers`) || PathPrefix(`/internal/v1/customer`)
+      - traefik.http.routers.customer.rule=PathPrefix(`/api/v1/customers`)
       - traefik.http.routers.customer.entrypoints=web
       - traefik.http.routers.customer.service=customer
       - traefik.http.services.customer.loadbalancer.server.port=8080
@@ -467,7 +467,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=commerce-edge
-      - traefik.http.routers.inventory.rule=PathPrefix(`/api/v1/inventory`) || PathPrefix(`/api/v1/reservations`) || PathPrefix(`/internal/v1/reservations`)
+      - traefik.http.routers.inventory.rule=PathPrefix(`/api/v1/inventory`) || PathPrefix(`/api/v1/reservations`)
       - traefik.http.routers.inventory.entrypoints=web
       - traefik.http.routers.inventory.service=inventory
       - traefik.http.services.inventory.loadbalancer.server.port=8080

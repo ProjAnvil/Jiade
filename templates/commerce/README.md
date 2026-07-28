@@ -79,8 +79,9 @@ External routes (only reachable through the Traefik gateway on `:18100`):
 | POST | `/api/v1/payments/webhooks` | payment | idempotent webhook intake |
 | GET | `/api/v1/fulfillment/orders/{id}` | fulfillment | fulfillment + shipments |
 
-Internal-only routes (`/internal/v1/...`) are also routed through Traefik for
-service-to-service calls.
+Internal routes (`/internal/v1/...`) are reachable only over the service
+network by using service DNS. Traefik and the Kubernetes Ingress intentionally
+have no rules for these paths.
 
 Every response includes an `X-Service-Instance` header naming the replica
 that served it. That header is the load-balancing verification probe — see
