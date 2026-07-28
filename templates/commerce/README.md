@@ -274,11 +274,12 @@ make trace-smoke           # assert a catalog request trace reaches Jaeger
 make observability-down    # removes only the observability containers
 ```
 
-The overlay only adds containers; it does not change the base topology.
-Prometheus scrapes each service's `/metrics` via the internal network, and
-the otel collector receives traces over OTLP. Run `make trace-smoke` after
-`make observability`; it sends a catalog request through the gateway and
-checks that Jaeger receives its trace.
+The overlay adds observability containers, overrides application telemetry
+environment, and may recreate services as Compose applies that environment.
+Prometheus scrapes each service's `/metrics` via the internal network, and the
+otel collector receives traces over OTLP. Run `make trace-smoke` after `make
+observability`; it sends a catalog request through the gateway and checks that
+Jaeger receives its trace.
 
 ## CI gates
 
@@ -295,9 +296,10 @@ containers, volumes, and orphans before the runner exits.
 
 ## Kubernetes mapping
 
-The same topology runs on Kubernetes. The manifests in `deploy/k8s/` mirror
-compose.yaml 1:1 — same replicas, same resource envelopes, same probes, same
-env vars, same gateway routing.
+The Kubernetes manifests in `deploy/k8s/` provide a deployment mapping for
+the same application contracts. They are not a one-to-one copy of Compose:
+cluster networking, infrastructure ownership, and rollout behavior remain
+cluster-specific.
 
 ```bash
 # Render the rendered manifest without applying (Phase A gate):

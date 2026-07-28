@@ -69,8 +69,13 @@ func TestServiceMigrationDDLIsIdempotentByConstruction(t *testing.T) {
 					t.Fatalf("migration contains unsafe DROP statement: %q", statement)
 				}
 			}
-			if regexp.MustCompile(`(?m)^\s*(truncate|alter)\b`).MatchString(migration) {
-				t.Fatal("migration contains destructive or repeat-sensitive DDL")
+			if regexp.MustCompile(`(?m)^\s*truncate\b`).MatchString(migration) {
+				t.Fatal("migration contains destructive DDL")
+			}
+			alterPattern := regexp.MustCompile(`(?mi)^\s*alter\s+table\s+\w+\s+add\s+column\s+if\s+not\s+exists\s+\w+[^;]*;`)
+			withoutIdempotentAlters := alterPattern.ReplaceAllString(migration, "")
+			if regexp.MustCompile(`(?m)^\s*alter\b`).MatchString(withoutIdempotentAlters) {
+				t.Fatal("migration contains repeat-sensitive ALTER DDL")
 			}
 		})
 	}

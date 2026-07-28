@@ -16,6 +16,7 @@ import (
 	"commerce/internal/platform/messaging"
 	"commerce/internal/platform/postgres"
 	"commerce/internal/platform/telemetry"
+	"github.com/prometheus/client_golang/prometheus"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -65,6 +66,7 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
+	registry := prometheus.NewRegistry()
 	connection, err := amqp.Dial(settings.Broker.URL)
 	if err != nil {
 		return fmt.Errorf("open inventory broker: %w", err)
@@ -111,6 +113,7 @@ func run() error {
 	relay := inventory.NewRelayLifecycle(processContext, func(ctx context.Context) error {
 		return messaging.RunRelay(ctx, pool, publisher, messaging.RelayConfig{
 			BatchSize: settings.Outbox.BatchSize, PollInterval: settings.Outbox.PollInterval,
+			Service: settings.Service, Registry: registry,
 		})
 	})
 	consumerWorker := inventory.NewWorkerLifecycle(processContext, func(ctx context.Context) error {
@@ -126,6 +129,7 @@ func run() error {
 		Service:           settings.Service,
 		Instance:          settings.Instance,
 		Addr:              settings.HTTP.Addr,
+		Registry:          registry,
 		Handler:           handler,
 		Ready:             inventory.NewRuntimeReadinessWithDependencies(pool.Ping, inventory.CombinePublisherAvailability(publisher, retryRouter), connection.IsClosed, nil, relay, consumerWorker),
 		ShutdownTimeout:   settings.Shutdown.Timeout,

@@ -72,13 +72,15 @@ func limitBody(limit int64, next http.Handler) http.Handler {
 	})
 }
 
-func accessLog(logger *slog.Logger, service string, next http.Handler) http.Handler {
+func accessLog(logger *slog.Logger, service string, metrics *httpMetrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		recorder := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
+		elapsed := time.Since(started)
+		metrics.observe(service, r.Method, recorder.status, elapsed)
 		attributes := []any{"service", service, "method", r.Method, "path", r.URL.Path, "status", recorder.status,
-			"bytes", recorder.bytes, "duration", time.Since(started), "request_id", RequestID(r.Context())}
+			"bytes", recorder.bytes, "duration", elapsed, "request_id", RequestID(r.Context())}
 		attributes = append(attributes, telemetry.TraceFields(r.Context())...)
 		logger.Info("http request", attributes...)
 	})

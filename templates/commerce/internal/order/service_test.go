@@ -13,7 +13,11 @@ import (
 
 	platformclient "commerce/internal/platform/client"
 	"commerce/internal/platform/messaging"
+	"commerce/internal/platform/telemetry"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestCheckoutSnapshotsPricesAndWritesOutboxAtomically(t *testing.T) {
@@ -404,6 +408,62 @@ func TestRetryAcknowledgerDoesNotAckUnconfirmedRoute(t *testing.T) {
 	}
 }
 
+func TestRetryAcknowledgerRoutesFromExtractedDeliveryTrace(t *testing.T) {
+	originalPropagator := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() { otel.SetTextMapPropagator(originalPropagator) })
+
+	deliveryCtx := trace.ContextWithRemoteSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+		SpanID:  trace.SpanID{0, 1, 2, 3, 4, 5, 6, 7},
+		Remote:  true,
+	}))
+	headers := amqp.Table{}
+	telemetry.InjectAMQP(deliveryCtx, headers)
+	workerCtx := trace.ContextWithRemoteSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0},
+		SpanID:  trace.SpanID{7, 6, 5, 4, 3, 2, 1, 0},
+		Remote:  true,
+	}))
+
+	for _, settle := range []struct {
+		name string
+		call func(*retryAcknowledger) error
+	}{
+		{name: "retry", call: func(acknowledger *retryAcknowledger) error {
+			return acknowledger.Nack(7, false, false)
+		}},
+		{name: "dead letter", call: func(acknowledger *retryAcknowledger) error {
+			return acknowledger.Reject(7, false)
+		}},
+	} {
+		t.Run(settle.name, func(t *testing.T) {
+			publisher := &retryPublisherStub{}
+			acknowledger := &retryAcknowledger{
+				original:  &acknowledgerStub{},
+				publisher: publisher,
+				delivery: amqp.Delivery{
+					DeliveryTag: 7,
+					MessageId:   "event-7",
+					Headers:     headers,
+				},
+				routing: DeliveryRouting{
+					RetryExchange: "retry", RetryRoutingKey: "retry",
+					DeadExchange: "dead", DeadRoutingKey: "dead",
+				},
+				ctx: workerCtx,
+			}
+			if err := settle.call(acknowledger); err != nil {
+				t.Fatal(err)
+			}
+			want := trace.SpanContextFromContext(deliveryCtx).TraceID()
+			if publisher.traceID != want {
+				t.Fatalf("routed trace ID=%s, want %s extracted from delivery", publisher.traceID, want)
+			}
+		})
+	}
+}
+
 type acknowledgerStub struct {
 	acks, nacks, rejects int
 }
@@ -427,15 +487,17 @@ type retryPublisherStub struct {
 	exchange string
 	key      string
 	err      error
+	traceID  trace.TraceID
 }
 
 func (publisher *retryPublisherStub) Route(
-	_ context.Context,
+	ctx context.Context,
 	exchange string,
 	key string,
 	_ amqp.Publishing,
 ) error {
 	publisher.exchange, publisher.key = exchange, key
+	publisher.traceID = trace.SpanContextFromContext(ctx).TraceID()
 	return publisher.err
 }
 

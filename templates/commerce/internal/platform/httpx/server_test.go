@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"commerce/internal/platform/telemetry"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -43,6 +45,102 @@ func TestServerCreatesHTTPSpan(t *testing.T) {
 	if !spanHasAttribute(spans, "GET /api/v1/products", attribute.String("request.id", "request-7")) {
 		t.Fatalf("GET /api/v1/products span missing request.id=request-7")
 	}
+}
+
+func TestServerEmitsBoundedHTTPMetricsAndReusesCollectors(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	first := NewServer(ServerConfig{
+		Service:  "catalog",
+		Registry: registry,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+		}),
+	})
+	second := NewServer(ServerConfig{
+		Service:  "catalog",
+		Registry: registry,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}),
+	})
+
+	first.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/products/product-1", nil))
+	second.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("NONSTANDARD-METHOD", "/api/v1/products/product-2", nil))
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := metricFamily(t, families, "http_requests_total")
+	if got := sumCounters(counter); got != 2 {
+		t.Fatalf("http_requests_total=%v, want 2", got)
+	}
+	if !familyHasLabel(counter, "service", "catalog") {
+		t.Fatal("http_requests_total missing service=catalog")
+	}
+	if familyHasLabelName(counter, "path") {
+		t.Fatal("http_requests_total exposes unbounded path label")
+	}
+	if !familyHasLabel(counter, "method", "OTHER") {
+		t.Fatal("http_requests_total did not bound an unknown method to OTHER")
+	}
+
+	histogram := metricFamily(t, families, "http_request_duration_seconds")
+	if got := sumHistogramCounts(histogram); got != 2 {
+		t.Fatalf("http_request_duration_seconds count=%d, want 2", got)
+	}
+	if !familyHasLabel(histogram, "service", "catalog") {
+		t.Fatal("http_request_duration_seconds missing service=catalog")
+	}
+}
+
+func metricFamily(t *testing.T, families []*dto.MetricFamily, name string) *dto.MetricFamily {
+	t.Helper()
+	for _, family := range families {
+		if family.GetName() == name {
+			return family
+		}
+	}
+	t.Fatalf("metric family %q not found", name)
+	return nil
+}
+
+func sumCounters(family *dto.MetricFamily) float64 {
+	var total float64
+	for _, metric := range family.Metric {
+		total += metric.GetCounter().GetValue()
+	}
+	return total
+}
+
+func sumHistogramCounts(family *dto.MetricFamily) uint64 {
+	var total uint64
+	for _, metric := range family.Metric {
+		total += metric.GetHistogram().GetSampleCount()
+	}
+	return total
+}
+
+func familyHasLabel(family *dto.MetricFamily, name, value string) bool {
+	for _, metric := range family.Metric {
+		for _, label := range metric.Label {
+			if label.GetName() == name && label.GetValue() == value {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func familyHasLabelName(family *dto.MetricFamily, name string) bool {
+	for _, metric := range family.Metric {
+		for _, label := range metric.Label {
+			if label.GetName() == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func newSpanRecorder(t *testing.T) (*tracetest.SpanRecorder, *sdktrace.TracerProvider) {

@@ -109,7 +109,12 @@ config-check: ## Static validation of all compose files.
 	$(COMPOSE) $(COMPOSE_FILES) config --quiet
 	$(COMPOSE) $(COMPOSE_OBS_FILE) config --quiet
 	$(COMPOSE) $(COMPOSE_LOAD) config --quiet
+	@if rg --fixed-strings --quiet '/internal/v1' compose.yaml deploy/k8s/gateway.yaml; then \
+		echo 'gateway configuration must not route /internal/v1 paths' >&2; exit 1; \
+	fi
 	bash -n test/smoke.sh
+	bash -n test/trace-smoke.sh
+	jq empty deploy/grafana/dashboards/commerce-overview.json
 
 .PHONY: logs
 logs: ## Tail logs from all services.

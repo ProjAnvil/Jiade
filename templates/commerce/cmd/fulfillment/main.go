@@ -20,6 +20,7 @@ import (
 	"commerce/internal/platform/messaging"
 	"commerce/internal/platform/postgres"
 	"commerce/internal/platform/telemetry"
+	"github.com/prometheus/client_golang/prometheus"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -70,6 +71,7 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
+	registry := prometheus.NewRegistry()
 
 	connection, err := amqp.Dial(settings.Broker.URL)
 	if err != nil {
@@ -123,6 +125,7 @@ func run() error {
 	relay := fulfillment.NewWorkerLifecycle(processContext, func(ctx context.Context) error {
 		return messaging.RunRelay(ctx, pool, publisher, messaging.RelayConfig{
 			BatchSize: settings.Outbox.BatchSize, PollInterval: settings.Outbox.PollInterval,
+			Service: settings.Service, Registry: registry,
 		})
 	})
 	consumerWorker := fulfillment.NewWorkerLifecycle(processContext, func(ctx context.Context) error {
@@ -137,6 +140,7 @@ func run() error {
 		Service:  settings.Service,
 		Instance: settings.Instance,
 		Addr:     settings.HTTP.Addr,
+		Registry: registry,
 		Handler:  fulfillment.NewHandler(store),
 		Ready: fulfillment.NewRuntimeReadinessWithDependencies(
 			pool.Ping, fulfillment.CombinePublisherAvailability(publisher, retryRouter),

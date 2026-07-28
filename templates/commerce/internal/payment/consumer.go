@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"commerce/internal/platform/messaging"
+	"commerce/internal/platform/telemetry"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -303,6 +304,7 @@ func (acknowledger *retryAcknowledger) publishThenAck(tag uint64, exchange, key 
 		ctx = context.Background()
 	}
 	delivery := acknowledger.delivery
+	ctx = telemetry.ExtractAMQP(ctx, delivery.Headers)
 	if err := acknowledger.publisher.Route(ctx, exchange, key, amqp.Publishing{
 		Headers: delivery.Headers, ContentType: delivery.ContentType,
 		ContentEncoding: delivery.ContentEncoding, DeliveryMode: amqp.Persistent,
