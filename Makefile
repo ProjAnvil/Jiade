@@ -1,4 +1,4 @@
-.PHONY: generate test bank-test e2e clean
+.PHONY: generate test bank-test commerce-ci e2e clean
 
 # Pack all built-in templates → templates.tar (required by go:embed)
 generate:
@@ -12,6 +12,14 @@ test: generate
 # bank template as standalone module verification (acceptance #2)
 bank-test:
 	cd templates/bank && go build ./... && go test ./...
+
+# commerce template static verification (build, test, compose, and manifests)
+commerce-ci:
+	cd templates/commerce && go build ./...
+	cd templates/commerce && go test ./...
+	cd templates/commerce && go test -race ./internal/platform/...
+	cd templates/commerce && $(MAKE) config-check
+	kubectl kustomize templates/commerce/deploy/k8s >/tmp/commerce-k8s.yaml
 
 # End-to-end smoke (requires docker; acceptance #4/#5)
 # Two-stage startup: postgres → seed → then start the service to eliminate startup race conditions
