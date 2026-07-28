@@ -31,14 +31,14 @@ func TestCustomerRepo_GetAndList(t *testing.T) {
 	r := repo.NewCustomerRepo(db)
 
 	db.ExecContext(ctx, "DELETE FROM cust_info WHERE cust_id='IT-C1'")
-	db.ExecContext(ctx, `INSERT INTO cust_info(cust_id,cust_type,name,cert_type,cert_no,nationality,risk_level,kyc_status,create_biz_date)
-		VALUES ('IT-C1','个人','测试','身份证','110101000000000001','CN','low','passed','2026-01-01')`)
+	db.ExecContext(ctx, `INSERT INTO cust_info(cust_id,cust_type,name,cert_type,cert_no,nationality,risk_level,kyc_status,customer_status,risk_tags,create_biz_date)
+		VALUES ('IT-C1','个人','测试','身份证','110101000000000001','CN','low','passed','restricted',ARRAY['pep','sanctions'],'2026-01-01')`)
 
 	got, err := r.GetCustomer(ctx, "IT-C1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Name != "测试" || got.CustType != domain.CustTypePersonal {
+	if got.Name != "测试" || got.CustType != domain.CustTypePersonal || got.Status != "restricted" || len(got.RiskTags) != 2 || got.RiskTags[0] != "pep" || got.RiskTags[1] != "sanctions" {
 		t.Errorf("got %+v", got)
 	}
 	list, err := r.ListCustomers(ctx, "个人", "passed", 0, 10)

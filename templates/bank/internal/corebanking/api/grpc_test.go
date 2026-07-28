@@ -54,6 +54,21 @@ func TestAccountQueryServerMapsDemandAccountAndLedgerBalance(t *testing.T) {
 	}
 }
 
+func TestAccountQueryServerMapsFixedAccountAndLedgerBalance(t *testing.T) {
+	server := NewAccountQueryServer(
+		accountQueryStore{fixed: domain.FixedAccount{AccountNo: "F-7", CustID: "C-42", Ccy: "USD", Status: domain.AccountStatusFrozen}},
+		balanceQueryStore{balance: domain.Balance{Balance: domain.NewMoneyFromCents(-50)}},
+	)
+
+	got, err := server.GetAccount(context.Background(), &corev1.GetAccountRequest{AccountNo: "F-7"})
+	if err != nil {
+		t.Fatalf("GetAccount: %v", err)
+	}
+	if got.AccountNo != "F-7" || got.CustomerId != "C-42" || got.Currency != "USD" || got.Status != "frozen" || got.LedgerBalanceMinor != -50 || got.AvailableBalanceMinor != -50 {
+		t.Fatalf("snapshot = %#v", got)
+	}
+}
+
 func TestAccountQueryServerMapsMissingAccountToNotFound(t *testing.T) {
 	server := NewAccountQueryServer(accountQueryStore{}, balanceQueryStore{})
 

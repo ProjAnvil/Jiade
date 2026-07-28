@@ -23,18 +23,18 @@ func (s customerQueryStore) GetCustomer(context.Context, string) (domain.Custome
 func TestCustomerQueryServerMapsCustomerSnapshot(t *testing.T) {
 	server := NewCustomerQueryServer(customerQueryStore{customer: domain.Customer{
 		CustID: "C-42", Name: "Ada", CustType: domain.CustTypePersonal,
-		KYCStatus: "passed", RiskLevel: "low",
+		KYCStatus: "passed", Status: "restricted", RiskTags: []string{"pep", "sanctions"},
 	}})
 
 	got, err := server.GetCustomer(context.Background(), &customerv1.GetCustomerRequest{CustomerId: "C-42"})
 	if err != nil {
 		t.Fatalf("GetCustomer: %v", err)
 	}
-	if got.CustomerId != "C-42" || got.Name != "Ada" || got.CustomerType != "个人" || got.KycStatus != "passed" || got.Status != "active" {
+	if got.CustomerId != "C-42" || got.Name != "Ada" || got.CustomerType != "个人" || got.KycStatus != "passed" || got.Status != "restricted" {
 		t.Fatalf("snapshot = %#v", got)
 	}
-	if len(got.RiskTags) != 1 || got.RiskTags[0] != "low" {
-		t.Fatalf("risk tags = %#v, want [low]", got.RiskTags)
+	if len(got.RiskTags) != 2 || got.RiskTags[0] != "pep" || got.RiskTags[1] != "sanctions" {
+		t.Fatalf("risk tags = %#v, want [pep sanctions]", got.RiskTags)
 	}
 }
 

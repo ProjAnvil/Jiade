@@ -38,16 +38,12 @@ func (s *CustomerQueryServer) GetCustomer(ctx context.Context, req *customerv1.G
 		return nil, status.Error(codes.Internal, "get customer")
 	}
 
-	riskTags := []string(nil)
-	if customer.RiskLevel != "" {
-		riskTags = []string{customer.RiskLevel}
-	}
 	return &customerv1.CustomerSnapshot{
 		CustomerId:   customer.CustID,
 		Name:         customer.Name,
 		CustomerType: string(customer.CustType),
 		KycStatus:    customer.KYCStatus,
-		Status:       "active",
-		RiskTags:     riskTags,
+		Status:       customer.Status,
+		RiskTags:     append([]string(nil), customer.RiskTags...),
 	}, nil
 }

@@ -19,7 +19,9 @@ type ClientConfig struct {
 }
 
 // Dial builds a lazy internal gRPC client using DNS resolution, health checks,
-// and round-robin balancing. The caller's context is checked before creating
+// and round-robin balancing. cfg.Timeout is grpc's MinConnectTimeout for each
+// connection attempt, not a blocking dial timeout; callers set RPC deadlines
+// on their request contexts. The caller's context is checked before creating
 // the client because grpc.NewClient itself does not accept a context.
 func Dial(ctx context.Context, cfg ClientConfig) (*grpc.ClientConn, error) {
 	if err := ctx.Err(); err != nil {

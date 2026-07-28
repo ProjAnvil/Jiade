@@ -24,6 +24,36 @@ func TestSplitStatements_Empty(t *testing.T) {
 	}
 }
 
+func TestSupportedSchemaStatement(t *testing.T) {
+	tests := []struct {
+		statement string
+		want      bool
+	}{
+		{"CREATE TABLE customer(id text)", true},
+		{"ALTER TABLE customer ADD COLUMN status text", true},
+		{"INSERT INTO customer(id) VALUES ('C1')", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isSupportedSchemaStatement(tt.statement); got != tt.want {
+			t.Errorf("isSupportedSchemaStatement(%q) = %t, want %t", tt.statement, got, tt.want)
+		}
+	}
+}
+
+func isSupportedSchemaStatement(statement string) bool {
+	fields := strings.Fields(statement)
+	if len(fields) == 0 {
+		return false
+	}
+	switch strings.ToUpper(fields[0]) {
+	case "CREATE", "ALTER":
+		return true
+	default:
+		return false
+	}
+}
+
 func TestSplitStatements_CustPaySchemas(t *testing.T) {
 	for _, name := range []string{"cust_db.sql", "pay_db.sql"} {
 		// Level 3 returns to templates/bank/ (the CWD of go test is the package directory internal/platform/migrate/).
@@ -36,7 +66,7 @@ func TestSplitStatements_CustPaySchemas(t *testing.T) {
 			t.Errorf("%s 切分后无语句", name)
 		}
 		for _, s := range stmts {
-			if !strings.Contains(s, "CREATE") {
+			if !isSupportedSchemaStatement(s) {
 				t.Errorf("%s 含非 DDL 语句: %q", name, s)
 			}
 		}
@@ -55,7 +85,7 @@ func TestSplitStatements_RewardRiskSchemas(t *testing.T) {
 			t.Errorf("%s 切分后无语句", name)
 		}
 		for _, s := range stmts {
-			if !strings.Contains(s, "CREATE") {
+			if !isSupportedSchemaStatement(s) {
 				t.Errorf("%s 含非 DDL 语句: %q", name, s)
 			}
 		}
@@ -74,7 +104,7 @@ func TestSplitStatements_LoanWealthSchemas(t *testing.T) {
 			t.Errorf("%s 切分后无语句", name)
 		}
 		for _, s := range stmts {
-			if !strings.Contains(s, "CREATE") {
+			if !isSupportedSchemaStatement(s) {
 				t.Errorf("%s 含非 DDL 语句: %q", name, s)
 			}
 		}

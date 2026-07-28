@@ -3,6 +3,7 @@ package grpcx
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestDefaultServiceConfigEnablesRoundRobinAndHealthChecking(t *testing.T) {
@@ -12,8 +13,10 @@ func TestDefaultServiceConfigEnablesRoundRobinAndHealthChecking(t *testing.T) {
 	}
 }
 
-func TestDialAcceptsDNSRoundRobinTarget(t *testing.T) {
-	conn, err := Dial(context.Background(), ClientConfig{Target: "dns:///customer:9090"})
+func TestDialIsLazySoTimeoutIsNotAnRPCCallDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := Dial(ctx, ClientConfig{Target: "dns:///customer:9090", Timeout: time.Hour})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

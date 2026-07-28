@@ -21,8 +21,10 @@ func GenCustomers(cfg fixtures.Config, n int) []domain.Customer {
 			Nationality:   "CN",
 			RiskLevel:     rng.Choice(fixtures.RiskLevels),
 			KYCStatus:     "passed",
+			Status:        "active",
 			CreateBizDate: fixtures.RandomDate(rng, cfg.StartBizDate, cfg.EndBizDate),
 		}
+		c.RiskTags = preparationRiskTags(c.RiskLevel)
 		if isOrg {
 			c.CustType = domain.CustTypeOrg
 			c.Name = orgName(rng)
@@ -67,14 +69,25 @@ func WriteCustomers(ctx context.Context, db *sql.DB, rows []domain.Customer) err
 			birthday = c.Birthday
 		}
 		if _, err := db.ExecContext(ctx, `INSERT INTO cust_info
-			(cust_id,cust_type,name,cert_type,cert_no,gender,birthday,nationality,risk_level,kyc_status,create_biz_date)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+			(cust_id,cust_type,name,cert_type,cert_no,gender,birthday,nationality,risk_level,kyc_status,customer_status,risk_tags,create_biz_date)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 			c.CustID, string(c.CustType), c.Name, c.CertType, c.CertNo,
-			gender, birthday, c.Nationality, c.RiskLevel, c.KYCStatus, c.CreateBizDate); err != nil {
+			gender, birthday, c.Nationality, c.RiskLevel, c.KYCStatus, c.Status, c.RiskTags, c.CreateBizDate); err != nil {
 			return fmt.Errorf("插入 cust_info %s: %w", c.CustID, err)
 		}
 	}
 	return nil
+}
+
+func preparationRiskTags(riskLevel string) []string {
+	switch riskLevel {
+	case "high":
+		return []string{"high-risk"}
+	case "medium":
+		return []string{"enhanced-due-diligence"}
+	default:
+		return nil
+	}
 }
 
 // WriteAccountRels Idempotent writes cust_account_rel.

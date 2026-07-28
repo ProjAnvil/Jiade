@@ -21,6 +21,8 @@ type Customer struct {
 	Nationality   string
 	RiskLevel     string // low/medium
 	KYCStatus     string // passed
+	Status        string // active/restricted/closed
+	RiskTags      []string
 	CreateBizDate string
 }
 

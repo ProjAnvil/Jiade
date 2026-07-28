@@ -26,6 +26,25 @@ func TestGenCustomers_Deterministic(t *testing.T) {
 	}
 }
 
+func TestGenCustomersAssignsDeterministicPreparationRiskTags(t *testing.T) {
+	customers := GenCustomers(fixtures.DefaultConfig(fixtures.ScaleDev), 100)
+	var highRisk int
+	for _, customer := range customers {
+		if customer.Status != "active" {
+			t.Fatalf("customer %s status = %q, want active", customer.CustID, customer.Status)
+		}
+		if customer.RiskLevel == "high" {
+			highRisk++
+			if len(customer.RiskTags) != 1 || customer.RiskTags[0] != "high-risk" {
+				t.Fatalf("high-risk customer tags = %#v, want [high-risk]", customer.RiskTags)
+			}
+		}
+	}
+	if highRisk == 0 {
+		t.Fatal("deterministic fixture must contain high-risk preparation customers")
+	}
+}
+
 func TestGenAccountRels_LinksCustToAccount(t *testing.T) {
 	pairs := [][2]string{{"C0000001", "D0000000001"}, {"C0000001", "D0000000002"}}
 	rels := GenAccountRels(pairs)

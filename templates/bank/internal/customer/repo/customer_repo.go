@@ -25,11 +25,11 @@ func NewCustomerRepo(db *sql.DB) *CustomerRepo {
 // GetCustomer checks a single customer. There is no return wrapped sql.ErrNoRows.
 func (r *CustomerRepo) GetCustomer(ctx context.Context, custID string) (domain.Customer, error) {
 	row := r.db.QueryRowContext(ctx, `SELECT cust_id,cust_type,name,cert_type,cert_no,gender,birthday,
-		nationality,risk_level,kyc_status,create_biz_date FROM cust_info WHERE cust_id=$1`, custID)
+		nationality,risk_level,kyc_status,customer_status,risk_tags,create_biz_date FROM cust_info WHERE cust_id=$1`, custID)
 	var c domain.Customer
 	var cType, gender, birthday sql.NullString
 	err := row.Scan(&c.CustID, &cType, &c.Name, &c.CertType, &c.CertNo, &gender, &birthday,
-		&c.Nationality, &c.RiskLevel, &c.KYCStatus, &c.CreateBizDate)
+		&c.Nationality, &c.RiskLevel, &c.KYCStatus, &c.Status, &c.RiskTags, &c.CreateBizDate)
 	if err != nil {
 		return domain.Customer{}, fmt.Errorf("repo: 查客户 %s: %w", custID, err)
 	}
@@ -43,7 +43,7 @@ func (r *CustomerRepo) ListCustomers(ctx context.Context, custType, kycStatus st
 	if limit <= 0 {
 		limit = 50
 	}
-	q := `SELECT cust_id,cust_type,name,cert_type,cert_no,gender,birthday,nationality,risk_level,kyc_status,create_biz_date
+	q := `SELECT cust_id,cust_type,name,cert_type,cert_no,gender,birthday,nationality,risk_level,kyc_status,customer_status,risk_tags,create_biz_date
 		FROM cust_info WHERE ($1='' OR cust_type=$1) AND ($2='' OR kyc_status=$2)
 		ORDER BY cust_id LIMIT $3 OFFSET $4`
 	rows, err := r.db.QueryContext(ctx, q, custType, kycStatus, limit, offset)
@@ -56,7 +56,7 @@ func (r *CustomerRepo) ListCustomers(ctx context.Context, custType, kycStatus st
 		var c domain.Customer
 		var cType, gender, birthday sql.NullString
 		if err := rows.Scan(&c.CustID, &cType, &c.Name, &c.CertType, &c.CertNo, &gender, &birthday,
-			&c.Nationality, &c.RiskLevel, &c.KYCStatus, &c.CreateBizDate); err != nil {
+			&c.Nationality, &c.RiskLevel, &c.KYCStatus, &c.Status, &c.RiskTags, &c.CreateBizDate); err != nil {
 			return nil, fmt.Errorf("repo: 列客户 scan: %w", err)
 		}
 		c.CustType = domain.CustType(cType.String)
