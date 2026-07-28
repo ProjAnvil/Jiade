@@ -10,6 +10,10 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"commerce/internal/platform/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type requestIDKey struct{}
@@ -27,7 +31,9 @@ func requestID(next http.Handler) http.Handler {
 			id = newRequestID()
 		}
 		w.Header().Set("X-Request-ID", id)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id)))
+		ctx := context.WithValue(r.Context(), requestIDKey{}, id)
+		trace.SpanFromContext(ctx).SetAttributes(attribute.String("request.id", id))
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -44,7 +50,9 @@ func recoverPanic(logger *slog.Logger, service string, next http.Handler) http.H
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				logger.Error("panic while serving HTTP request", "service", service, "panic", recovered, "request_id", RequestID(r.Context()))
+				attributes := []any{"service", service, "panic", recovered, "request_id", RequestID(r.Context())}
+				attributes = append(attributes, telemetry.TraceFields(r.Context())...)
+				logger.Error("panic while serving HTTP request", attributes...)
 				if state, ok := w.(interface{ Committed() bool }); ok && state.Committed() {
 					panic(http.ErrAbortHandler)
 				}
@@ -69,8 +77,10 @@ func accessLog(logger *slog.Logger, service string, next http.Handler) http.Hand
 		started := time.Now()
 		recorder := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
-		logger.Info("http request", "service", service, "method", r.Method, "path", r.URL.Path, "status", recorder.status,
-			"bytes", recorder.bytes, "duration", time.Since(started), "request_id", RequestID(r.Context()))
+		attributes := []any{"service", service, "method", r.Method, "path", r.URL.Path, "status", recorder.status,
+			"bytes", recorder.bytes, "duration", time.Since(started), "request_id", RequestID(r.Context())}
+		attributes = append(attributes, telemetry.TraceFields(r.Context())...)
+		logger.Info("http request", attributes...)
 	})
 }
 

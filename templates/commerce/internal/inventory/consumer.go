@@ -65,15 +65,19 @@ func (consumer *Consumer) ProcessDelivery(ctx context.Context, delivery amqp.Del
 		return fmt.Errorf("begin inventory delivery: %w", err)
 	}
 	return messaging.ProcessRabbitDeliveryForRetryQueue(ctx, tx, inventoryConsumer, delivery,
-		consumer.retryQueue, consumer.applyEvent, consumer.policy)
+		consumer.retryQueue, consumer.applyEventContext, consumer.policy)
 }
 
 func (consumer *Consumer) applyEvent(event messaging.Event) error {
+	return consumer.applyEventContext(context.Background(), event)
+}
+
+func (consumer *Consumer) applyEventContext(ctx context.Context, event messaging.Event) error {
 	switch event.Type {
 	case "inventory.commit-requested.v1":
-		return consumer.applyCommitRequested(event)
+		return consumer.applyCommitRequested(ctx, event)
 	case "inventory.release-requested.v1":
-		return consumer.applyReleaseRequested(event)
+		return consumer.applyReleaseRequested(ctx, event)
 	default:
 		return messaging.NonRetryable(fmt.Errorf("unsupported inventory event type %s", event.Type))
 	}
@@ -87,7 +91,7 @@ type orderIDEventPayload struct {
 	OrderID string `json:"order_id"`
 }
 
-func (consumer *Consumer) applyCommitRequested(event messaging.Event) error {
+func (consumer *Consumer) applyCommitRequested(ctx context.Context, event messaging.Event) error {
 	var payload orderIDEventPayload
 	if err := decodeInventoryEnvelope(event, &payload); err != nil {
 		return err
@@ -98,11 +102,11 @@ func (consumer *Consumer) applyCommitRequested(event messaging.Event) error {
 	// TransitionOrder(active -> committed) is idempotent: terminal == commit
 	// makes a replay a no-op that returns nil without re-emitting the event,
 	// and the inbox HandleOnce dedupes by event_id before that.
-	_, err := consumer.service.TransitionOrder(context.Background(), payload.OrderID, ReservationCommit)
+	_, err := consumer.service.TransitionOrder(ctx, payload.OrderID, ReservationCommit)
 	return err
 }
 
-func (consumer *Consumer) applyReleaseRequested(event messaging.Event) error {
+func (consumer *Consumer) applyReleaseRequested(ctx context.Context, event messaging.Event) error {
 	var payload orderIDEventPayload
 	if err := decodeInventoryEnvelope(event, &payload); err != nil {
 		return err
@@ -114,7 +118,7 @@ func (consumer *Consumer) applyReleaseRequested(event messaging.Event) error {
 	// the order, terminal == release and TransitionOrder returns (allocations,
 	// false, nil) with no error and no re-emission. The order-side compensation
 	// saga step is unblocked by the first release event regardless of path.
-	_, err := consumer.service.TransitionOrder(context.Background(), payload.OrderID, ReservationRelease)
+	_, err := consumer.service.TransitionOrder(ctx, payload.OrderID, ReservationRelease)
 	return err
 }
 

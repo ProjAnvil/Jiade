@@ -9,8 +9,13 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"commerce/internal/platform/telemetry"
 	"github.com/jackc/pgx/v5"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // RabbitPublisher publishes persistent, mandatory messages and considers an
@@ -145,13 +150,29 @@ func (publisher *RabbitPublisher) Route(
 	exchange string,
 	key string,
 	message amqp.Publishing,
-) error {
+) (result error) {
 	if publisher == nil || publisher.channel == nil {
 		return fmt.Errorf("%w: rabbit publisher is nil", ErrPublisherUnavailable)
 	}
 	if message.MessageId == "" {
 		return errors.New("rabbit routed message requires MessageId")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, span := otel.Tracer("commerce/messaging").Start(ctx, "messaging.publish",
+		trace.WithAttributes(attribute.String("messaging.destination.name", exchange)))
+	defer func() {
+		if result != nil {
+			span.RecordError(result)
+			span.SetStatus(codes.Error, result.Error())
+		}
+		span.End()
+	}()
+	if message.Headers == nil {
+		message.Headers = amqp.Table{}
+	}
+	telemetry.InjectAMQP(ctx, message.Headers)
 	message.DeliveryMode = amqp.Persistent
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()
@@ -316,7 +337,7 @@ func (delivery AMQPDelivery) RetryCountFor(queue, reason string) int {
 
 // ProcessRabbitDelivery decodes an envelope, runs it transactionally, then
 // manually acknowledges only after commit. Invalid envelopes go straight DLQ.
-func ProcessRabbitDelivery(ctx context.Context, tx pgx.Tx, consumer string, delivery amqp.Delivery, handler func(Event) error, policy RetryPolicy) error {
+func ProcessRabbitDelivery(ctx context.Context, tx pgx.Tx, consumer string, delivery amqp.Delivery, handler func(context.Context, Event) error, policy RetryPolicy) error {
 	return ProcessRabbitDeliveryForRetryQueue(ctx, tx, consumer, delivery, "", handler, policy)
 }
 
@@ -326,9 +347,22 @@ func ProcessRabbitDeliveryForRetryQueue(
 	consumer string,
 	delivery amqp.Delivery,
 	retryQueue string,
-	handler func(Event) error,
+	handler func(context.Context, Event) error,
 	policy RetryPolicy,
-) error {
+) (result error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = telemetry.ExtractAMQP(ctx, delivery.Headers)
+	ctx, span := otel.Tracer("commerce/messaging").Start(ctx, "messaging.consume",
+		trace.WithSpanKind(trace.SpanKindConsumer))
+	defer func() {
+		if result != nil {
+			span.RecordError(result)
+			span.SetStatus(codes.Error, result.Error())
+		}
+		span.End()
+	}()
 	adapted := AMQPDelivery{Delivery: delivery, RetryQueue: retryQueue, RetryReason: "expired"}
 	var event Event
 	if err := json.Unmarshal(delivery.Body, &event); err != nil {
@@ -340,7 +374,7 @@ func ProcessRabbitDeliveryForRetryQueue(
 	if handler == nil {
 		return rejectMalformed(ctx, tx, adapted, errors.New("messaging rabbit handler is nil"))
 	}
-	return ProcessDelivery(ctx, tx, consumer, event, func() error { return handler(event) }, adapted, policy)
+	return ProcessDelivery(ctx, tx, consumer, event, func() error { return handler(ctx, event) }, adapted, policy)
 }
 
 func rejectMalformed(ctx context.Context, tx pgx.Tx, delivery Delivery, cause error) error {

@@ -10,13 +10,77 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"commerce/internal/platform/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+func TestServerCreatesHTTPSpan(t *testing.T) {
+	recorder, provider := newSpanRecorder(t)
+	original := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() { otel.SetTracerProvider(original) })
+
+	server := NewServer(ServerConfig{Service: "catalog", Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/products", nil)
+	request.Header.Set("X-Request-ID", "request-7")
+	server.Handler().ServeHTTP(httptest.NewRecorder(), request)
+
+	spans := recorder.Ended()
+	if got := spanNames(spans); !slices.Contains(got, "GET /api/v1/products") {
+		t.Fatalf("spans=%v, want GET /api/v1/products", got)
+	}
+	if !spanHasAttribute(spans, "GET /api/v1/products", attribute.String("request.id", "request-7")) {
+		t.Fatalf("GET /api/v1/products span missing request.id=request-7")
+	}
+}
+
+func newSpanRecorder(t *testing.T) (*tracetest.SpanRecorder, *sdktrace.TracerProvider) {
+	t.Helper()
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSpanProcessor(recorder),
+	)
+	t.Cleanup(func() {
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+	return recorder, provider
+}
+
+func spanNames(spans []sdktrace.ReadOnlySpan) []string {
+	names := make([]string, 0, len(spans))
+	for _, span := range spans {
+		names = append(names, span.Name())
+	}
+	return names
+}
+
+func spanHasAttribute(spans []sdktrace.ReadOnlySpan, name string, want attribute.KeyValue) bool {
+	for _, span := range spans {
+		if span.Name() != name {
+			continue
+		}
+		for _, attribute := range span.Attributes() {
+			if attribute == want {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 func TestServerUsesConfiguredHTTPTimeouts(t *testing.T) {
 	config := ServerConfig{

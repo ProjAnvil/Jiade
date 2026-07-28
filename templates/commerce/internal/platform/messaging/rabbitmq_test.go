@@ -2,14 +2,92 @@ package messaging
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"commerce/internal/platform/telemetry"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
+
+func TestRabbitPublisherInjectsTraceparentHeader(t *testing.T) {
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	originalProvider := otel.GetTracerProvider()
+	originalPropagator := otel.GetTextMapPropagator()
+	otel.SetTracerProvider(provider)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		otel.SetTracerProvider(originalProvider)
+		otel.SetTextMapPropagator(originalPropagator)
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+
+	channel := newFakeRabbitChannel()
+	channel.outcomes = []fakePublishOutcome{{ack: true}}
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, span := otel.Tracer("test").Start(context.Background(), "parent")
+	defer span.End()
+	if err := publisher.Publish(ctx, testEvent()); err != nil {
+		t.Fatal(err)
+	}
+	if got := channel.lastMessage.Headers["traceparent"]; got == nil || got == "" {
+		t.Fatalf("traceparent=%v, want propagated trace context", got)
+	}
+	if got := trace.SpanContextFromContext(telemetry.ExtractAMQP(context.Background(), channel.lastMessage.Headers)); !got.IsValid() {
+		t.Fatalf("traceparent=%v, want a valid trace context", channel.lastMessage.Headers["traceparent"])
+	}
+}
+
+func TestProcessRabbitDeliveryPassesExtractedTraceContextToHandler(t *testing.T) {
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	originalProvider := otel.GetTracerProvider()
+	originalPropagator := otel.GetTextMapPropagator()
+	otel.SetTracerProvider(provider)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		otel.SetTracerProvider(originalProvider)
+		otel.SetTextMapPropagator(originalPropagator)
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+
+	parentCtx, parent := otel.Tracer("test").Start(context.Background(), "parent")
+	headers := amqp.Table{}
+	telemetry.InjectAMQP(parentCtx, headers)
+	parentTraceID := parent.SpanContext().TraceID()
+	parent.End()
+	body, err := json.Marshal(testEvent())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var handlerTraceID trace.TraceID
+	delivery := amqp.Delivery{Body: body, Headers: headers, Acknowledger: rabbitTestAcknowledger{}}
+	err = ProcessRabbitDelivery(context.Background(), &inboxTx{}, "projection", delivery,
+		func(ctx context.Context, _ Event) error {
+			handlerTraceID = trace.SpanContextFromContext(ctx).TraceID()
+			return nil
+		}, RetryPolicy{MaxAttempts: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handlerTraceID != parentTraceID {
+		t.Fatalf("handler trace ID=%s, want %s from delivery headers", handlerTraceID, parentTraceID)
+	}
+}
 
 func TestRabbitPublisherObservesIdleAsynchronousChannelClosure(t *testing.T) {
 	channel := newFakeRabbitChannel()
@@ -230,6 +308,7 @@ type fakeRabbitChannel struct {
 	closes                 chan *amqp.Error
 	closeOnce              sync.Once
 	closeCalls             int
+	lastMessage            amqp.Publishing
 }
 
 func newFakeRabbitChannel() *fakeRabbitChannel {
@@ -252,6 +331,7 @@ func (channel *fakeRabbitChannel) NotifyClose(closes chan *amqp.Error) chan *amq
 func (channel *fakeRabbitChannel) GetNextPublishSeqNo() uint64 { return channel.nextSeq }
 func (channel *fakeRabbitChannel) PublishWithContext(_ context.Context, _, _ string, _, _ bool, message amqp.Publishing) error {
 	channel.publishCalls++
+	channel.lastMessage = message
 	sequence := channel.nextSeq
 	channel.nextSeq++
 	if channel.onPublish != nil {
@@ -282,6 +362,12 @@ func (channel *fakeRabbitChannel) PublishWithContext(_ context.Context, _, _ str
 	channel.confirms <- amqp.Confirmation{DeliveryTag: sequence, Ack: outcome.ack}
 	return nil
 }
+
+type rabbitTestAcknowledger struct{}
+
+func (rabbitTestAcknowledger) Ack(uint64, bool) error        { return nil }
+func (rabbitTestAcknowledger) Nack(uint64, bool, bool) error { return nil }
+func (rabbitTestAcknowledger) Reject(uint64, bool) error     { return nil }
 func (channel *fakeRabbitChannel) Close() error {
 	channel.closeOnce.Do(func() {
 		channel.closeCalls++

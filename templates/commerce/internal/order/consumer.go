@@ -57,8 +57,8 @@ func (consumer *Consumer) ProcessDelivery(ctx context.Context, delivery amqp.Del
 		return fmt.Errorf("begin order delivery: %w", err)
 	}
 	return messaging.ProcessRabbitDeliveryForRetryQueue(ctx, tx, orderSagaConsumer, delivery, consumer.retryQueue,
-		func(event messaging.Event) error {
-			return consumer.store.applyEvent(ctx, tx, event)
+		func(handlerContext context.Context, event messaging.Event) error {
+			return consumer.store.applyEvent(handlerContext, tx, event)
 		}, consumer.policy)
 }
 

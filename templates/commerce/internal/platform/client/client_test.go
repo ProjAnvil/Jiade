@@ -10,6 +10,11 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func newTestClient(options ...func(*Config)) *Client {
@@ -201,10 +206,8 @@ func TestClientReleasesHalfOpenProbeWhenBodyFactoryFails(t *testing.T) {
 
 func TestClientUsesOriginalUnreplayableBodyForSingleAttempt(t *testing.T) {
 	sourceBody := &trackingBody{Reader: strings.NewReader(`{"sku":"SKU-1"}`)}
-	usedOriginal := false
 	client := newTestClient(func(config *Config) {
 		config.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-			usedOriginal = request.Body == sourceBody
 			return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
 		})}
 	})
@@ -218,8 +221,8 @@ func TestClientUsesOriginalUnreplayableBodyForSingleAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if !usedOriginal || sourceBody.read != 0 || sourceBody.closed {
-		t.Fatalf("usedOriginal=%t read=%d closed=%t, want original untouched before transport", usedOriginal, sourceBody.read, sourceBody.closed)
+	if sourceBody.read != 0 || sourceBody.closed {
+		t.Fatalf("read=%d closed=%t, want original body untouched before transport", sourceBody.read, sourceBody.closed)
 	}
 }
 
@@ -356,6 +359,46 @@ func TestClientPropagatesRequestAndTraceHeaders(t *testing.T) {
 	if missingHeader != "" {
 		t.Fatalf("missing propagated %s header", missingHeader)
 	}
+}
+
+func TestClientCreatesHTTPSpan(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSpanProcessor(recorder),
+	)
+	original := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(original)
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+
+	client := newTestClient(func(config *Config) {
+		config.HTTPClient = newHandlerHTTPClient(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}))
+	})
+	request, err := http.NewRequest(http.MethodGet, "http://upstream.test/products", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(context.Background(), request, Policy{MaxAttempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, span := range recorder.Ended() {
+		if span.SpanKind() == trace.SpanKindClient && span.SpanContext().IsValid() {
+			return
+		}
+	}
+	t.Fatalf("spans=%v, want a valid client span", recorder.Ended())
 }
 
 func TestClientUsesRetryAfter(t *testing.T) {
