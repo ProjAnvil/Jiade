@@ -86,7 +86,7 @@ func preparationRiskTags(riskLevel string) []string {
 	case "medium":
 		return []string{"enhanced-due-diligence"}
 	default:
-		return nil
+		return []string{}
 	}
 }
 

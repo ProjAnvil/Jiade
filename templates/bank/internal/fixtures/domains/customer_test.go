@@ -39,6 +39,9 @@ func TestGenCustomersAssignsDeterministicPreparationRiskTags(t *testing.T) {
 				t.Fatalf("high-risk customer tags = %#v, want [high-risk]", customer.RiskTags)
 			}
 		}
+		if customer.RiskLevel == "low" && customer.RiskTags == nil {
+			t.Fatalf("low-risk customer %s must persist an empty (not nil) tag array", customer.CustID)
+		}
 	}
 	if highRisk == 0 {
 		t.Fatal("deterministic fixture must contain high-risk preparation customers")

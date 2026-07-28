@@ -40,8 +40,8 @@ loan     ────────> customer
 wealth   ────────> customer
 ```
 
-容器内通过 `CORE_BANKING_URL=http://core-banking:18080` 和
-`CUSTOMER_URL=http://customer:18081` 服务发现；本地运行默认使用
+容器内通过 `CORE_BANKING_URL=http://core-banking:8080` 和
+`CUSTOMER_URL=http://customer:8080` 服务发现；本地运行默认使用
 `localhost:18080` / `localhost:18081`。
 
 ## 跨服务聚合端点
