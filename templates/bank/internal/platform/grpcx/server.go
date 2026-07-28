@@ -2,6 +2,7 @@ package grpcx
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -9,13 +10,15 @@ import (
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
 )
 
-var (
-	readinessTimeout       = 5 * time.Second
-	readinessProbeInterval = time.Second
-)
+const readinessTimeout = 5 * time.Second
+
+var readinessTrackers sync.Map // map[*grpc.Server]*readinessTracker
 
 // ServerConfig supplies the dependency readiness check for an internal server.
 type ServerConfig struct {
+	// Ready runs once in a lifecycle context owned by the returned server. It
+	// MUST return promptly when ctx is canceled. Go cannot forcibly terminate a
+	// callback that ignores cancellation; it remains tracked until it exits.
 	Ready func(context.Context) error
 }
 
@@ -25,82 +28,56 @@ type GracefulStopper interface {
 	Stop()
 }
 
-// NewServer creates a gRPC server whose standard health endpoint remains
-// NOT_SERVING until a health probe observes successful dependency readiness.
-// Readiness always runs in a tracked health RPC, so a forced server Stop does
-// not wait for a callback that ignores its cancellation context.
+type readinessTracker struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// NewServer creates a gRPC server with the standard health implementation. It
+// remains NOT_SERVING until its tracked dependency readiness lifecycle succeeds.
 func NewServer(cfg ServerConfig) *grpc.Server {
 	server := grpc.NewServer()
-	baseHealth := health.NewServer()
-	baseHealth.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
-	grpc_health_v1.RegisterHealthServer(server, &readinessHealthServer{base: baseHealth, ready: cfg.Ready})
+	healthServer := health.NewServer()
+	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+	grpc_health_v1.RegisterHealthServer(server, healthServer)
+	startReadiness(server, healthServer, cfg.Ready)
 	return server
 }
 
-type readinessHealthServer struct {
-	grpc_health_v1.UnimplementedHealthServer
-	base  *health.Server
-	ready func(context.Context) error
-}
-
-func (s *readinessHealthServer) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequest) (*grpc_health_v1.HealthCheckResponse, error) {
-	if req.GetService() == "" {
-		s.probe(ctx)
-	}
-	return s.base.Check(ctx, req)
-}
-
-// Watch preserves the standard health-stream protocol for the overall service
-// while re-probing dependencies until their status changes. Named services are
-// delegated to the standard implementation unchanged.
-func (s *readinessHealthServer) Watch(req *grpc_health_v1.HealthCheckRequest, stream grpc_health_v1.Health_WatchServer) error {
-	if req.GetService() != "" {
-		return s.base.Watch(req, stream)
-	}
-
-	ticker := time.NewTicker(readinessProbeInterval)
-	defer ticker.Stop()
-	var last grpc_health_v1.HealthCheckResponse_ServingStatus
-	haveLast := false
-	for {
-		s.probe(stream.Context())
-		response, err := s.base.Check(stream.Context(), req)
-		if err != nil {
-			return err
+func startReadiness(server *grpc.Server, healthServer *health.Server, ready func(context.Context) error) {
+	lifecycleCtx, cancel := context.WithCancel(context.Background())
+	tracker := &readinessTracker{cancel: cancel, done: make(chan struct{})}
+	readinessTrackers.Store(server, tracker)
+	go func() {
+		defer close(tracker.done)
+		defer readinessTrackers.Delete(server)
+		readyCtx, timeoutCancel := context.WithTimeout(lifecycleCtx, readinessTimeout)
+		defer timeoutCancel()
+		if ready == nil || ready(readyCtx) == nil {
+			healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 		}
-		if !haveLast || response.Status != last {
-			if err := stream.Send(response); err != nil {
-				return err
-			}
-			last, haveLast = response.Status, true
-		}
-		select {
-		case <-stream.Context().Done():
-			return stream.Context().Err()
-		case <-ticker.C:
-		}
+	}()
+}
+
+func cancelReadiness(server *grpc.Server) {
+	if value, ok := readinessTrackers.Load(server); ok {
+		value.(*readinessTracker).cancel()
 	}
 }
 
-func (s *readinessHealthServer) probe(ctx context.Context) {
-	if s.ready == nil {
-		s.base.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-		return
-	}
-	readyCtx, cancel := context.WithTimeout(ctx, readinessTimeout)
-	defer cancel()
-	if s.ready(readyCtx) == nil {
-		s.base.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-		return
-	}
-	s.base.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+func hasReadinessTracker(server *grpc.Server) bool {
+	_, ok := readinessTrackers.Load(server)
+	return ok
 }
 
-// Shutdown waits for in-flight RPCs only until ctx expires, then forces the
-// gRPC server to stop so process termination cannot hang indefinitely. grpc's
-// GracefulStop may remain blocked after Stop, so the forced-stop path returns
-// without waiting for the graceful goroutine.
+// Shutdown cancels readiness before draining RPCs. It waits for in-flight RPCs
+// only until ctx expires, then forces the gRPC server to stop so process
+// termination cannot hang indefinitely. grpc's GracefulStop may remain blocked
+// after Stop, so the forced-stop path returns without waiting for it.
 func Shutdown(ctx context.Context, server GracefulStopper) {
+	if grpcServer, ok := server.(*grpc.Server); ok {
+		cancelReadiness(grpcServer)
+	}
 	done := make(chan struct{})
 	go func() {
 		server.GracefulStop()

@@ -2,7 +2,6 @@ package grpcx
 
 import (
 	"context"
-	"errors"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -17,9 +16,7 @@ import (
 func newHealthClient(t *testing.T, server *grpc.Server) (context.Context, grpc_health_v1.HealthClient) {
 	t.Helper()
 	listener := bufconn.Listen(1024 * 1024)
-	t.Cleanup(func() {
-		_ = listener.Close()
-	})
+	t.Cleanup(func() { _ = listener.Close() })
 	go func() { _ = server.Serve(listener) }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -36,66 +33,107 @@ func newHealthClient(t *testing.T, server *grpc.Server) (context.Context, grpc_h
 	return ctx, grpc_health_v1.NewHealthClient(conn)
 }
 
-func TestNewServerRetriesReadinessUntilHealthIsServing(t *testing.T) {
-	originalInterval := readinessProbeInterval
-	readinessProbeInterval = time.Millisecond
-	t.Cleanup(func() { readinessProbeInterval = originalInterval })
-
+func TestNewServerUsesStandardHealthCheckAndWatchSemantics(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
 	var calls atomic.Int32
 	server := NewServer(ServerConfig{Ready: func(context.Context) error {
-		if calls.Add(1) == 1 {
-			return errors.New("database unavailable")
-		}
+		calls.Add(1)
+		close(started)
+		<-release
 		return nil
 	}})
-	t.Cleanup(server.Stop)
 	ctx, client := newHealthClient(t, server)
+	<-started
+
+	check, err := client.Check(ctx, &grpc_health_v1.HealthCheckRequest{})
+	if err != nil {
+		t.Fatalf("check health: %v", err)
+	}
+	if check.Status != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
+		t.Fatalf("check status = %s, want NOT_SERVING", check.Status)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("check invoked readiness %d times, want only lifecycle invocation", calls.Load())
+	}
 
 	stream, err := client.Watch(ctx, &grpc_health_v1.HealthCheckRequest{})
 	if err != nil {
 		t.Fatalf("watch health: %v", err)
 	}
-	first, err := stream.Recv()
+	initial, err := stream.Recv()
 	if err != nil {
-		t.Fatalf("first health update: %v", err)
+		t.Fatalf("initial watch update: %v", err)
 	}
-	if first.Status != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
-		t.Fatalf("first health update = %s, want NOT_SERVING", first.Status)
+	if initial.Status != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
+		t.Fatalf("initial watch status = %s, want NOT_SERVING", initial.Status)
 	}
-	second, err := stream.Recv()
+	if calls.Load() != 1 {
+		t.Fatalf("watch invoked readiness %d times, want only lifecycle invocation", calls.Load())
+	}
+
+	close(release)
+	next, err := stream.Recv()
 	if err != nil {
-		t.Fatalf("second health update: %v", err)
+		t.Fatalf("serving watch update: %v", err)
 	}
-	if second.Status != grpc_health_v1.HealthCheckResponse_SERVING {
-		t.Fatalf("second health update = %s, want SERVING", second.Status)
+	if next.Status != grpc_health_v1.HealthCheckResponse_SERVING {
+		t.Fatalf("serving watch status = %s, want SERVING", next.Status)
 	}
+	server.Stop()
 }
 
-func TestNewServerCancelsTimedOutReadinessDuringCheck(t *testing.T) {
-	originalTimeout := readinessTimeout
-	readinessTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { readinessTimeout = originalTimeout })
-
+func TestShutdownCancelsCooperativeReadiness(t *testing.T) {
+	started := make(chan struct{})
 	canceled := make(chan struct{})
 	server := NewServer(ServerConfig{Ready: func(ctx context.Context) error {
+		close(started)
 		<-ctx.Done()
 		close(canceled)
 		return ctx.Err()
 	}})
-	t.Cleanup(server.Stop)
-	ctx, client := newHealthClient(t, server)
+	<-started
 
-	got, err := client.Check(ctx, &grpc_health_v1.HealthCheckRequest{})
-	if err != nil {
-		t.Fatalf("check health: %v", err)
-	}
-	if got.Status != grpc_health_v1.HealthCheckResponse_NOT_SERVING {
-		t.Fatalf("health after timed-out readiness = %s, want NOT_SERVING", got.Status)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	Shutdown(ctx, server)
+
 	select {
 	case <-canceled:
 	case <-time.After(time.Second):
-		t.Fatal("readiness callback was not canceled after its timeout")
+		t.Fatal("Shutdown did not cancel cooperative readiness")
+	}
+	waitForReadinessTrackerGone(t, server)
+}
+
+func TestReadinessTrackerRetainsNoncooperativeCallbackUntilItExits(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := NewServer(ServerConfig{Ready: func(context.Context) error {
+		close(started)
+		<-release
+		return nil
+	}})
+	<-started
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	Shutdown(ctx, server)
+	if !hasReadinessTracker(server) {
+		t.Fatal("tracker was removed while noncooperative readiness callback still ran")
+	}
+	close(release)
+	waitForReadinessTrackerGone(t, server)
+}
+
+func waitForReadinessTrackerGone(t *testing.T, server *grpc.Server) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for hasReadinessTracker(server) {
+		if time.Now().After(deadline) {
+			t.Fatal("readiness tracker did not clear after callback exit")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -135,42 +173,5 @@ func TestShutdownReturnsWhenStopCannotUnblockGracefulStop(t *testing.T) {
 	case <-server.stopped:
 	default:
 		t.Fatal("Stop was not used when graceful shutdown timed out")
-	}
-}
-
-func TestShutdownReturnsWhenHealthCallbackIgnoresCancellation(t *testing.T) {
-	started := make(chan struct{})
-	server := NewServer(ServerConfig{Ready: func(context.Context) error {
-		close(started)
-		select {}
-	}})
-	ctx, client := newHealthClient(t, server)
-	checkDone := make(chan struct{})
-	go func() {
-		_, _ = client.Check(ctx, &grpc_health_v1.HealthCheckRequest{})
-		close(checkDone)
-	}()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("readiness callback did not start")
-	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	returned := make(chan struct{})
-	go func() {
-		Shutdown(shutdownCtx, server)
-		close(returned)
-	}()
-	select {
-	case <-returned:
-	case <-time.After(time.Second):
-		t.Fatal("Shutdown did not return after Stop")
-	}
-	select {
-	case <-checkDone:
-	case <-time.After(time.Second):
-		t.Fatal("forced Stop did not terminate the health RPC")
 	}
 }

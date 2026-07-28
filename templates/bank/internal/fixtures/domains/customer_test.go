@@ -7,6 +7,26 @@ import (
 	"bank/internal/fixtures"
 )
 
+func TestEncodeRiskTagsJSON(t *testing.T) {
+	tests := []struct {
+		tags []string
+		want string
+	}{
+		{tags: nil, want: "[]"},
+		{tags: []string{}, want: "[]"},
+		{tags: []string{"pep", "sanctions"}, want: `["pep","sanctions"]`},
+	}
+	for _, tt := range tests {
+		got, err := encodeRiskTagsJSON(tt.tags)
+		if err != nil {
+			t.Fatalf("encodeRiskTagsJSON(%#v): %v", tt.tags, err)
+		}
+		if got != tt.want {
+			t.Fatalf("encodeRiskTagsJSON(%#v) = %q, want %q", tt.tags, got, tt.want)
+		}
+	}
+}
+
 func TestGenCustomers_Deterministic(t *testing.T) {
 	cfg := fixtures.DefaultConfig(fixtures.ScaleDev)
 	a := GenCustomers(cfg, 20)
