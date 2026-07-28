@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: commerce
+    orgId: 1
+    folder: Commerce
+    type: file
+    disableDeletion: false
+    editable: false
+    options:
+      path: /var/lib/grafana/dashboards

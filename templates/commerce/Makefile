@@ -8,6 +8,7 @@
 #   make scale           re-scale a single SERVICE to REPLICAS instances.
 #   make smoke           run test/smoke.sh against the running topology.
 #   make observability   bring up the otel/prometheus/grafana overlay.
+#   make trace-smoke     verify a catalog request trace reaches Jaeger.
 #   make seed            (re)seed dev data via the seed CLI.
 #   make verify-seed     verify the seeded data integrity.
 #   make load            bring up the topology at load scale and seed load.
@@ -76,6 +77,10 @@ smoke: ## Run the acceptance smoke script against the gateway.
 .PHONY: observability
 observability: ## Bring up the otel/prometheus/grafana overlay.
 	$(COMPOSE) $(COMPOSE_OBS_FILE) --profile observability up -d --wait
+
+.PHONY: trace-smoke
+trace-smoke: ## Verify a catalog request trace reaches Jaeger.
+	GATEWAY=$(GATEWAY) bash test/trace-smoke.sh
 
 .PHONY: observability-down
 observability-down: ## Remove the observability overlay containers only.
