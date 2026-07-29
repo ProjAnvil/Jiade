@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"bank/internal/platform/grpcx"
 	"bank/internal/platform/httpx"
 	"bank/internal/platform/pg"
+	"bank/internal/platform/runx"
 	"bank/internal/platform/serviceclient"
 	"bank/internal/wealth/api"
 	"bank/internal/wealth/repo"
@@ -20,21 +22,27 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	dbName := getenv("DB_NAME", "wealth_db")
 	db, err := pg.Open(dbName)
 	if err != nil {
-		log.Fatalf("打开 %s 失败: %v", dbName, err)
+		return fmt.Errorf("打开 %s 失败: %w", dbName, err)
 	}
 	defer db.Close()
 	if err := waitForDB(db, 5, time.Second); err != nil {
-		log.Fatalf("连 %s 失败: %v（请先 make up 再 make seed）", dbName, err)
+		return fmt.Errorf("连 %s 失败（请先 make up 再 make seed）: %w", dbName, err)
 	}
 	customerConn, err := grpcx.Dial(signalCtx, grpcx.ClientConfig{Target: getenv("CUSTOMER_GRPC_TARGET", "dns:///customer:9090"), Timeout: 3 * time.Second})
 	if err != nil {
-		log.Fatalf("连接 customer gRPC 失败: %v", err)
+		return fmt.Errorf("连接 customer gRPC 失败: %w", err)
 	}
 	defer customerConn.Close()
 
@@ -50,18 +58,8 @@ func main() {
 		Ready:    func(ctx context.Context) error { return db.PingContext(ctx) },
 	})
 
-	go func() {
-		log.Printf("wealth HTTP 监听 %s (db=%s)", httpAddr, dbName)
-		if err := srv.ListenAndServe(); err != nil && !httpx.IsClosed(err) {
-			log.Printf("wealth HTTP 服务停止: %v", err)
-			stop()
-		}
-	}()
-
-	<-signalCtx.Done()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(ctx)
+	log.Printf("wealth HTTP 监听 %s (db=%s)", httpAddr, dbName)
+	return runx.Serve(signalCtx, srv, nil, 5*time.Second)
 }
 
 type pinger interface{ Ping() error }

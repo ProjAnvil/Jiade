@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -18,27 +19,34 @@ import (
 	"bank/internal/platform/grpcx"
 	"bank/internal/platform/httpx"
 	"bank/internal/platform/pg"
+	"bank/internal/platform/runx"
 	"bank/internal/platform/serviceclient"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	dbName := getenv("DB_NAME", "cust_db")
 	db, err := pg.Open(dbName)
 	if err != nil {
-		log.Fatalf("打开 %s 失败: %v", dbName, err)
+		return fmt.Errorf("打开 %s 失败: %w", dbName, err)
 	}
 	defer db.Close()
 
 	// Start retry: cust_db may not be ready yet (seed has not finished running)
 	if err := waitForDB(db, 5, time.Second); err != nil {
-		log.Fatalf("连 %s 失败: %v（请先 make up 再 make seed）", dbName, err)
+		return fmt.Errorf("连 %s 失败（请先 make up 再 make seed）: %w", dbName, err)
 	}
 	coreConn, err := grpcx.Dial(signalCtx, grpcx.ClientConfig{Target: getenv("CORE_BANKING_GRPC_TARGET", "dns:///core-banking:9090"), Timeout: 3 * time.Second})
 	if err != nil {
-		log.Fatalf("连接 core-banking gRPC 失败: %v", err)
+		return fmt.Errorf("连接 core-banking gRPC 失败: %w", err)
 	}
 	defer coreConn.Close()
 
@@ -58,29 +66,14 @@ func main() {
 	grpcAddr := getenv("GRPC_ADDR", ":9090")
 	grpcListener, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
-		log.Fatalf("customer gRPC 监听失败: %v", err)
+		return fmt.Errorf("customer gRPC 监听失败: %w", err)
 	}
 
-	go func() {
-		log.Printf("customer HTTP 监听 %s (db=%s)", httpAddr, dbName)
-		if err := srv.ListenAndServe(); err != nil && !httpx.IsClosed(err) {
-			log.Printf("customer HTTP 服务停止: %v", err)
-			stop()
-		}
-	}()
-	go func() {
-		log.Printf("customer gRPC 监听 %s", grpcAddr)
-		if err := grpcServer.Serve(grpcListener); err != nil {
-			log.Printf("customer gRPC 服务停止: %v", err)
-			stop()
-		}
-	}()
-
-	<-signalCtx.Done()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(ctx)
-	grpcx.Shutdown(ctx, grpcServer)
+	log.Printf("customer HTTP 监听 %s, gRPC 监听 %s (db=%s)", httpAddr, grpcAddr, dbName)
+	return runx.Serve(signalCtx, srv, &runx.GRPCService{
+		Server:   grpcServer,
+		Listener: grpcListener,
+	}, 5*time.Second)
 }
 
 type pinger interface{ Ping() error }
