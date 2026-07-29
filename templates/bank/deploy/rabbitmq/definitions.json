@@ -1,0 +1,40 @@
+{
+  "_comment": "Durable bank topology. Explicit retry publishes land in a .retry queue, expire, and return to the source exchange/queue. Explicit terminal publishes land in the matching .dlq queue.",
+  "vhosts": [{"name": "/"}],
+  "users": [{"name": "bank", "password_hash": "YmFua54dqcSIczEa3NWBSafQsqw+9aH7fgq3vB7eiMUd/1VW", "hashing_algorithm": "rabbit_password_hashing_sha256", "tags": ["management"]}],
+  "permissions": [{"user": "bank", "vhost": "/", "configure": ".*", "write": ".*", "read": ".*"}],
+  "exchanges": [
+    {"name": "bank.commands", "vhost": "/", "type": "topic", "durable": true, "auto_delete": false, "internal": false, "arguments": {}},
+    {"name": "bank.events", "vhost": "/", "type": "topic", "durable": true, "auto_delete": false, "internal": false, "arguments": {}},
+    {"name": "bank.retry", "vhost": "/", "type": "direct", "durable": true, "auto_delete": false, "internal": false, "arguments": {}},
+    {"name": "bank.dlx", "vhost": "/", "type": "direct", "durable": true, "auto_delete": false, "internal": false, "arguments": {}}
+  ],
+  "queues": [
+    {"name": "risk.commands", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {}},
+    {"name": "risk.commands.retry", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {"x-message-ttl": 2000, "x-dead-letter-exchange": "bank.commands", "x-dead-letter-routing-key": "risk.commands"}},
+    {"name": "risk.commands.dlq", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {}},
+    {"name": "core-banking.commands", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {}},
+    {"name": "core-banking.commands.retry", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {"x-message-ttl": 2000, "x-dead-letter-exchange": "bank.commands", "x-dead-letter-routing-key": "core-banking.commands"}},
+    {"name": "core-banking.commands.dlq", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {}},
+    {"name": "payment.workflow.events", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {}},
+    {"name": "payment-workflow.retry", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {"x-message-ttl": 2000, "x-dead-letter-exchange": "bank.events", "x-dead-letter-routing-key": "payment.workflow.events"}},
+    {"name": "payment-workflow.dlq", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {}},
+    {"name": "reward.payment-events", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {}},
+    {"name": "reward.payment-events.retry", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {"x-message-ttl": 2000, "x-dead-letter-exchange": "bank.events", "x-dead-letter-routing-key": "reward.payment-events"}},
+    {"name": "reward.payment-events.dlq", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {}}
+  ],
+  "bindings": [
+    {"source": "bank.commands", "vhost": "/", "destination": "risk.commands", "destination_type": "queue", "routing_key": "risk.commands", "arguments": {}},
+    {"source": "bank.retry", "vhost": "/", "destination": "risk.commands.retry", "destination_type": "queue", "routing_key": "risk.commands.retry", "arguments": {}},
+    {"source": "bank.dlx", "vhost": "/", "destination": "risk.commands.dlq", "destination_type": "queue", "routing_key": "risk.commands.dead", "arguments": {}},
+    {"source": "bank.commands", "vhost": "/", "destination": "core-banking.commands", "destination_type": "queue", "routing_key": "core-banking.commands", "arguments": {}},
+    {"source": "bank.retry", "vhost": "/", "destination": "core-banking.commands.retry", "destination_type": "queue", "routing_key": "core-banking.commands.retry", "arguments": {}},
+    {"source": "bank.dlx", "vhost": "/", "destination": "core-banking.commands.dlq", "destination_type": "queue", "routing_key": "core-banking.commands.dead", "arguments": {}},
+    {"source": "bank.events", "vhost": "/", "destination": "payment.workflow.events", "destination_type": "queue", "routing_key": "payment.workflow.events", "arguments": {}},
+    {"source": "bank.retry", "vhost": "/", "destination": "payment-workflow.retry", "destination_type": "queue", "routing_key": "payment-workflow.retry", "arguments": {}},
+    {"source": "bank.dlx", "vhost": "/", "destination": "payment-workflow.dlq", "destination_type": "queue", "routing_key": "payment-workflow.dead", "arguments": {}},
+    {"source": "bank.events", "vhost": "/", "destination": "reward.payment-events", "destination_type": "queue", "routing_key": "reward.payment-events", "arguments": {}},
+    {"source": "bank.retry", "vhost": "/", "destination": "reward.payment-events.retry", "destination_type": "queue", "routing_key": "reward.payment-events.retry", "arguments": {}},
+    {"source": "bank.dlx", "vhost": "/", "destination": "reward.payment-events.dlq", "destination_type": "queue", "routing_key": "reward.payment-events.dead", "arguments": {}}
+  ]
+}
