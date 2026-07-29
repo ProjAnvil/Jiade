@@ -66,7 +66,7 @@ func (r *RiskRepo) GetEvent(ctx context.Context, eventID string) (domain.RiskEve
 	d.CustID, d.AccountNo, d.RuleID, d.RiskScore = cust.String, acct.String, rule.String, score.String
 	d.ActionTaken, d.TxnRef, d.Summary = action.String, txnRef.String, summary.String
 	if d.CustID != "" {
-		customer, err := r.customer.GetCustomer(ctx, d.CustID, "")
+		customer, err := r.customer.GetCustomer(ctx, d.CustID, serviceclient.RequestID(ctx))
 		if err != nil {
 			return domain.RiskEventDetail{}, fmt.Errorf("repo: 从 customer 查客户 %s: %w", d.CustID, err)
 		}

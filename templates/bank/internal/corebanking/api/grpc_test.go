@@ -41,7 +41,7 @@ func (s balanceQueryStore) GetLatestBalance(context.Context, string) (domain.Bal
 
 func TestAccountQueryServerMapsDemandAccountAndLedgerBalance(t *testing.T) {
 	server := NewAccountQueryServer(
-		accountQueryStore{demand: domain.DemandAccount{AccountNo: "D-7", CustID: "C-42", Ccy: "CNY", Status: domain.AccountStatusActive}},
+		accountQueryStore{demand: domain.DemandAccount{AccountNo: "D-7", CustID: "C-42", Ccy: "CNY", Status: domain.AccountStatusActive, OpenBizDate: "2026-01-15", BranchCode: "B-9"}},
 		balanceQueryStore{balance: domain.Balance{Balance: domain.NewMoneyFromCents(1250)}},
 	)
 
@@ -49,14 +49,14 @@ func TestAccountQueryServerMapsDemandAccountAndLedgerBalance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAccount: %v", err)
 	}
-	if got.AccountNo != "D-7" || got.CustomerId != "C-42" || got.Currency != "CNY" || got.Status != "active" || got.LedgerBalanceMinor != 1250 || got.AvailableBalanceMinor != 1250 {
+	if got.AccountNo != "D-7" || got.CustomerId != "C-42" || got.Currency != "CNY" || got.Status != "active" || got.LedgerBalanceMinor != 1250 || got.AvailableBalanceMinor != 1250 || got.OpenBizDate != "2026-01-15" || got.Branch != "B-9" {
 		t.Fatalf("snapshot = %#v", got)
 	}
 }
 
 func TestAccountQueryServerMapsFixedAccountAndLedgerBalance(t *testing.T) {
 	server := NewAccountQueryServer(
-		accountQueryStore{fixed: domain.FixedAccount{AccountNo: "F-7", CustID: "C-42", Ccy: "USD", Status: domain.AccountStatusFrozen}},
+		accountQueryStore{fixed: domain.FixedAccount{AccountNo: "F-7", CustID: "C-42", Ccy: "USD", Status: domain.AccountStatusFrozen, StartBizDate: "2026-02-01"}},
 		balanceQueryStore{balance: domain.Balance{Balance: domain.NewMoneyFromCents(-50)}},
 	)
 
@@ -64,7 +64,7 @@ func TestAccountQueryServerMapsFixedAccountAndLedgerBalance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAccount: %v", err)
 	}
-	if got.AccountNo != "F-7" || got.CustomerId != "C-42" || got.Currency != "USD" || got.Status != "frozen" || got.LedgerBalanceMinor != -50 || got.AvailableBalanceMinor != -50 {
+	if got.AccountNo != "F-7" || got.CustomerId != "C-42" || got.Currency != "USD" || got.Status != "frozen" || got.LedgerBalanceMinor != -50 || got.AvailableBalanceMinor != -50 || got.OpenBizDate != "2026-02-01" || got.Branch != "" {
 		t.Fatalf("snapshot = %#v", got)
 	}
 }

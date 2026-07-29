@@ -91,7 +91,7 @@ func (r *RewardRepo) GetProfile(ctx context.Context, custID string) (domain.Rewa
 	if err != nil {
 		return domain.RewardProfile{}, fmt.Errorf("repo: 查积分档案 %s: %w", custID, err)
 	}
-	customer, err := r.customer.GetCustomer(ctx, custID, "")
+	customer, err := r.customer.GetCustomer(ctx, custID, serviceclient.RequestID(ctx))
 	if err != nil {
 		return domain.RewardProfile{}, fmt.Errorf("repo: 从 customer 查客户 %s: %w", custID, err)
 	}

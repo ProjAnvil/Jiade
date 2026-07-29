@@ -87,7 +87,7 @@ func decodeRiskTagsJSON(raw string) ([]string, error) {
 	return tags, nil
 }
 
-// GetCustAccounts first checks the database relationship, and then obtains the account information through the core-banking API.
+// GetCustAccounts first checks the database relationship, then obtains account information through the core-banking gRPC query.
 func (r *CustomerRepo) GetCustAccounts(ctx context.Context, custID string) ([]domain.CustAccount, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT account_no,role FROM cust_account_rel WHERE cust_id=$1 ORDER BY account_no`, custID)
@@ -101,12 +101,13 @@ func (r *CustomerRepo) GetCustAccounts(ctx context.Context, custID string) ([]do
 		if err := rows.Scan(&accountNo, &role); err != nil {
 			return nil, fmt.Errorf("repo: 查客户账户关系 %s scan: %w", custID, err)
 		}
-		account, err := r.core.GetAccount(ctx, accountNo, "")
+		account, err := r.core.GetAccount(ctx, accountNo, serviceclient.RequestID(ctx))
 		if err != nil {
 			return nil, fmt.Errorf("repo: 从 core-banking 查账户 %s: %w", accountNo, err)
 		}
 		out = append(out, domain.CustAccount{
-			AccountNo: account.AccountNo, Ccy: account.Currency, Status: account.Status, Role: role,
+			AccountNo: account.AccountNo, Ccy: account.Currency, Status: account.Status,
+			OpenBizDate: account.OpenBizDate, BranchCode: account.Branch, Role: role,
 		})
 	}
 	if err := rows.Err(); err != nil {

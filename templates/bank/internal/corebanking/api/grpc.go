@@ -54,19 +54,23 @@ func (s *AccountQueryServer) GetAccount(ctx context.Context, req *corev1.GetAcco
 		Status:                account.status,
 		LedgerBalanceMinor:    balance.Balance.Cents(),
 		AvailableBalanceMinor: balance.Balance.Cents(),
+		OpenBizDate:           account.openBizDate,
+		Branch:                account.branch,
 	}, nil
 }
 
 type accountSnapshotSource struct {
-	accountNo  string
-	customerID string
-	currency   string
-	status     string
+	accountNo   string
+	customerID  string
+	currency    string
+	status      string
+	openBizDate string
+	branch      string
 }
 
 func (s *AccountQueryServer) getAccount(ctx context.Context, accountNo string) (accountSnapshotSource, error) {
 	if demand, err := s.accounts.GetDemand(ctx, accountNo); err == nil {
-		return accountSnapshotSource{demand.AccountNo, demand.CustID, demand.Ccy, string(demand.Status)}, nil
+		return accountSnapshotSource{accountNo: demand.AccountNo, customerID: demand.CustID, currency: demand.Ccy, status: string(demand.Status), openBizDate: demand.OpenBizDate, branch: demand.BranchCode}, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return accountSnapshotSource{}, err
 	}
@@ -74,5 +78,5 @@ func (s *AccountQueryServer) getAccount(ctx context.Context, accountNo string) (
 	if err != nil {
 		return accountSnapshotSource{}, err
 	}
-	return accountSnapshotSource{fixed.AccountNo, fixed.CustID, fixed.Ccy, string(fixed.Status)}, nil
+	return accountSnapshotSource{accountNo: fixed.AccountNo, customerID: fixed.CustID, currency: fixed.Ccy, status: string(fixed.Status), openBizDate: fixed.StartBizDate}, nil
 }

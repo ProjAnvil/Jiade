@@ -85,11 +85,11 @@ func (r *PaymentRepo) GetTransferParties(ctx context.Context, txnID string) (dom
 }
 
 func (r *PaymentRepo) customerNameForAccount(ctx context.Context, accountNo string) (string, error) {
-	account, err := r.core.GetAccount(ctx, accountNo, "")
+	account, err := r.core.GetAccount(ctx, accountNo, serviceclient.RequestID(ctx))
 	if err != nil {
 		return "", err
 	}
-	customer, err := r.customer.GetCustomer(ctx, account.CustomerID, "")
+	customer, err := r.customer.GetCustomer(ctx, account.CustomerID, serviceclient.RequestID(ctx))
 	if err != nil {
 		return "", err
 	}

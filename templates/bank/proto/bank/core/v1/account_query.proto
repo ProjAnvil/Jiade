@@ -20,4 +20,6 @@ message AccountSnapshot {
   string status = 4;
   int64 ledger_balance_minor = 5;
   int64 available_balance_minor = 6;
+  string open_biz_date = 7;
+  string branch = 8;
 }

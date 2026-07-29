@@ -14,6 +14,8 @@ type Account struct {
 	Status                string
 	LedgerBalanceMinor    int64
 	AvailableBalanceMinor int64
+	OpenBizDate           string
+	Branch                string
 }
 
 // AccountReader reads an account snapshot without exposing transport details.
@@ -42,5 +44,7 @@ func (r accountReader) GetAccount(ctx context.Context, accountNo, requestID stri
 		Status:                snapshot.GetStatus(),
 		LedgerBalanceMinor:    snapshot.GetLedgerBalanceMinor(),
 		AvailableBalanceMinor: snapshot.GetAvailableBalanceMinor(),
+		OpenBizDate:           snapshot.GetOpenBizDate(),
+		Branch:                snapshot.GetBranch(),
 	}, nil
 }

@@ -102,7 +102,7 @@ func TestAccountReaderMapsSnapshot(t *testing.T) {
 			if req.GetAccountNo() != "A-4" || req.GetRequestId() != "request-5" {
 				t.Fatalf("request = %#v", req)
 			}
-			return &corev1.AccountSnapshot{AccountNo: "A-4", CustomerId: "C-7", Currency: "CNY", Status: "active", LedgerBalanceMinor: 1250, AvailableBalanceMinor: 1100}, nil
+			return &corev1.AccountSnapshot{AccountNo: "A-4", CustomerId: "C-7", Currency: "CNY", Status: "active", LedgerBalanceMinor: 1250, AvailableBalanceMinor: 1100, OpenBizDate: "2026-01-15", Branch: "B-9"}, nil
 		}})
 	})
 
@@ -110,7 +110,7 @@ func TestAccountReaderMapsSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetAccount: %v", err)
 	}
-	if got != (Account{AccountNo: "A-4", CustomerID: "C-7", Currency: "CNY", Status: "active", LedgerBalanceMinor: 1250, AvailableBalanceMinor: 1100}) {
+	if got != (Account{AccountNo: "A-4", CustomerID: "C-7", Currency: "CNY", Status: "active", LedgerBalanceMinor: 1250, AvailableBalanceMinor: 1100, OpenBizDate: "2026-01-15", Branch: "B-9"}) {
 		t.Fatalf("account = %#v", got)
 	}
 }

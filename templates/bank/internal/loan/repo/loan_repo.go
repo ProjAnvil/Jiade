@@ -179,7 +179,7 @@ func (r *LoanRepo) GetProfile(ctx context.Context, loanNo string) (domain.LoanPr
 	if p.Balance, err = domain.ParseCents(balance.String); err != nil {
 		return domain.LoanProfile{}, fmt.Errorf("repo: 解析借据余额: %w", err)
 	}
-	customer, err := r.customer.GetCustomer(ctx, p.CustID, "")
+	customer, err := r.customer.GetCustomer(ctx, p.CustID, serviceclient.RequestID(ctx))
 	if err != nil {
 		return domain.LoanProfile{}, fmt.Errorf("repo: 从 customer 查客户 %s: %w", p.CustID, err)
 	}

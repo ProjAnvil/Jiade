@@ -191,7 +191,7 @@ func (r *WealthRepo) GetHoldingProfile(ctx context.Context, holdingID string) (d
 	if err != nil {
 		return domain.WealthProfile{}, fmt.Errorf("repo: 解析持仓市值: %w", err)
 	}
-	customer, err := r.customer.GetCustomer(ctx, p.CustID, "")
+	customer, err := r.customer.GetCustomer(ctx, p.CustID, serviceclient.RequestID(ctx))
 	if err != nil {
 		return domain.WealthProfile{}, fmt.Errorf("repo: 从 customer 查客户 %s: %w", p.CustID, err)
 	}
