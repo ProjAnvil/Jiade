@@ -5,7 +5,6 @@ import (
 	"context"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,10 +15,14 @@ import (
 	"bank/internal/corebanking/repo"
 	"bank/internal/corebanking/service"
 	"bank/internal/platform/grpcx"
+	"bank/internal/platform/httpx"
 	"bank/internal/platform/pg"
 )
 
 func main() {
+	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	dbName := getenv("DB_NAME", "core_db")
 	db, err := pg.Open(dbName)
 	if err != nil {
@@ -43,31 +46,39 @@ func main() {
 		TxnSvc:   txnSvc,
 		Ledger:   ledgerRepo,
 	}
-	port := getenv("API_PORT", "8080")
-	srv := &http.Server{Addr: ":" + port, Handler: api.NewRouter(handlers)}
+	httpAddr := getenv("HTTP_ADDR", ":8080")
+	srv := httpx.NewServer(httpx.ServerConfig{
+		Service:  "core-banking",
+		Instance: getenv("INSTANCE_ID", "core-banking-1"),
+		Addr:     httpAddr,
+		Handler:  api.NewRouter(handlers),
+		Ready:    func(ctx context.Context) error { return db.PingContext(ctx) },
+	})
 
 	grpcServer := grpcx.NewServer(grpcx.ServerConfig{Ready: func(ctx context.Context) error { return db.PingContext(ctx) }})
 	corev1.RegisterAccountQueryServiceServer(grpcServer, api.NewAccountQueryServer(accountRepo, txnRepo))
-	grpcListener, err := net.Listen("tcp", ":"+getenv("GRPC_PORT", "9090"))
+	grpcAddr := getenv("GRPC_ADDR", ":9090")
+	grpcListener, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
 		log.Fatalf("core-banking gRPC 监听失败: %v", err)
 	}
 
 	go func() {
-		log.Printf("core-banking 监听 :%s (db=%s)", port, dbName)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal(err)
+		log.Printf("core-banking HTTP 监听 %s (db=%s)", httpAddr, dbName)
+		if err := srv.ListenAndServe(); err != nil && !httpx.IsClosed(err) {
+			log.Printf("core-banking HTTP 服务停止: %v", err)
+			stop()
 		}
 	}()
 	go func() {
+		log.Printf("core-banking gRPC 监听 %s", grpcAddr)
 		if err := grpcServer.Serve(grpcListener); err != nil {
 			log.Printf("core-banking gRPC 服务停止: %v", err)
+			stop()
 		}
 	}()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	<-signalCtx.Done()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
