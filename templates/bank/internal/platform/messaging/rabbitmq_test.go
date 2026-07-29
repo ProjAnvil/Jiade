@@ -226,6 +226,49 @@ func TestRabbitPublisherObservesIdleChannelClosureAndCloseIsIdempotent(t *testin
 	}
 }
 
+func TestRabbitPublisherCloseInterruptsPendingPublishAndIsConcurrentIdempotent(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	publisher, err := newRabbitPublisher(channel, "bank.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishResult := make(chan error, 1)
+	go func() {
+		publishResult <- publisher.Publish(context.Background(), "payment.initiated", testEnvelope(t))
+	}()
+	select {
+	case <-channel.published:
+	case <-time.After(time.Second):
+		t.Fatal("publisher did not start pending publish")
+	}
+
+	closeResults := make(chan error, 2)
+	go func() { closeResults <- publisher.Close() }()
+	go func() { closeResults <- publisher.Close() }()
+	for range 2 {
+		select {
+		case err := <-closeResults:
+			if err != nil {
+				t.Fatalf("Close error=%v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Close deadlocked behind pending publish")
+		}
+	}
+	select {
+	case err := <-publishResult:
+		if err == nil || !strings.Contains(err.Error(), "channel closed") {
+			t.Fatalf("pending Publish error=%v, want channel-closed failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pending Publish did not unblock after Close")
+	}
+	if channel.closeCount() != 1 {
+		t.Fatalf("channel close calls=%d, want 1", channel.closeCount())
+	}
+	assertPublisherRetired(t, publisher)
+}
+
 func assertPublisherRetired(t *testing.T, publisher *RabbitPublisher) {
 	t.Helper()
 	if err := publisher.Publish(context.Background(), "payment.initiated", testEnvelope(t)); err == nil || !strings.Contains(err.Error(), "retired") {
@@ -399,6 +442,87 @@ func TestProcessDeliveryRouteFailureNeverAcksSource(t *testing.T) {
 	}
 }
 
+func TestRouteReplacementPreservesEveryRelevantDeliveryProperty(t *testing.T) {
+	recorder := &txRecorder{}
+	router := &recordingRouter{recorder: recorder}
+	occurredAt := time.Date(2026, 7, 29, 12, 34, 56, 0, time.UTC)
+	delivery := amqp.Delivery{
+		Acknowledger:    recordingAcknowledger{recorder: recorder},
+		DeliveryTag:     17,
+		Headers:         amqp.Table{"tenant": "bank-1", "attempt": int32(2)},
+		ContentType:     "application/vnd.bank+json",
+		ContentEncoding: "gzip",
+		DeliveryMode:    amqp.Transient,
+		Priority:        7,
+		CorrelationId:   "correlation-literal",
+		ReplyTo:         "reply.literal",
+		Expiration:      "45000",
+		MessageId:       "message-literal",
+		Timestamp:       occurredAt,
+		Type:            "payment.literal.v1",
+		UserId:          "bank-user",
+		AppId:           "bank-payment",
+		Body:            []byte(`{"literal":true}`),
+	}
+	cause := errors.New("route for retry")
+
+	err := routeReplacement(
+		context.Background(),
+		cause,
+		delivery,
+		router,
+		"bank.retry",
+		"payment.literal.retry",
+	)
+	if !errors.Is(err, cause) {
+		t.Fatalf("routeReplacement error=%v, want %v", err, cause)
+	}
+	got := router.message
+	if got.ContentType != "application/vnd.bank+json" {
+		t.Fatalf("ContentType=%q", got.ContentType)
+	}
+	if got.ContentEncoding != "gzip" {
+		t.Fatalf("ContentEncoding=%q", got.ContentEncoding)
+	}
+	if got.DeliveryMode != amqp.Transient {
+		t.Fatalf("DeliveryMode=%d", got.DeliveryMode)
+	}
+	if got.Priority != 7 {
+		t.Fatalf("Priority=%d", got.Priority)
+	}
+	if got.CorrelationId != "correlation-literal" {
+		t.Fatalf("CorrelationId=%q", got.CorrelationId)
+	}
+	if got.ReplyTo != "reply.literal" {
+		t.Fatalf("ReplyTo=%q", got.ReplyTo)
+	}
+	if got.Expiration != "45000" {
+		t.Fatalf("Expiration=%q", got.Expiration)
+	}
+	if got.MessageId != "message-literal" {
+		t.Fatalf("MessageId=%q", got.MessageId)
+	}
+	if !got.Timestamp.Equal(occurredAt) {
+		t.Fatalf("Timestamp=%v", got.Timestamp)
+	}
+	if got.Type != "payment.literal.v1" {
+		t.Fatalf("Type=%q", got.Type)
+	}
+	if got.UserId != "bank-user" {
+		t.Fatalf("UserId=%q", got.UserId)
+	}
+	if got.AppId != "bank-payment" {
+		t.Fatalf("AppId=%q", got.AppId)
+	}
+	if !reflect.DeepEqual(got.Headers, amqp.Table{"tenant": "bank-1", "attempt": int32(2)}) {
+		t.Fatalf("Headers=%#v", got.Headers)
+	}
+	if !reflect.DeepEqual(got.Body, []byte(`{"literal":true}`)) {
+		t.Fatalf("Body=%q", got.Body)
+	}
+	assertEvents(t, recorder, "route:bank.retry:payment.literal.retry", "ack")
+}
+
 func retryPolicy(router ConfirmedRouter) RetryPolicy {
 	return RetryPolicy{
 		MaxAttempts:          3,
@@ -448,6 +572,7 @@ func recordingDelivery(recorder *txRecorder, body []byte) amqp.Delivery {
 		DeliveryTag:   1,
 		Headers:       amqp.Table{"tenant": "bank-1"},
 		ContentType:   "application/json",
+		DeliveryMode:  amqp.Persistent,
 		MessageId:     testEnvelopeMessageID(body),
 		Type:          "payment.initiated.v1",
 		CorrelationId: "correlation-1",

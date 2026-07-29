@@ -38,7 +38,8 @@ type RabbitPublisher struct {
 	exchange      string
 	confirmations <-chan amqp.Confirmation
 	returns       <-chan amqp.Return
-	mu            sync.Mutex
+	publishMu     sync.Mutex
+	stateMu       sync.Mutex
 	retired       bool
 	watcherStop   chan struct{}
 	watcherDone   chan struct{}
@@ -93,14 +94,7 @@ func (publisher *RabbitPublisher) Close() error {
 	if publisher == nil {
 		return nil
 	}
-	publisher.mu.Lock()
-	publisher.retired = true
-	publisher.stopWatcher()
-	publisher.closeOnce.Do(func() {
-		publisher.closeErr = publisher.channel.Close()
-	})
-	closeErr := publisher.closeErr
-	publisher.mu.Unlock()
+	closeErr := publisher.retire()
 	<-publisher.watcherDone
 	return closeErr
 }
@@ -158,21 +152,28 @@ func (publisher *RabbitPublisher) Route(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	message.DeliveryMode = amqp.Persistent
+	if message.DeliveryMode == 0 {
+		message.DeliveryMode = amqp.Persistent
+	}
 
-	publisher.mu.Lock()
-	defer publisher.mu.Unlock()
-	if publisher.retired {
+	if publisher.isRetired() {
+		return errors.New("rabbit publisher channel is retired")
+	}
+	publisher.publishMu.Lock()
+	defer publisher.publishMu.Unlock()
+	if publisher.isRetired() {
 		return errors.New("rabbit publisher channel is retired")
 	}
 	sequence := publisher.channel.GetNextPublishSeqNo()
 	err := publisher.channel.PublishWithContext(ctx, exchange, routingKey, true, false, message)
 	if err != nil {
-		publisher.retireLocked()
+		_ = publisher.retire()
 		return fmt.Errorf("publish envelope: %w", err)
 	}
 	if err := publisher.awaitOutcome(ctx, sequence, message.MessageId); err != nil {
-		publisher.retireLocked()
+		if !publisher.isRetired() {
+			_ = publisher.retire()
+		}
 		return err
 	}
 	return nil
@@ -222,15 +223,27 @@ func (publisher *RabbitPublisher) awaitOutcome(ctx context.Context, sequence uin
 	}
 }
 
-func (publisher *RabbitPublisher) retireLocked() {
-	if publisher.retired {
-		return
-	}
+func (publisher *RabbitPublisher) retire() error {
+	publisher.stateMu.Lock()
 	publisher.retired = true
+	publisher.stateMu.Unlock()
+	publisher.signalOnce.Do(func() { close(publisher.channelClosed) })
 	publisher.stopWatcher()
 	publisher.closeOnce.Do(func() {
-		publisher.closeErr = publisher.channel.Close()
+		closeErr := publisher.channel.Close()
+		publisher.stateMu.Lock()
+		publisher.closeErr = closeErr
+		publisher.stateMu.Unlock()
 	})
+	publisher.stateMu.Lock()
+	defer publisher.stateMu.Unlock()
+	return publisher.closeErr
+}
+
+func (publisher *RabbitPublisher) isRetired() bool {
+	publisher.stateMu.Lock()
+	defer publisher.stateMu.Unlock()
+	return publisher.retired
 }
 
 func (publisher *RabbitPublisher) watchClose(notifications <-chan *amqp.Error) {
@@ -238,9 +251,9 @@ func (publisher *RabbitPublisher) watchClose(notifications <-chan *amqp.Error) {
 	select {
 	case <-notifications:
 		publisher.signalOnce.Do(func() { close(publisher.channelClosed) })
-		publisher.mu.Lock()
+		publisher.stateMu.Lock()
 		publisher.retired = true
-		publisher.mu.Unlock()
+		publisher.stateMu.Unlock()
 		publisher.stopWatcher()
 	case <-publisher.watcherStop:
 	}
@@ -366,7 +379,7 @@ func routeReplacement(
 		Headers:         cloneHeaders(delivery.Headers),
 		ContentType:     delivery.ContentType,
 		ContentEncoding: delivery.ContentEncoding,
-		DeliveryMode:    amqp.Persistent,
+		DeliveryMode:    delivery.DeliveryMode,
 		Priority:        delivery.Priority,
 		CorrelationId:   delivery.CorrelationId,
 		ReplyTo:         delivery.ReplyTo,
@@ -374,6 +387,7 @@ func routeReplacement(
 		MessageId:       delivery.MessageId,
 		Timestamp:       delivery.Timestamp,
 		Type:            delivery.Type,
+		UserId:          delivery.UserId,
 		AppId:           delivery.AppId,
 		Body:            append([]byte(nil), delivery.Body...),
 	}
