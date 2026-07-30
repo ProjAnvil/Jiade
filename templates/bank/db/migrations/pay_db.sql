@@ -68,3 +68,82 @@ CREATE TABLE IF NOT EXISTS settlement_record (
     status     TEXT DEFAULT 'settled',
     settle_ts  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE workflow_instance (
+    workflow_id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    definition_version INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'preparing',
+    input_json JSONB NOT NULL,
+    prepared_context_json JSONB,
+    current_action INTEGER NOT NULL DEFAULT 0,
+    revision BIGINT NOT NULL DEFAULT 0,
+    lease_owner TEXT,
+    lease_until TIMESTAMPTZ,
+    next_wakeup_at TIMESTAMPTZ,
+    operational_deadline TIMESTAMPTZ,
+    last_error_class TEXT,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT ck_workflow_instance_status CHECK (status IN (
+        'preparing',
+        'ready',
+        'running',
+        'succeeded',
+        'rejected',
+        'compensating',
+        'compensated',
+        'compensation_failed'
+    )),
+    CONSTRAINT ck_workflow_instance_input_json CHECK (jsonb_typeof(input_json) = 'object'),
+    CONSTRAINT ck_workflow_instance_prepared_context CHECK (
+        prepared_context_json IS NULL
+        OR jsonb_typeof(prepared_context_json) = 'object'
+    )
+);
+
+CREATE INDEX idx_workflow_instance_status_wakeup
+    ON workflow_instance(status, next_wakeup_at);
+CREATE INDEX idx_workflow_instance_lease_until
+    ON workflow_instance(lease_until);
+
+CREATE TABLE workflow_action (
+    action_id BIGSERIAL PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    action_index INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    direction TEXT NOT NULL DEFAULT 'forward',
+    attempt INTEGER NOT NULL DEFAULT 0,
+    idempotency_key TEXT NOT NULL,
+    command_id TEXT,
+    result_event_id TEXT,
+    deadline_at TIMESTAMPTZ,
+    output JSONB,
+    last_error_class TEXT,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (workflow_id, action_index),
+    CONSTRAINT fk_workflow_action_instance
+        FOREIGN KEY (workflow_id) REFERENCES workflow_instance(workflow_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT ck_workflow_action_status CHECK (status IN (
+        'pending',
+        'waiting_result',
+        'succeeded',
+        'failed',
+        'compensating',
+        'compensated',
+        'compensation_failed'
+    )),
+    CONSTRAINT ck_workflow_action_direction CHECK (direction IN ('forward', 'compensation')),
+    CONSTRAINT ck_workflow_action_output CHECK (
+        output IS NULL
+        OR jsonb_typeof(output) = 'object'
+    )
+);
+
+CREATE UNIQUE INDEX idx_workflow_action_command_id
+    ON workflow_action(command_id) WHERE command_id IS NOT NULL;
