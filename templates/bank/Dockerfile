@@ -11,6 +11,10 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 FROM alpine:3.20
 COPY --from=build /out/service /usr/local/bin/service
+# cmd/seed reads db/migrations/*.sql at runtime. Keep migrations in the
+# immutable image and use /app as the deterministic relative-path root.
+COPY db/migrations /app/db/migrations
+WORKDIR /app
 # BusyBox wget is retained solely for the in-container Compose healthcheck.
 EXPOSE 8080 9090
 USER 65532:65532
