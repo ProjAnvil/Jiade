@@ -19,7 +19,7 @@ func TestCopy_CreatesFullProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	must := []string{
-		"go.mod", "go.sum", "docker-compose.yaml", "Dockerfile",
+		"go.mod", "go.sum", "compose.yaml", "Dockerfile",
 		"template.yaml", ".env.example", "Makefile",
 		"README.md", "ARCHITECTURE.md",
 		"cmd/core-banking/main.go", "cmd/seed/main.go",

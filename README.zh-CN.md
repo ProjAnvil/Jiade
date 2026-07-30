@@ -12,7 +12,7 @@
 
 | 模板 | 是什么 | 文档 |
 |------|--------|------|
-| `bank` | 银行核心系统缩影——7 个 Go 服务、7 个 PostgreSQL 库、复式记账总账、逐日滚存余额。 | [templates/bank/README.md](templates/bank/README.md) · [ARCHITECTURE.md](templates/bank/ARCHITECTURE.md) |
+| `bank` | 银行核心系统缩影——7 个 Go 服务、7 个独立 PostgreSQL 库、内部 gRPC 读取、RabbitMQ 命令/事件、Traefik 网关（:18000）、复式记账总账、逐日滚存余额。 | [templates/bank/README.md](templates/bank/README.md) · [ARCHITECTURE.md](templates/bank/ARCHITECTURE.md) |
 | `commerce` | 电商后端缩影——6 个 Go 服务、6 个 PostgreSQL 库、RabbitMQ saga、Traefik 网关。 | [templates/commerce/README.md](templates/commerce/README.md) · [ARCHITECTURE.md](templates/commerce/ARCHITECTURE.md) |
 
 ```bash
@@ -52,9 +52,9 @@ cd mybank
 jiade up      # docker compose up -d
 jiade seed    # go run ./cmd/seed --scale=dev --reset
 
-# 3. 探一下 healthz（端口与端点因模板而异——见各模板 README）。
-curl localhost:18080/healthz                    # bank：core-banking
-curl localhost:18100/api/v1/products?limit=1     # commerce：Traefik 网关
+# 3. 经网关探一下公开 REST 端点（端口因模板而异——见各模板 README）。
+curl localhost:18000/api/v1/accounts/D0000000001  # bank：Traefik 网关
+curl localhost:18100/api/v1/products?limit=1       # commerce：Traefik 网关
 
 # 4. 拆除。
 jiade down

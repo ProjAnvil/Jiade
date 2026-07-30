@@ -28,11 +28,13 @@ func TestManifest_Bank(t *testing.T) {
 	if m.Name != "bank" {
 		t.Errorf("name=%q want bank", m.Name)
 	}
-	// Spec B-4b: 7 services (+loan:18085 / wealth:18086).
+	// 7 services; every service listens on container port 8080 behind the
+	// Traefik gateway (host-published on :18000). Per-service host ports were
+	// removed when the topology gained a dedicated gateway.
 	if len(m.Services) != 7 {
 		t.Fatalf("services=%+v want 7", m.Services)
 	}
-	wantSvc := map[string]int{"core-banking": 18080, "customer": 18081, "payment": 18082, "reward": 18083, "risk": 18084, "loan": 18085, "wealth": 18086}
+	wantSvc := map[string]int{"core-banking": 8080, "customer": 8080, "payment": 8080, "reward": 8080, "risk": 8080, "loan": 8080, "wealth": 8080}
 	for _, s := range m.Services {
 		if port, ok := wantSvc[s.Name]; !ok || s.Port != port {
 			t.Errorf("service %+v not in %v", s, wantSvc)
