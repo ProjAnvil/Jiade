@@ -64,6 +64,7 @@ const (
 	EventHoldReleaseFailed     = "core.hold-release-failed.v1"
 	EventTransferFailed        = "core.transfer-failed.v1"
 	EventTransferReverseFailed = "core.transfer-reverse-failed.v1"
+	EventCommandRejected       = "core.command-rejected.v1"
 )
 
 // Result routing keys published to the outbox.
@@ -74,6 +75,7 @@ const (
 	RouteHoldReleaseFailed     = "core.hold.release_failed"
 	RouteTransferFailed        = "core.transfer.failed"
 	RouteTransferReverseFailed = "core.transfer.reverse_failed"
+	RouteCommandRejected       = "core.command.rejected"
 )
 
 // ConsumerName is the Inbox consumer identifier used for deduplication.
@@ -154,6 +156,8 @@ func (c *Consumer) handler(tx *sql.Tx) func(context.Context, messaging.Envelope)
 
 // processEnvelope dispatches the envelope to the appropriate handler based on
 // message type. All consumer-level outbox writes (if any) use the same tx.
+// Unknown command types emit an invalid_message failure event (terminal) so the
+// saga engine can react, and return nil so ProcessDelivery acks the delivery.
 func (c *Consumer) processEnvelope(ctx context.Context, q pg.DBTX, env messaging.Envelope) error {
 	switch env.MessageType {
 	case CmdPlaceHold:
@@ -165,7 +169,8 @@ func (c *Consumer) processEnvelope(ctx context.Context, q pg.DBTX, env messaging
 	case CmdReverseTransfer:
 		return c.handleReverseTransfer(ctx, q, env)
 	default:
-		return fmt.Errorf("corebanking consumer: unknown command type %q", env.MessageType)
+		return c.emitFailure(ctx, q, env, EventCommandRejected, RouteCommandRejected,
+			workflow.InvalidMessage, fmt.Sprintf("unknown command type %q", env.MessageType))
 	}
 }
 

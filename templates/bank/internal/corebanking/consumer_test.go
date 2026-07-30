@@ -497,12 +497,29 @@ func TestConsumer_PostHeldTransfer_InvariantFailure_EmitsFailureEvent(t *testing
 	}
 }
 
-func TestConsumer_UnknownMessageType_ReturnsError(t *testing.T) {
-	c, _, _, _ := newTestConsumer(t)
+func TestConsumer_UnknownMessageType_EmitsInvalidMessage(t *testing.T) {
+	c, _, _, outbox := newTestConsumer(t)
 	env := makeEnvelope("core.unknown-command.v1", map[string]any{})
 	err := c.processEnvelope(context.Background(), nil, env)
-	if err == nil {
-		t.Fatal("unknown message type should return error")
+	if err != nil {
+		t.Fatalf("unknown message type should NOT return error (emit invalid_message event + ack): %v", err)
+	}
+	if len(outbox.msgs) != 1 {
+		t.Fatalf("outbox msgs = %d, want 1", len(outbox.msgs))
+	}
+	msg := outbox.msgs[0]
+	if msg.Envelope.MessageType != EventCommandRejected {
+		t.Errorf("event type = %q, want %q", msg.Envelope.MessageType, EventCommandRejected)
+	}
+	if msg.RoutingKey != RouteCommandRejected {
+		t.Errorf("route = %q, want %q", msg.RoutingKey, RouteCommandRejected)
+	}
+	var payload failurePayload
+	if err := json.Unmarshal(msg.Envelope.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.ErrorClass != string(workflow.InvalidMessage) {
+		t.Errorf("error_class = %q, want %q", payload.ErrorClass, workflow.InvalidMessage)
 	}
 }
 
