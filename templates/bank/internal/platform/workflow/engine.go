@@ -31,7 +31,22 @@ type Engine struct {
 	store    Store
 	registry *Registry
 	config   EngineConfig
+	// metrics, if non-nil, records Prometheus observations at every state
+	// transition. Nil is safe: every (*Metrics) recording method is a no-op
+	// on a nil receiver, so Engines constructed without SetMetrics (the
+	// Tasks 1-7 default) incur no metric overhead and need no rewriting.
+	metrics *Metrics
 }
+
+// SetMetrics wires a Metrics collector into the Engine. Pass a *Metrics built
+// via NewMetrics; pass nil to disable metric recording (the default). The
+// Engine does not take ownership of the Metrics value's lifecycle — callers
+// must keep the underlying Registerer alive for as long as the Engine records.
+//
+// SetMetrics is intended for the production wiring (or tests asserting metric
+// values). Existing Tasks 1-7 tests never call it, so their Engines default to
+// a nil (no-op) Metrics and remain unchanged.
+func (e *Engine) SetMetrics(m *Metrics) { e.metrics = m }
 
 // NewEngine wires a Store, a populated Registry, and an EngineConfig into an
 // Engine. Zero-valued EngineConfig fields yield the documented defaults:
@@ -71,7 +86,14 @@ func (e *Engine) Start(ctx context.Context, req StartRequest) (Instance, error) 
 	if _, ok := e.registry.Get(req.Type, req.Version); !ok {
 		return Instance{}, fmt.Errorf("%w: type=%q version=%d", ErrDefinitionNotFound, req.Type, req.Version)
 	}
-	return e.store.Create(ctx, req)
+	inst, err := e.store.Create(ctx, req)
+	if err != nil {
+		return Instance{}, err
+	}
+	// Record the initial preparing gauge contribution only on a successful
+	// Create; a failed Create leaves the gauge untouched.
+	e.metrics.enterStatus(StatusPreparing)
+	return inst, nil
 }
 
 // Prepare runs the Definition's Prepare outside any transaction to obtain the
@@ -144,7 +166,8 @@ func (e *Engine) readHeader(ctx context.Context, id string) (Instance, error) {
 // StatusRejected, recording the business error. Idempotent: if the instance
 // is no longer preparing (race or duplicate), it is left untouched.
 func (e *Engine) rejectInstance(ctx context.Context, id string, prepareErr error) error {
-	return e.store.WithInstance(ctx, id, func(tx Tx) error {
+	var transitioned bool
+	err := e.store.WithInstance(ctx, id, func(tx Tx) error {
 		current := tx.Instance()
 		if current.Status != StatusPreparing {
 			return nil
@@ -154,8 +177,13 @@ func (e *Engine) rejectInstance(ctx context.Context, id string, prepareErr error
 		inst.LastError = prepareErr.Error()
 		inst.LastErrorClass = BusinessRejected
 		inst.Revision++
+		transitioned = true
 		return tx.SaveInstance(inst)
 	})
+	if err == nil && transitioned {
+		e.metrics.changeStatus(StatusPreparing, StatusRejected)
+	}
+	return err
 }
 
 // dispatchFirstAction performs the real StatusPreparing → StatusRunning
@@ -164,7 +192,8 @@ func (e *Engine) rejectInstance(ctx context.Context, id string, prepareErr error
 // ActionRecord, and AppendOutbox-es the dispatch command — all inside the
 // Store transaction. Idempotent via the StatusPreparing re-check.
 func (e *Engine) dispatchFirstAction(ctx context.Context, id string, def Definition, preparedContext []byte) error {
-	return e.store.WithInstance(ctx, id, func(tx Tx) error {
+	var transitioned bool
+	err := e.store.WithInstance(ctx, id, func(tx Tx) error {
 		current := tx.Instance()
 		// Idempotent: if another worker advanced the instance between our
 		// readHeader and this lock, leave it alone.
@@ -180,6 +209,7 @@ func (e *Engine) dispatchFirstAction(ctx context.Context, id string, def Definit
 		now := e.config.Now()
 		inst.OperationalDeadline = now.Add(e.config.OperationalDeadline)
 		inst.Revision++
+		transitioned = true
 
 		if err := tx.SaveInstance(inst); err != nil {
 			return fmt.Errorf("save instance: %w", err)
@@ -187,6 +217,10 @@ func (e *Engine) dispatchFirstAction(ctx context.Context, id string, def Definit
 
 		return e.persistActionDispatch(tx, inst, def, ctx)
 	})
+	if err == nil && transitioned {
+		e.metrics.changeStatus(StatusPreparing, StatusRunning)
+	}
+	return err
 }
 
 // persistActionDispatch executes the action at inst.CurrentAction, persists its
@@ -201,7 +235,14 @@ func (e *Engine) persistActionDispatch(tx Tx, inst Instance, def Definition, ctx
 	action := actions[idx]
 
 	view := View{Instance: inst, Action: ActionRecord{Index: idx, Name: action.Name()}}
+	start := e.config.Now()
 	dispatch, err := action.Execute(ctx, view)
+	took := e.config.Now().Sub(start)
+	// Record dispatch metrics regardless of the error: an Execute that failed
+	// still consumed a dispatch attempt and is operationally interesting. The
+	// surrounding Tx rolls back on error, but the metric observation persists
+	// — operators want to see failed dispatches too.
+	e.metrics.observeAction(action.Name(), directionForward, took)
 	if err != nil {
 		// Propagate to caller for retry; the Tx rolls back.
 		return fmt.Errorf("action %q Execute: %w", action.Name(), err)
@@ -392,7 +433,11 @@ func (e *Engine) applyForwardResult(tx Tx, current *Instance, env messaging.Enve
 	// Last action succeeded — workflow is done.
 	inst.Status = StatusSucceeded
 	inst.Revision++
-	return tx.SaveInstance(inst)
+	if err := tx.SaveInstance(inst); err != nil {
+		return fmt.Errorf("save instance: %w", err)
+	}
+	e.metrics.changeStatus(StatusRunning, StatusSucceeded)
+	return nil
 }
 
 // isTerminalExecutionFailure reports whether an ErrorClass from a failed
@@ -434,13 +479,18 @@ func (e *Engine) beginCompensation(tx Tx, inst Instance, def Definition, ctx con
 		// Nothing to undo.
 		inst.Status = StatusCompensated
 		inst.Revision++
-		return tx.SaveInstance(inst)
+		if err := tx.SaveInstance(inst); err != nil {
+			return fmt.Errorf("save instance: %w", err)
+		}
+		e.metrics.changeStatus(StatusRunning, StatusCompensated)
+		return nil
 	}
 	inst.CurrentAction = target
 	inst.Revision++
 	if err := tx.SaveInstance(inst); err != nil {
 		return fmt.Errorf("save instance: %w", err)
 	}
+	e.metrics.changeStatus(StatusRunning, StatusCompensating)
 	return e.persistCompensationDispatch(tx, inst, def, target, 1, ctx)
 }
 
@@ -470,7 +520,14 @@ func (e *Engine) persistCompensationDispatch(tx Tx, inst Instance, def Definitio
 	// View carries the CURRENT action record (still succeeded from the forward
 	// pass) so Compensate can read the forward Output to construct the undo.
 	view := View{Instance: inst, Action: inst.Actions[idx]}
+	start := e.config.Now()
 	dispatch, err := action.Compensate(ctx, view)
+	took := e.config.Now().Sub(start)
+	// Record dispatch metrics regardless of the error — a failed Compensate is
+	// still a dispatch attempt the engine acted on, and the surrounding Tx
+	// rolls back leaving instance state untouched but the metric persistent.
+	e.metrics.observeAction(action.Name(), directionCompensation, took)
+	e.metrics.observeCompensationDispatch(action.Name())
 	if err != nil {
 		return fmt.Errorf("action %q Compensate: %w", action.Name(), err)
 	}
@@ -565,7 +622,8 @@ func (e *Engine) applyCompensationResult(tx Tx, current *Instance, env messaging
 		if actionRec.Attempt >= e.config.CompensationMaxAttempts {
 			// Exhausted: mark action and instance compensation_failed.
 			// CurrentAction is preserved so the operator can see which step
-			// could not be undone. (The failure metric is Task 8.)
+			// could not be undone. This is also where the deferred
+			// workflow_compensation_failures_total counter fires.
 			actionRec.Status = ActionCompensationFailed
 			actionRec.LastErrorClass = outcome.Class
 			actionRec.LastError = outcome.Message
@@ -577,7 +635,12 @@ func (e *Engine) applyCompensationResult(tx Tx, current *Instance, env messaging
 			inst.LastErrorClass = outcome.Class
 			inst.LastError = outcome.Message
 			inst.Revision++
-			return tx.SaveInstance(inst)
+			if err := tx.SaveInstance(inst); err != nil {
+				return fmt.Errorf("save instance: %w", err)
+			}
+			e.metrics.changeStatus(StatusCompensating, StatusCompensationFailed)
+			e.metrics.recordCompensationFailure(actionRec.Name)
+			return nil
 		}
 		// Retry: same idempotency key, fresh CommandID, attempt+1.
 		return e.persistCompensationDispatch(tx, inst, def, actionIdx, actionRec.Attempt+1, ctx)
@@ -597,7 +660,11 @@ func (e *Engine) applyCompensationResult(tx Tx, current *Instance, env messaging
 	if target < 0 {
 		inst.Status = StatusCompensated
 		inst.Revision++
-		return tx.SaveInstance(inst)
+		if err := tx.SaveInstance(inst); err != nil {
+			return fmt.Errorf("save instance: %w", err)
+		}
+		e.metrics.changeStatus(StatusCompensating, StatusCompensated)
+		return nil
 	}
 	inst.CurrentAction = target
 	inst.Revision++
@@ -693,8 +760,19 @@ func (e *Engine) Redispatch(ctx context.Context, id string) error {
 		}
 		action := defActions[actionIdx]
 
+		// Record the waiting age of this timed-out action BEFORE re-dispatch:
+		// operators use this gauge to spot chronically stuck workflows. The
+		// value is now - DeadlineAt (how long past the deadline the action has
+		// been waiting).
+		e.metrics.recordWaitingAge(now.Sub(actionRec.DeadlineAt).Seconds())
+
 		view := View{Instance: *current, Action: actionRec}
+		start := e.config.Now()
 		dispatch, err := action.Execute(ctx, view)
+		took := e.config.Now().Sub(start)
+		// A re-dispatch is still a dispatch attempt — record duration and bump
+		// the attempt counter regardless of the error outcome.
+		e.metrics.observeAction(actionRec.Name, directionForward, took)
 		if err != nil {
 			return fmt.Errorf("action %q Execute on redispatch: %w", actionRec.Name, err)
 		}
