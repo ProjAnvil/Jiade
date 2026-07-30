@@ -211,8 +211,11 @@ func (r *PaymentIntentRepo) UpdateStatusByWorkflowID(ctx context.Context, workfl
 }
 
 // MarkReversedByWorkflowID flips the reversed flag on the intent owning
-// workflowID. Called by the reverse API endpoint. Returns ErrWorkflowNotFound
-// when the workflow id does not exist (zero rows affected).
+// workflowID. It is a FUTURE hook reserved for the deferred reversal-completion
+// auto-detection follow-up (the consumer will call it once that feature lands
+// and it detects the reversal workflow reaching StatusSucceeded). It is NOT
+// currently called from production code. Returns ErrWorkflowNotFound when the
+// workflow id does not exist (zero rows affected).
 func (r *PaymentIntentRepo) MarkReversedByWorkflowID(ctx context.Context, workflowID string) error {
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE payment_intent
@@ -889,8 +892,9 @@ func (o *PgCompletionOutbox) EmitCompletion(ctx context.Context, env messaging.E
 }
 
 // ---------------------------------------------------------------------------
-// Reversal helpers — used by the reverse API endpoint and the consumer's
-// reversal-completion detection.
+// Reversal helpers. MarkReversalPendingByWorkflowID is used by the reverse API
+// endpoint; MarkReversedByWorkflowID is a FUTURE hook for the deferred
+// reversal-completion auto-detection and is not yet called in production.
 // ---------------------------------------------------------------------------
 
 // MarkReversalPendingByWorkflowID sets status='reversal_pending' on the
@@ -899,8 +903,9 @@ func (o *PgCompletionOutbox) EmitCompletion(ctx context.Context, env messaging.E
 //
 // This is the Task-7 follow-up fix: the reverse endpoint MUST NOT persist
 // reversed=true before the reversal saga runs. Instead it persists
-// reversal_pending; the consumer flips reversed to true only after the
-// payment-reversal workflow reaches StatusSucceeded.
+// reversal_pending and leaves reversed=false. Auto-flipping reversed to true
+// when the payment-reversal workflow reaches StatusSucceeded is a DEFERRED
+// follow-up; until it lands, the operator polls via the reversal_workflow_id.
 func (r *PaymentIntentRepo) MarkReversalPendingByWorkflowID(ctx context.Context, workflowID string) error {
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE payment_intent
@@ -922,7 +927,8 @@ func (r *PaymentIntentRepo) MarkReversalPendingByWorkflowID(ctx context.Context,
 }
 
 // IntentReversalPending is the status recorded when the reverse endpoint has
-// started a payment-reversal workflow but the reversal has not yet
-// completed. It is an intermediate state: the consumer transitions it to
-// IntentReversed once the reversal workflow succeeds.
+// started a payment-reversal workflow but the reversal has not yet completed.
+// It is an intermediate state; transitioning it to IntentReversed once the
+// reversal workflow succeeds is a DEFERRED follow-up (until that lands, the
+// operator polls via the returned reversal_workflow_id).
 const IntentReversalPending PaymentIntentStatus = "reversal_pending"

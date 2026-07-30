@@ -276,9 +276,11 @@ func (a *paymentWorkflowAPI) Status(ctx context.Context, workflowID string) (api
 // Reverse starts a payment-reversal workflow that undoes a SUCCEEDED
 // payment-transfer by dispatching core.reverse-transfer.v1. The Task-7
 // implementation prematurely persisted reversed=true before the reversal saga
-// ran; Task 8 fixes this by recording reversal_pending and only flipping to
-// reversed after the reversal workflow succeeds (the consumer detects the
-// transition via Engine.ApplyResult and calls MarkReversedByWorkflowID).
+// ran; Task 8 fixes this by recording reversal_pending and leaving
+// reversed=false. Automatically flipping the original intent to reversed=true
+// when the reversal workflow succeeds is a DEFERRED follow-up; until that
+// lands, the operator polls the reversal saga via the returned
+// reversal_workflow_id.
 //
 // The endpoint:
 //  1. Loads the original intent to verify it exists and capture context.
@@ -286,7 +288,7 @@ func (a *paymentWorkflowAPI) Status(ctx context.Context, workflowID string) (api
 //     extract the voucher_no the reversal must reference.
 //  3. Atomically starts a new payment-reversal workflow instance via
 //     Engine.Start + Engine.Prepare.
-//  4. Marks the original intent reversal_pending.
+//  4. Marks the original intent reversal_pending (reversed stays false).
 //  5. Returns the reversal workflow id so the caller can poll its status.
 func (a *paymentWorkflowAPI) Reverse(ctx context.Context, workflowID string) (api.ReverseWorkflowResponse, error) {
 	intent, err := a.intents.GetByWorkflowID(ctx, workflowID)
@@ -331,8 +333,9 @@ func (a *paymentWorkflowAPI) Reverse(ctx context.Context, workflowID string) (ap
 	}
 
 	// Record reversal_pending on the original intent so GET reports the
-	// reversal-in-flight status. reversed=true is set later by the consumer
-	// when the reversal workflow reaches StatusSucceeded.
+	// reversal-in-flight status. reversed stays false here; auto-flipping it
+	// to true on reversal-workflow success is a DEFERRED follow-up (the
+	// operator polls via the reversal_workflow_id returned below).
 	if err := a.intents.MarkReversalPendingByWorkflowID(ctx, workflowID); err != nil {
 		return api.ReverseWorkflowResponse{}, fmt.Errorf("mark reversal_pending: %w", err)
 	}
