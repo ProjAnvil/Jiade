@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"time"
 
 	"bank/internal/platform/messaging"
 )
@@ -22,6 +23,15 @@ var (
 	// fails validation (wrong workflow/action/command/event-type or unexpected
 	// action state). The workflow state is left unchanged.
 	ErrInvalidMessage = errors.New("invalid result message")
+	// ErrLeaseNotHeld is returned by Store.RenewLease when the caller does not
+	// currently own the lease on the target instance (the lease may have
+	// expired and been claimed by another owner).
+	ErrLeaseNotHeld = errors.New("lease not held by caller")
+	// ErrDefinitionUnavailable is returned by Recovery.AuditDefinitions when a
+	// non-terminal workflow instance references a (Type, Version) pair that is
+	// not registered in the Registry. This prevents a worker from silently
+	// abandoning instances whose definitions it cannot resolve at startup.
+	ErrDefinitionUnavailable = errors.New("workflow definition unavailable for non-terminal instance")
 )
 
 // Store is the persistence boundary the Engine uses to create workflow
@@ -43,6 +53,38 @@ type Store interface {
 	// stable for the lifetime of fn and reflects writes performed via
 	// SaveInstance/SaveAction within the same callback (read-your-writes).
 	WithInstance(ctx context.Context, id string, fn func(Tx) error) error
+
+	// ClaimRunnable atomically claims up to limit instances that are runnable
+	// (have work the recovery loop can do right now — preparing, a timed-out
+	// waiting action, or a transiently-failed action) and whose lease is
+	// available (no LeaseOwner or LeaseUntil <= now). On each claimed instance
+	// it sets LeaseOwner=owner, LeaseUntil=now.Add(lease), bumps Revision, and
+	// returns the instance id. A lease that has not yet expired cannot be
+	// stolen — not even by the same owner (use RenewLease to extend).
+	ClaimRunnable(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]string, error)
+
+	// RenewLease extends the lease on instance id for owner until
+	// now.Add(lease). Returns ErrLeaseNotHeld if owner does not currently hold
+	// the lease, or ErrInstanceNotFound if the instance does not exist.
+	RenewLease(ctx context.Context, id, owner string, now time.Time, lease time.Duration) error
+
+	// ReleaseLease clears the lease on instance id if it is currently held by
+	// owner. It is a no-op if the instance is missing or leased by a different
+	// owner (the lease may have expired and been re-claimed between claim and
+	// release).
+	ReleaseLease(ctx context.Context, id, owner string) error
+
+	// TimedOut returns up to limit ids of instances whose current action is
+	// waiting for a result (forward ActionWaitingResult or compensation
+	// ActionCompensating) and whose DeadlineAt has passed (DeadlineAt < now).
+	// Read-only — does not claim or modify instances.
+	TimedOut(ctx context.Context, now time.Time, limit int) ([]string, error)
+
+	// NonTerminalDefinitions returns the distinct (Type, Version) pairs
+	// referencing definitions of all non-terminal instances. Used by
+	// Recovery.AuditDefinitions at startup to detect instances whose
+	// definition has been removed from the Registry.
+	NonTerminalDefinitions(ctx context.Context) ([]DefinitionRef, error)
 }
 
 // Tx is the per-instance transactional unit of work handed to Engine code

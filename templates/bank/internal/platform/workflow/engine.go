@@ -648,6 +648,80 @@ func buildCommandEnvelope(workflowID, actionName string, action ActionRecord, di
 	return env
 }
 
+// Redispatch re-emits the command for an instance whose current action is
+// waiting for a result and has exceeded its DeadlineAt (a waiting-action
+// timeout). The re-dispatched envelope carries a NEW MessageID (the transport
+// identity changes so the message can traverse the broker again) but the SAME
+// CommandID and IdempotencyKey as the original dispatch — so the recipient
+// deduplicates the command if it was already processed.
+//
+// Redispatch is idempotent and safe to call speculatively: if the instance is
+// not in StatusRunning, the current action is not ActionWaitingResult, or the
+// deadline has not yet passed, it returns nil without side effects.
+//
+// The action's DeadlineAt is pushed forward by the action's configured
+// Deadline duration (from Dispatch) so the next timeout window starts fresh;
+// this prevents the recovery loop from re-dispatching the same command on
+// every poll cycle. Revision is bumped to signal the state change.
+func (e *Engine) Redispatch(ctx context.Context, id string) error {
+	return e.store.WithInstance(ctx, id, func(tx Tx) error {
+		current := tx.Instance()
+		if current.Status != StatusRunning {
+			return nil
+		}
+		actionIdx := current.CurrentAction
+		if actionIdx < 0 || actionIdx >= len(current.Actions) {
+			return nil
+		}
+		actionRec := current.Actions[actionIdx]
+		if actionRec.Status != ActionWaitingResult {
+			return nil
+		}
+		now := e.config.Now()
+		if actionRec.DeadlineAt.IsZero() || !now.After(actionRec.DeadlineAt) {
+			return nil
+		}
+
+		def, ok := e.registry.Get(current.Type, current.Version)
+		if !ok {
+			return fmt.Errorf("%w: type=%q version=%d", ErrDefinitionNotFound, current.Type, current.Version)
+		}
+		defActions := def.Actions()
+		if actionIdx >= len(defActions) {
+			return fmt.Errorf("%w: action index %d exceeds definition actions (%d)",
+				ErrInvalidMessage, actionIdx, len(defActions))
+		}
+		action := defActions[actionIdx]
+
+		view := View{Instance: *current, Action: actionRec}
+		dispatch, err := action.Execute(ctx, view)
+		if err != nil {
+			return fmt.Errorf("action %q Execute on redispatch: %w", actionRec.Name, err)
+		}
+
+		// Push the deadline forward so the next timeout window starts fresh.
+		actionRec.DeadlineAt = deadlineAt(now, dispatch.Deadline)
+		if err := tx.SaveAction(actionRec); err != nil {
+			return fmt.Errorf("save action %q on redispatch: %w", actionRec.Name, err)
+		}
+
+		inst := *current
+		inst.Revision++
+		if err := tx.SaveInstance(inst); err != nil {
+			return fmt.Errorf("save instance on redispatch: %w", err)
+		}
+
+		// buildCommandEnvelope calls NewEnvelope which generates a fresh
+		// MessageID; the CommandID and IdempotencyKey come from the existing
+		// ActionRecord and are therefore STABLE across re-dispatches.
+		env := buildCommandEnvelope(inst.ID, actionRec.Name, actionRec, dispatch, e.config.Now)
+		if err := tx.AppendOutbox(env, dispatch.RoutingKey); err != nil {
+			return fmt.Errorf("append outbox for redispatch %q: %w", actionRec.Name, err)
+		}
+		return nil
+	})
+}
+
 // deadlineAt returns the absolute deadline for an action given its dispatch
 // duration; a zero duration yields the start time.
 func deadlineAt(now time.Time, duration time.Duration) time.Time {
