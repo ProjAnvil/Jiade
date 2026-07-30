@@ -119,3 +119,39 @@ CREATE TABLE IF NOT EXISTS funds_hold (
 -- Partial index: active holds by account (the hot-path query for available-balance computation).
 CREATE INDEX IF NOT EXISTS idx_funds_hold_account_active
     ON funds_hold(account_no) WHERE status = 'active';
+
+-- Held transfer idempotency: maps idempotency key to posted voucher.
+-- The PRIMARY KEY on idempotency_key is the last-line guard against
+-- concurrent duplicate PostHeldTransfer calls for the same hold.
+CREATE TABLE IF NOT EXISTS held_transfer (
+    idempotency_key  TEXT PRIMARY KEY,
+    voucher_no       TEXT NOT NULL,
+    hold_id          TEXT NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Voucher reversal tracking: one row per reversal. The PRIMARY KEY on
+-- reverses_voucher_no is the hard guarantee that a voucher is reversed at
+-- most once (red reversal appends opposite entries; the original voucher
+-- status and entries are never modified).
+CREATE TABLE IF NOT EXISTS voucher_reversal (
+    reverses_voucher_no  TEXT PRIMARY KEY,
+    reversal_voucher_no  TEXT NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Shared messaging outbox for core banking transfer events. Same schema as
+-- risk_db and the workflow engine so the dispatcher reads one shape.
+CREATE TABLE IF NOT EXISTS outbox_message (
+    message_id     UUID PRIMARY KEY,
+    message_type   TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    routing_key    TEXT NOT NULL,
+    envelope       JSONB NOT NULL,
+    attempts       INTEGER NOT NULL DEFAULT 0,
+    claim_token    UUID,
+    claimed_at     TIMESTAMPTZ,
+    dispatched_at  TIMESTAMPTZ,
+    last_error     TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);

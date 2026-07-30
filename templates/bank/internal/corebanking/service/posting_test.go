@@ -61,3 +61,26 @@ func TestBuildEntries_UnknownAction(t *testing.T) {
 		t.Error("未知 action 应报错")
 	}
 }
+
+func TestBuildHeldTransferEntries(t *testing.T) {
+	from := acct("D1", "2011")
+	to := acct("D2", "2011")
+	es, err := BuildHeldTransferEntries(from, to, domain.NewMoneyFromCents(5000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(es) != 2 {
+		t.Fatalf("应 2 条分录, got %d", len(es))
+	}
+	// Debit the held (from) account, credit the counterparty (to).
+	if es[0].AccountNo != "D1" || es[0].DCFlag != domain.DCDebit {
+		t.Errorf("借方应 D1: %+v", es[0])
+	}
+	if es[1].AccountNo != "D2" || es[1].DCFlag != domain.DCCredit {
+		t.Errorf("贷方应 D2: %+v", es[1])
+	}
+	// Amounts must match (balanced).
+	if es[0].Amount != es[1].Amount {
+		t.Errorf("借贷金额不平: 借=%s 贷=%s", es[0].Amount, es[1].Amount)
+	}
+}
