@@ -89,18 +89,19 @@ type Instance struct {
 
 // ActionRecord is the persisted state of one step within an instance.
 type ActionRecord struct {
-	Index          int
-	Name           string
-	Status         ActionStatus
-	Direction      string
-	Attempt        int
-	IdempotencyKey string
-	CommandID      string
-	ResultEventID  string
-	DeadlineAt     time.Time
-	Output         json.RawMessage
-	LastErrorClass ErrorClass
-	LastError      string
+	Index               int
+	Name                string
+	Status              ActionStatus
+	Direction           string
+	Attempt             int
+	IdempotencyKey      string
+	CommandID           string
+	ResultEventID       string
+	DeadlineAt          time.Time
+	Output              json.RawMessage
+	LastErrorClass      ErrorClass
+	LastError           string
+	AcceptedResultTypes []string
 }
 
 // View is the immutable snapshot handed to an Action's Execute/Apply methods.

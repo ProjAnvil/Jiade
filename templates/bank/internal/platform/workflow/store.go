@@ -18,6 +18,10 @@ var (
 	// ErrDefinitionNotFound is returned by Engine.Start when no Definition is
 	// registered for the requested (Type, Version).
 	ErrDefinitionNotFound = errors.New("workflow definition not registered")
+	// ErrInvalidMessage is returned by Engine.ApplyResult when a result envelope
+	// fails validation (wrong workflow/action/command/event-type or unexpected
+	// action state). The workflow state is left unchanged.
+	ErrInvalidMessage = errors.New("invalid result message")
 )
 
 // Store is the persistence boundary the Engine uses to create workflow

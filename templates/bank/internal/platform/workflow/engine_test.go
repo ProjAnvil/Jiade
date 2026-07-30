@@ -208,14 +208,15 @@ type linearAction struct {
 func (a linearAction) Name() string { return a.name }
 func (a linearAction) Execute(_ context.Context, _ View) (Dispatch, error) {
 	return Dispatch{
-		RoutingKey:     a.routingKey,
-		Payload:        json.RawMessage(`{}`),
-		IdempotencyKey: a.name + "-idem-key",
-		Deadline:       30 * time.Second,
+		RoutingKey:          a.routingKey,
+		Payload:             json.RawMessage(`{}`),
+		IdempotencyKey:      a.name + "-idem-key",
+		AcceptedResultTypes: []string{"result." + a.name},
+		Deadline:            30 * time.Second,
 	}, nil
 }
-func (a linearAction) ApplyResult(context.Context, View, messaging.Envelope) (Outcome, error) {
-	return Outcome{}, nil
+func (a linearAction) ApplyResult(_ context.Context, _ View, _ messaging.Envelope) (Outcome, error) {
+	return Outcome{Succeeded: true, Output: json.RawMessage(`{"ok":true}`)}, nil
 }
 func (a linearAction) Compensate(context.Context, View) (Dispatch, error) {
 	return Dispatch{}, nil
@@ -492,4 +493,255 @@ func safeKey(actions []ActionRecord) string {
 		return "<no actions>"
 	}
 	return actions[0].IdempotencyKey
+}
+
+// ---------------------------------------------------------------------------
+// Result-advancement test helpers (Task 4).
+// ---------------------------------------------------------------------------
+
+// runningTwoStepWorkflow creates a 2-action workflow, starts it, and prepares
+// it, leaving it in StatusRunning with action[0] in ActionWaitingResult. The
+// returned store already holds exactly one command in the outbox (the first
+// action's dispatch).
+func runningTwoStepWorkflow(t *testing.T) (*Engine, *memoryStore) {
+	t.Helper()
+	store := newMemoryStore()
+	engine := NewEngine(store, registryWith(linearDefinition()), EngineConfig{})
+	instance, err := engine.Start(context.Background(), StartRequest{
+		WorkflowID: "wf-1", Type: "payment-transfer", Version: 1,
+		Input: json.RawMessage(`{"amount":100}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Prepare(context.Background(), instance.ID); err != nil {
+		t.Fatal(err)
+	}
+	return engine, store
+}
+
+// successEvent builds a valid result Envelope addressed to the given action,
+// carrying the given command ID so the engine's command-ID validation passes.
+func successEvent(workflowID, actionName, commandID string) messaging.Envelope {
+	env := messaging.NewEnvelope(
+		"result."+actionName,
+		workflowID,
+		json.RawMessage(`{"ok":true}`),
+		time.Now,
+	)
+	env.WorkflowID = workflowID
+	env.ActionName = actionName
+	env.CommandID = commandID
+	return env
+}
+
+// runConcurrently launches n goroutines that all call fn at (approximately)
+// the same instant, waits for them to finish, and fails the test if any
+// returned a non-nil error.
+func runConcurrently(t *testing.T, n int, fn func() error) {
+	t.Helper()
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			errs[idx] = fn()
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: error=%v", i, err)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task 4 result-advancement tests.
+// ---------------------------------------------------------------------------
+
+// TestApplyResultAdvancesFirstAction verifies that applying a valid success
+// event for the first action marks it succeeded, dispatches the second action,
+// and leaves the instance in StatusRunning.
+func TestApplyResultAdvancesFirstAction(t *testing.T) {
+	engine, store := runningTwoStepWorkflow(t)
+	inst := store.instance("wf-1")
+	cmdID := inst.Actions[0].CommandID
+
+	event := successEvent("wf-1", "book-transfer", cmdID)
+	if err := engine.ApplyResult(context.Background(), event); err != nil {
+		t.Fatalf("ApplyResult: %v", err)
+	}
+
+	got := store.instance("wf-1")
+	assertActionStatus(t, got, 0, ActionSucceeded)
+	assertActionStatus(t, got, 1, ActionWaitingResult)
+	assertOutboxCount(t, store, 2) // first command + second command
+	assertStatus(t, got, StatusRunning)
+	if got.CurrentAction != 1 {
+		t.Errorf("CurrentAction = %d, want 1", got.CurrentAction)
+	}
+	if got.Revision != 2 {
+		t.Errorf("Revision = %d, want 2 (Prepare + one advance)", got.Revision)
+	}
+	// The first action record should carry the result event id and output.
+	if len(got.Actions) > 0 && got.Actions[0].ResultEventID != event.MessageID {
+		t.Errorf("action[0].ResultEventID = %q, want %q", got.Actions[0].ResultEventID, event.MessageID)
+	}
+}
+
+// TestDuplicateResultAdvancesOnlyOnce is the brief's prescribed concurrency
+// test: two goroutines deliver the SAME result event concurrently; the
+// Inbox dedup + serialized WithInstance guarantee exactly one advance.
+func TestDuplicateResultAdvancesOnlyOnce(t *testing.T) {
+	engine, store := runningTwoStepWorkflow(t)
+	inst := store.instance("wf-1")
+	event := successEvent("wf-1", "book-transfer", inst.Actions[0].CommandID)
+
+	runConcurrently(t, 2, func() error {
+		return engine.ApplyResult(context.Background(), event)
+	})
+
+	got := store.instance("wf-1")
+	assertActionStatus(t, got, 0, ActionSucceeded)
+	assertOutboxCount(t, store, 2) // first command plus exactly one second command
+	if got.CurrentAction != 1 {
+		t.Errorf("CurrentAction = %d, want 1 (advanced exactly once)", got.CurrentAction)
+	}
+	if got.Revision != 2 {
+		t.Errorf("Revision = %d, want 2 (advanced exactly once)", got.Revision)
+	}
+}
+
+// TestDuplicateResultSequentialIsIdempotent verifies that a second (sequential)
+// delivery of the same event is a silent no-op.
+func TestDuplicateResultSequentialIsIdempotent(t *testing.T) {
+	engine, store := runningTwoStepWorkflow(t)
+	inst := store.instance("wf-1")
+	event := successEvent("wf-1", "book-transfer", inst.Actions[0].CommandID)
+
+	if err := engine.ApplyResult(context.Background(), event); err != nil {
+		t.Fatalf("first ApplyResult: %v", err)
+	}
+	afterFirst := store.instance("wf-1")
+
+	// Second delivery of the same event: idempotent no-op.
+	if err := engine.ApplyResult(context.Background(), event); err != nil {
+		t.Fatalf("second (duplicate) ApplyResult: %v", err)
+	}
+	afterSecond := store.instance("wf-1")
+
+	if afterSecond.Revision != afterFirst.Revision {
+		t.Errorf("Revision changed on duplicate: %d -> %d", afterFirst.Revision, afterSecond.Revision)
+	}
+	assertOutboxCount(t, store, 2) // no extra second command
+}
+
+// TestApplyResultWrongCommandID verifies that a result event whose CommandID
+// does not match the current action's dispatched command is rejected with
+// ErrInvalidMessage and leaves the workflow state unchanged.
+func TestApplyResultWrongCommandID(t *testing.T) {
+	engine, store := runningTwoStepWorkflow(t)
+
+	event := successEvent("wf-1", "book-transfer", "bogus-command-id")
+	err := engine.ApplyResult(context.Background(), event)
+	if !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("error = %v, want ErrInvalidMessage", err)
+	}
+
+	got := store.instance("wf-1")
+	assertStatus(t, got, StatusRunning)
+	assertActionStatus(t, got, 0, ActionWaitingResult) // unchanged
+	assertOutboxCount(t, store, 1)                     // no second command dispatched
+}
+
+// TestApplyResultUnexpectedEventType verifies that a result event whose
+// MessageType is not in the current action's AcceptedResultTypes is rejected
+// with ErrInvalidMessage.
+func TestApplyResultUnexpectedEventType(t *testing.T) {
+	engine, store := runningTwoStepWorkflow(t)
+	inst := store.instance("wf-1")
+
+	env := messaging.NewEnvelope(
+		"unexpected.event.type",
+		"wf-1",
+		json.RawMessage(`{}`),
+		time.Now,
+	)
+	env.WorkflowID = "wf-1"
+	env.ActionName = "book-transfer"
+	env.CommandID = inst.Actions[0].CommandID
+
+	err := engine.ApplyResult(context.Background(), env)
+	if !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("error = %v, want ErrInvalidMessage", err)
+	}
+
+	got := store.instance("wf-1")
+	assertActionStatus(t, got, 0, ActionWaitingResult) // unchanged
+	assertOutboxCount(t, store, 1)                     // no second command
+}
+
+// TestApplyResultWrongActionName verifies that a result event whose ActionName
+// does not match the current action is rejected.
+func TestApplyResultWrongActionName(t *testing.T) {
+	engine, store := runningTwoStepWorkflow(t)
+	inst := store.instance("wf-1")
+
+	event := successEvent("wf-1", "settle-transfer", inst.Actions[0].CommandID)
+	err := engine.ApplyResult(context.Background(), event)
+	if !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("error = %v, want ErrInvalidMessage", err)
+	}
+}
+
+// TestApplyResultWrongWorkflowID verifies that a result event for a different
+// workflow is rejected.
+func TestApplyResultWrongWorkflowID(t *testing.T) {
+	engine, store := runningTwoStepWorkflow(t)
+	inst := store.instance("wf-1")
+
+	// The envelope's WorkflowID routes to a non-existent instance.
+	event := successEvent("wf-missing", "book-transfer", inst.Actions[0].CommandID)
+	err := engine.ApplyResult(context.Background(), event)
+	if err == nil {
+		t.Fatal("ApplyResult for missing workflow: want error, got nil")
+	}
+}
+
+// TestApplyResultFinalSuccess verifies that applying a success event to the
+// LAST action transitions the instance to StatusSucceeded and emits no
+// further commands.
+func TestApplyResultFinalSuccess(t *testing.T) {
+	engine, store := runningTwoStepWorkflow(t)
+
+	// Advance first action.
+	inst := store.instance("wf-1")
+	event1 := successEvent("wf-1", "book-transfer", inst.Actions[0].CommandID)
+	if err := engine.ApplyResult(context.Background(), event1); err != nil {
+		t.Fatalf("ApplyResult first: %v", err)
+	}
+
+	// Advance second (last) action.
+	inst = store.instance("wf-1")
+	if len(inst.Actions) < 2 {
+		t.Fatalf("expected 2 actions, got %d", len(inst.Actions))
+	}
+	event2 := successEvent("wf-1", "settle-transfer", inst.Actions[1].CommandID)
+	if err := engine.ApplyResult(context.Background(), event2); err != nil {
+		t.Fatalf("ApplyResult second: %v", err)
+	}
+
+	got := store.instance("wf-1")
+	assertStatus(t, got, StatusSucceeded)
+	assertActionStatus(t, got, 0, ActionSucceeded)
+	assertActionStatus(t, got, 1, ActionSucceeded)
+	assertOutboxCount(t, store, 2) // two commands total, no third
+	if got.Revision != 3 {
+		t.Errorf("Revision = %d, want 3 (Prepare + 2 advances)", got.Revision)
+	}
 }
