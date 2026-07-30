@@ -32,8 +32,6 @@ CREATE TABLE IF NOT EXISTS blacklist (
     status             TEXT DEFAULT 'active'
 );
 
--- Payment authorization aggregate for the bank payment saga.
--- Keyed by authorization_id with a unique idempotency_key for command dedup.
 CREATE TABLE IF NOT EXISTS payment_authorization (
     authorization_id TEXT PRIMARY KEY,
     workflow_id      TEXT NOT NULL,

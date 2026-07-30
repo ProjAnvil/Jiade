@@ -139,19 +139,3 @@ CREATE TABLE IF NOT EXISTS voucher_reversal (
     reversal_voucher_no  TEXT NOT NULL,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
--- Shared messaging outbox for core banking transfer events. Same schema as
--- risk_db and the workflow engine so the dispatcher reads one shape.
-CREATE TABLE IF NOT EXISTS outbox_message (
-    message_id     UUID PRIMARY KEY,
-    message_type   TEXT NOT NULL,
-    schema_version INTEGER NOT NULL,
-    routing_key    TEXT NOT NULL,
-    envelope       JSONB NOT NULL,
-    attempts       INTEGER NOT NULL DEFAULT 0,
-    claim_token    UUID,
-    claimed_at     TIMESTAMPTZ,
-    dispatched_at  TIMESTAMPTZ,
-    last_error     TEXT,
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
