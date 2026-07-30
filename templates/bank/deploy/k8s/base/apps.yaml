@@ -1,0 +1,346 @@
+# Application Deployments for the seven bank services.
+#
+# All seven reference a single shared container image (the bank Dockerfile
+# produces one binary at /usr/local/bin/service). Each Deployment mirrors the
+# compose entrypoint (command: /usr/local/bin/service) and the per-service env
+# contract from compose.yaml. Replica defaults follow the Global Constraints
+# table: core-banking 2, customer 1, payment 2, risk 2, reward 1, loan 1,
+# wealth 1.
+#
+# Per-service env (DB_HOST, DB_NAME, gRPC targets) is set here; shared
+# non-secret defaults come from the `bank-config` ConfigMap via envFrom.
+# Secrets (DB_PASSWORD, broker URL) are intentionally NOT defined in this base
+# — operational-closure overlays inject them.
+#
+# NOTE: this base is application-only. The DB_HOST / BROKER_URL endpoints
+# referenced below (e.g. core-banking-db) are created by stateful overlays.
+
+# ----- core-banking (replicas: 2) -----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: core-banking
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: core-banking
+  template:
+    metadata:
+      labels:
+        app: core-banking
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: service
+          image: bank-service:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/service"]
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: grpc, containerPort: 9090}
+          envFrom:
+            - configMapRef: {name: bank-config}
+          env:
+            - {name: DB_HOST, value: "core-banking-db"}
+            - {name: DB_NAME, value: "core_db"}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+
+---
+# ----- customer (replicas: 1) -----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: customer
+  template:
+    metadata:
+      labels:
+        app: customer
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: service
+          image: bank-service:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/service"]
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: grpc, containerPort: 9090}
+          envFrom:
+            - configMapRef: {name: bank-config}
+          env:
+            - {name: DB_HOST, value: "customer-db"}
+            - {name: DB_NAME, value: "cust_db"}
+              # core-banking is reached over internal gRPC via its headless
+              # Service for proper client-side load balancing.
+            - {name: CORE_BANKING_GRPC_TARGET, value: "dns:///core-banking-grpc:9090"}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+
+---
+# ----- payment (replicas: 2) -----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payment
+  template:
+    metadata:
+      labels:
+        app: payment
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: service
+          image: bank-service:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/service"]
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: grpc, containerPort: 9090}
+          envFrom:
+            - configMapRef: {name: bank-config}
+          env:
+            - {name: DB_HOST, value: "payment-db"}
+            - {name: DB_NAME, value: "pay_db"}
+            - {name: CORE_BANKING_GRPC_TARGET, value: "dns:///core-banking-grpc:9090"}
+            - {name: CUSTOMER_GRPC_TARGET, value: "dns:///customer-grpc:9090"}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+
+---
+# ----- reward (replicas: 1) -----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reward
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reward
+  template:
+    metadata:
+      labels:
+        app: reward
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: service
+          image: bank-service:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/service"]
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: grpc, containerPort: 9090}
+          envFrom:
+            - configMapRef: {name: bank-config}
+          env:
+            - {name: DB_HOST, value: "reward-db"}
+            - {name: DB_NAME, value: "reward_db"}
+            - {name: CUSTOMER_GRPC_TARGET, value: "dns:///customer-grpc:9090"}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+
+---
+# ----- risk (replicas: 2) -----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: risk
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: risk
+  template:
+    metadata:
+      labels:
+        app: risk
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: service
+          image: bank-service:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/service"]
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: grpc, containerPort: 9090}
+          envFrom:
+            - configMapRef: {name: bank-config}
+          env:
+            - {name: DB_HOST, value: "risk-db"}
+            - {name: DB_NAME, value: "risk_db"}
+            - {name: CUSTOMER_GRPC_TARGET, value: "dns:///customer-grpc:9090"}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+
+---
+# ----- loan (replicas: 1) -----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loan
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loan
+  template:
+    metadata:
+      labels:
+        app: loan
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: service
+          image: bank-service:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/service"]
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: grpc, containerPort: 9090}
+          envFrom:
+            - configMapRef: {name: bank-config}
+          env:
+            - {name: DB_HOST, value: "loan-db"}
+            - {name: DB_NAME, value: "loan_db"}
+            - {name: CUSTOMER_GRPC_TARGET, value: "dns:///customer-grpc:9090"}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+
+---
+# ----- wealth (replicas: 1) -----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wealth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wealth
+  template:
+    metadata:
+      labels:
+        app: wealth
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: service
+          image: bank-service:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/service"]
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: grpc, containerPort: 9090}
+          envFrom:
+            - configMapRef: {name: bank-config}
+          env:
+            - {name: DB_HOST, value: "wealth-db"}
+            - {name: DB_NAME, value: "wealth_db"}
+            - {name: CUSTOMER_GRPC_TARGET, value: "dns:///customer-grpc:9090"}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}

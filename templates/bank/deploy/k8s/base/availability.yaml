@@ -1,0 +1,189 @@
+# Availability controls: PodDisruptionBudgets and HorizontalPodAutoscalers.
+#
+# Dependency: the CPU HPAs below require the Kubernetes Metrics Server to be
+# installed in the cluster (it provides the resource.metrics.k8s.io API the
+# HPA controller polls for per-pod CPU usage). Without Metrics Server, HPA
+# status shows `Unknown` metrics and no scaling occurs. Install it per your
+# platform (e.g. `kubectl apply -f metrics-server/components.yaml` or via your
+# cloud's managed add-on) before relying on these HPAs.
+#
+# PDBs cover ONLY the multi-replica services (core-banking, payment, risk) so
+# voluntary disruptions (node drains, upgrades) always leave one pod available.
+# HPAs cover all seven services; minReplicas matches the Deployment replica
+# defaults and maxReplicas gives headroom for CPU-driven scale-out.
+
+# ===================== PodDisruptionBudgets (3) =====================
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: core-banking
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: core-banking
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payment
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: payment
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: risk
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: risk
+
+# ===================== HorizontalPodAutoscalers (7) =====================
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: core-banking
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: core-banking
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: customer
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: customer
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payment
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payment
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: reward
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: reward
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: risk
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: risk
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: loan
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: loan
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: wealth
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: wealth
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80

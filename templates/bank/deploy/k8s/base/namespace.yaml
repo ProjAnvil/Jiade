@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bank
+  labels:
+    # Namespaces cannot carry the kustomize `labels` pairs for selection, so we
+    # set the identity here explicitly.
+    app.kubernetes.io/name: bank
