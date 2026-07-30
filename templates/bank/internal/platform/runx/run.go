@@ -1,4 +1,5 @@
-// Package runx coordinates HTTP and optional gRPC process lifecycles.
+// Package runx coordinates HTTP, optional gRPC, and optional background worker
+// process lifecycles under a single cancellation context.
 package runx
 
 import (
@@ -12,6 +13,22 @@ import (
 	"bank/internal/platform/grpcx"
 	"google.golang.org/grpc"
 )
+
+// Worker is a long-running background task (command consumer, outbox relay,
+// etc.) that runs until ctx is cancelled or it returns an error. Serve treats
+// an unexpected Worker error (before ctx cancellation) as a process failure:
+// the context is cancelled so HTTP/gRPC/other workers shut down, and the error
+// is joined into the returned error.
+type Worker interface {
+	Run(context.Context) error
+}
+
+// WorkerFunc adapts a function to the Worker interface.
+type WorkerFunc func(context.Context) error
+
+// Run calls f(ctx).
+func (f WorkerFunc) Run(ctx context.Context) error { return f(ctx) }
+
 
 // HTTPServer is the shared HTTP lifecycle used by Serve.
 type HTTPServer interface {
@@ -36,13 +53,18 @@ type serveResult struct {
 	err      error
 }
 
-// Serve runs HTTP and optional gRPC until ctx is canceled or a listener exits.
-// Unexpected listener errors and HTTP shutdown errors are returned together.
+// Serve runs HTTP, optional gRPC, and optional background workers until ctx is
+// canceled or any one component exits. Unexpected server/worker errors and HTTP
+// shutdown errors are returned together. When any component exits, the internal
+// context is cancelled so all remaining components shut down; the function then
+// waits for all goroutines to finish (up to shutdownTimeout for HTTP/gRPC
+// drain) before returning.
 func Serve(
 	ctx context.Context,
 	httpServer HTTPServer,
 	grpcService *GRPCService,
 	shutdownTimeout time.Duration,
+	workers ...Worker,
 ) error {
 	if httpServer == nil {
 		return errors.New("HTTP server is required")
@@ -57,41 +79,56 @@ func Serve(
 		return errors.New("gRPC server is required")
 	}
 
-	serverCount := 1
-	results := make(chan serveResult, 2)
+	// Internal cancellation: cancelled when ANY component exits or the caller
+	// cancels the parent context. This ensures a failed worker stops HTTP/gRPC.
+	serveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	totalServers := 1
+	results := make(chan serveResult, 2+len(workers))
 	go func() {
 		results <- serveResult{protocol: "HTTP", err: httpServer.ListenAndServe()}
 	}()
 	if grpcService != nil {
-		serverCount++
+		totalServers++
 		go func() {
 			results <- serveResult{protocol: "gRPC", err: grpcService.Server.Serve(grpcService.Listener)}
 		}()
 	}
-
-	var runErr error
-	received := 0
-	select {
-	case <-ctx.Done():
-	case result := <-results:
-		received++
-		runErr = classifyServeResult(result, false)
+	for i, w := range workers {
+		name := fmt.Sprintf("worker[%d]", i)
+		go func() {
+			results <- serveResult{protocol: name, err: w.Run(serveCtx)}
+		}()
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
+	totalComponents := totalServers + len(workers)
+	var runErr error
+	received := 0
+	// Wait until the parent context is cancelled OR one component exits.
+	select {
+	case <-serveCtx.Done():
+	case result := <-results:
+		received++
+		runErr = errors.Join(runErr, classifyServeResult(result, false))
+		// Cancel the internal context so the other components stop.
+		cancel()
+	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer shutdownCancel()
 	shutdownErr := httpServer.Shutdown(shutdownCtx)
 	if grpcService != nil {
 		grpcx.Shutdown(shutdownCtx, grpcService.Server)
 	}
 
-	for received < serverCount {
+	for received < totalComponents {
 		select {
 		case result := <-results:
 			received++
 			runErr = errors.Join(runErr, classifyServeResult(result, true))
 		case <-shutdownCtx.Done():
-			received = serverCount
+			received = totalComponents
 		}
 	}
 	return errors.Join(runErr, shutdownErr)
@@ -107,6 +144,19 @@ func classifyServeResult(result serveResult, stopping bool) error {
 		if errors.Is(result.err, grpc.ErrServerStopped) || stopping && result.err == nil {
 			return nil
 		}
+	default:
+		// Background workers: a nil error or context.Canceled during shutdown
+		// is a graceful exit, not a failure.
+		if result.err == nil {
+			if stopping {
+				return nil
+			}
+			return fmt.Errorf("%s stopped unexpectedly", result.protocol)
+		}
+		if errors.Is(result.err, context.Canceled) {
+			return nil
+		}
+		return fmt.Errorf("%s failed: %w", result.protocol, result.err)
 	}
 	if result.err == nil {
 		return fmt.Errorf("%s server stopped unexpectedly", result.protocol)
