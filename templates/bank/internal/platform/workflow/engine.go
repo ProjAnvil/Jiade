@@ -268,7 +268,7 @@ func (e *Engine) persistActionDispatch(tx Tx, inst Instance, def Definition, ctx
 		return fmt.Errorf("save action %q: %w", action.Name(), err)
 	}
 
-	env := buildCommandEnvelope(inst.ID, action.Name(), actionRec, dispatch, e.config.Now)
+	env := buildCommandEnvelope(inst, action.Name(), actionRec, dispatch, e.config.Now)
 	if err := tx.AppendOutbox(env, dispatch.RoutingKey); err != nil {
 		return fmt.Errorf("append outbox for %q: %w", action.Name(), err)
 	}
@@ -558,7 +558,7 @@ func (e *Engine) persistCompensationDispatch(tx Tx, inst Instance, def Definitio
 		return fmt.Errorf("save compensation action %q: %w", action.Name(), err)
 	}
 
-	env := buildCompensationEnvelope(inst.ID, action.Name(), actionRec, dispatch, e.config.Now)
+	env := buildCompensationEnvelope(inst, action.Name(), actionRec, dispatch, e.config.Now)
 	if err := tx.AppendOutbox(env, dispatch.RoutingKey); err != nil {
 		return fmt.Errorf("append outbox for compensation %q: %w", action.Name(), err)
 	}
@@ -678,10 +678,10 @@ func (e *Engine) applyCompensationResult(tx Tx, current *Instance, env messaging
 // dispatch command. Mirrors buildCommandEnvelope but uses the
 // "compensation.<action_name>" message-type prefix so consumers can distinguish
 // undo commands from forward commands at the transport layer.
-func buildCompensationEnvelope(workflowID, actionName string, action ActionRecord, dispatch Dispatch, now func() time.Time) messaging.Envelope {
+func buildCompensationEnvelope(inst Instance, actionName string, action ActionRecord, dispatch Dispatch, now func() time.Time) messaging.Envelope {
 	messageType := "compensation." + actionName
-	env := messaging.NewEnvelope(messageType, workflowID, dispatch.Payload, now)
-	env.WorkflowID = workflowID
+	env := messaging.NewEnvelope(messageType, envelopeCorrelationID(inst), dispatch.Payload, now)
+	env.WorkflowID = inst.ID
 	env.ActionName = actionName
 	env.CommandID = action.CommandID
 	env.IdempotencyKey = action.IdempotencyKey
@@ -699,16 +699,30 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
+// envelopeCorrelationID returns the correlation identifier stamped onto an
+// outbound command envelope. It prefers Instance.CorrelationID (propagated from
+// StartRequest at creation time) so downstream saga participants and closure
+// tracing can correlate work back to the originating request; when that field
+// is empty it falls back to the workflow instance id, preserving the
+// pre-CorrelationID behaviour for callers that never set one.
+func envelopeCorrelationID(inst Instance) string {
+	if inst.CorrelationID != "" {
+		return inst.CorrelationID
+	}
+	return inst.ID
+}
+
 // buildCommandEnvelope assembles the messaging.Envelope for the dispatch
 // command emitted by an action. The engine uses a "command.<action_name>"
 // message type convention (domain-specific message types can be added to
-// Dispatch in a later task if needed) and the workflow instance id as the
-// correlation id fallback (Instance has no dedicated CorrelationID field in
-// Task 1's contracts).
-func buildCommandEnvelope(workflowID, actionName string, action ActionRecord, dispatch Dispatch, now func() time.Time) messaging.Envelope {
+// Dispatch in a later task if needed). The envelope correlation id is
+// Instance.CorrelationID when non-empty, falling back to the workflow instance
+// id for backward compatibility with callers that pre-date the CorrelationID
+// field.
+func buildCommandEnvelope(inst Instance, actionName string, action ActionRecord, dispatch Dispatch, now func() time.Time) messaging.Envelope {
 	messageType := "command." + actionName
-	env := messaging.NewEnvelope(messageType, workflowID, dispatch.Payload, now)
-	env.WorkflowID = workflowID
+	env := messaging.NewEnvelope(messageType, envelopeCorrelationID(inst), dispatch.Payload, now)
+	env.WorkflowID = inst.ID
 	env.ActionName = actionName
 	env.CommandID = action.CommandID
 	env.IdempotencyKey = action.IdempotencyKey
@@ -792,7 +806,7 @@ func (e *Engine) Redispatch(ctx context.Context, id string) error {
 		// buildCommandEnvelope calls NewEnvelope which generates a fresh
 		// MessageID; the CommandID and IdempotencyKey come from the existing
 		// ActionRecord and are therefore STABLE across re-dispatches.
-		env := buildCommandEnvelope(inst.ID, actionRec.Name, actionRec, dispatch, e.config.Now)
+		env := buildCommandEnvelope(inst, actionRec.Name, actionRec, dispatch, e.config.Now)
 		if err := tx.AppendOutbox(env, dispatch.RoutingKey); err != nil {
 			return fmt.Errorf("append outbox for redispatch %q: %w", actionRec.Name, err)
 		}

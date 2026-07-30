@@ -33,10 +33,17 @@ func isTerminal(status InstanceStatus) bool {
 
 // isRunnable reports whether a non-terminal instance has work for the recovery
 // loop right now: preparing (needs Prepare), running with a timed-out waiting
-// action (needs re-dispatch), running with a transiently-failed action (needs
-// retry), or compensating with a timed-out compensating action. This encodes
-// the ClaimRunnable "runnable" contract for the in-memory store; the
-// PostgresStore will express the same logic in SQL.
+// action (needs re-dispatch), or compensating with a timed-out compensating
+// action. This encodes the ClaimRunnable "runnable" contract for the in-memory
+// store; the PostgresStore expresses the same logic in SQL.
+//
+// A transiently-failed forward action (StatusRunning + ActionFailed) is
+// intentionally NOT runnable: processInstance only knows how to Prepare and
+// Redispatch waiting actions, neither of which retries a failed action, so
+// claiming such an instance would release it on every poll tick forever
+// (busyspin). Forward-retry of transiently-failed actions is a known limitation
+// that is NOT implemented in this engine plan; such instances require operator
+// intervention or a future retry path.
 func isRunnable(inst *Instance, now time.Time) bool {
 	switch inst.Status {
 	case StatusPreparing:
@@ -49,8 +56,7 @@ func isRunnable(inst *Instance, now time.Time) bool {
 		switch action.Status {
 		case ActionWaitingResult:
 			return !action.DeadlineAt.IsZero() && now.After(action.DeadlineAt)
-		case ActionFailed:
-			return true
+			// ActionFailed is deliberately excluded: see the function comment.
 		}
 	case StatusCompensating:
 		if inst.CurrentAction < 0 || inst.CurrentAction >= len(inst.Actions) {

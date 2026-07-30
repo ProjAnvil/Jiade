@@ -56,11 +56,12 @@ func (s *memoryStore) Create(_ context.Context, req StartRequest) (Instance, err
 		return Instance{}, ErrInstanceExists
 	}
 	inst := Instance{
-		ID:      req.WorkflowID,
-		Type:    req.Type,
-		Version: req.Version,
-		Status:  StatusPreparing,
-		Input:   append(json.RawMessage(nil), req.Input...),
+		ID:            req.WorkflowID,
+		Type:          req.Type,
+		Version:       req.Version,
+		Status:        StatusPreparing,
+		Input:         append(json.RawMessage(nil), req.Input...),
+		CorrelationID: req.CorrelationID,
 	}
 	s.instances[req.WorkflowID] = &inst
 	return inst, nil

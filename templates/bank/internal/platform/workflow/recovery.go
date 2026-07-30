@@ -37,10 +37,18 @@ type RecoveryConfig struct {
 
 // Recovery is the startup-and-background loop that drives workflow instances
 // forward when no external event arrives: it claims runnable instances
-// (preparing, timed-out, transiently failed), resumes them via the Engine,
-// and releases the lease on completion. It also runs a startup definition
-// audit so an operator is alerted if any non-terminal instance references an
-// unregistered definition.
+// (preparing, timed-out waiting or compensating actions), resumes them via the
+// Engine, and releases the lease on completion. It also runs a startup
+// definition audit so an operator is alerted if any non-terminal instance
+// references an unregistered definition.
+//
+// Instances with a transiently-failed forward action (StatusRunning +
+// ActionFailed) are NOT claimed: processInstance only knows Prepare and
+// Redispatch, neither of which retries a failed action, so claiming such an
+// instance would release it every poll tick forever (busyspin). Forward-retry
+// of transiently-failed actions is a known limitation NOT implemented in this
+// engine plan; such instances require operator intervention or a future retry
+// path.
 //
 // Recovery is safe for concurrent use only when each Recovery has a distinct
 // Owner; a single Recovery.Run should be invoked per process.

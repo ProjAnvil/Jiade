@@ -28,6 +28,7 @@ func TestPaymentMigrationContainsWorkflowSchema(t *testing.T) {
 		"revision BIGINT NOT NULL",
 		"lease_owner TEXT",
 		"lease_until TIMESTAMPTZ",
+		"correlation_id TEXT",
 		"CREATE TABLE IF NOT EXISTS workflow_action",
 		"UNIQUE (workflow_id, action_index)",
 		"idempotency_key TEXT NOT NULL",

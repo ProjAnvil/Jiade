@@ -56,11 +56,16 @@ type Store interface {
 
 	// ClaimRunnable atomically claims up to limit instances that are runnable
 	// (have work the recovery loop can do right now — preparing, a timed-out
-	// waiting action, or a transiently-failed action) and whose lease is
+	// waiting action, or a timed-out compensating action) and whose lease is
 	// available (no LeaseOwner or LeaseUntil <= now). On each claimed instance
 	// it sets LeaseOwner=owner, LeaseUntil=now.Add(lease), bumps Revision, and
 	// returns the instance id. A lease that has not yet expired cannot be
 	// stolen — not even by the same owner (use RenewLease to extend).
+	//
+	// A transiently-failed forward action (StatusRunning + ActionFailed) is
+	// NOT claimed: the recovery loop cannot retry a failed action, so claiming
+	// it would busyspin. Such instances need operator intervention or a future
+	// forward-retry path.
 	ClaimRunnable(ctx context.Context, owner string, now time.Time, lease time.Duration, limit int) ([]string, error)
 
 	// RenewLease extends the lease on instance id for owner until

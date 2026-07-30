@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS workflow_instance (
     operational_deadline TIMESTAMPTZ,
     last_error_class TEXT,
     last_error TEXT,
+    correlation_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT ck_workflow_instance_status CHECK (status IN (
@@ -102,6 +103,7 @@ CREATE TABLE IF NOT EXISTS workflow_instance (
         OR jsonb_typeof(prepared_context_json) = 'object'
     )
 );
+ALTER TABLE workflow_instance ADD COLUMN IF NOT EXISTS correlation_id TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_workflow_instance_status_wakeup
     ON workflow_instance(status, next_wakeup_at);

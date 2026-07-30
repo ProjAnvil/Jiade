@@ -85,6 +85,13 @@ type Instance struct {
 	LastErrorClass      ErrorClass
 	LastError           string
 	Actions             []ActionRecord
+	// CorrelationID is the cross-service trace identifier propagated from
+	// StartRequest at creation time. When non-empty it is stamped onto every
+	// command envelope emitted by the engine so downstream saga participants
+	// and closure tracing can correlate work back to the originating request.
+	// When empty the engine falls back to the instance ID (backward compatible
+	// with callers that pre-date this field).
+	CorrelationID string `json:"correlation_id"`
 }
 
 // ActionRecord is the persisted state of one step within an instance.

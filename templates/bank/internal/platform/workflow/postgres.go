@@ -55,7 +55,7 @@ func (s *PostgresStore) loadInstanceRow(ctx context.Context, q pg.DBTX, id strin
 		SELECT workflow_id, type, definition_version, status, input_json,
 		       prepared_context_json, current_action, revision, lease_owner,
 		       lease_until, next_wakeup_at, operational_deadline,
-		       last_error_class, last_error
+		       last_error_class, last_error, correlation_id
 		FROM workflow_instance
 		WHERE workflow_id = $1
 		FOR UPDATE`, id)
@@ -104,11 +104,12 @@ func scanInstanceRowPG(s pgRowScanner) (Instance, error) {
 		operational      sql.NullTime
 		lastErrorClass   sql.NullString
 		lastError        sql.NullString
+		correlationID    sql.NullString
 	)
 	if err := s.Scan(
 		&inst.ID, &inst.Type, &inst.Version, &inst.Status, &input, &preparedCtx,
 		&inst.CurrentAction, &inst.Revision, &leaseOwner, &leaseUntil, &nextWakeup,
-		&operational, &lastErrorClass, &lastError,
+		&operational, &lastErrorClass, &lastError, &correlationID,
 	); err != nil {
 		return Instance{}, err
 	}
@@ -133,6 +134,9 @@ func scanInstanceRowPG(s pgRowScanner) (Instance, error) {
 	}
 	if lastError.Valid {
 		inst.LastError = lastError.String
+	}
+	if correlationID.Valid {
+		inst.CorrelationID = correlationID.String
 	}
 	return inst, nil
 }
@@ -238,11 +242,11 @@ func (s *PostgresStore) CreateInTx(ctx context.Context, tx *sql.Tx, req StartReq
 	err := tx.QueryRowContext(ctx, `
 		INSERT INTO workflow_instance
 		  (workflow_id, type, definition_version, status, input_json,
-		   current_action, revision, created_at, updated_at)
-		VALUES ($1, $2, $3, 'preparing', $4, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		   current_action, revision, correlation_id, created_at, updated_at)
+		VALUES ($1, $2, $3, 'preparing', $4, 0, 0, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT (workflow_id) DO NOTHING
 		RETURNING workflow_id`,
-		req.WorkflowID, req.Type, req.Version, []byte(input),
+		req.WorkflowID, req.Type, req.Version, []byte(input), req.CorrelationID,
 	).Scan(&insertedID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -251,11 +255,12 @@ func (s *PostgresStore) CreateInTx(ctx context.Context, tx *sql.Tx, req StartReq
 		return Instance{}, fmt.Errorf("insert workflow_instance %q: %w", req.WorkflowID, err)
 	}
 	return Instance{
-		ID:      req.WorkflowID,
-		Type:    req.Type,
-		Version: req.Version,
-		Status:  StatusPreparing,
-		Input:   append(json.RawMessage(nil), input...),
+		ID:            req.WorkflowID,
+		Type:          req.Type,
+		Version:       req.Version,
+		Status:        StatusPreparing,
+		Input:         append(json.RawMessage(nil), input...),
+		CorrelationID: req.CorrelationID,
 	}, nil
 }
 
@@ -390,11 +395,12 @@ func (t *pgTx) SaveInstance(inst Instance) error {
 		  operational_deadline = $10,
 		  last_error_class = $11,
 		  last_error = $12,
+		  correlation_id = $13,
 		  updated_at = CURRENT_TIMESTAMP
 		WHERE workflow_id = $1 AND revision = $2`,
 		inst.ID, t.loadedRevision,
 		string(inst.Status), preparedCtx, inst.CurrentAction, inst.Revision,
-		leaseOwner, leaseUntil, nextWakeup, operational, errClass, errMsg,
+		leaseOwner, leaseUntil, nextWakeup, operational, errClass, errMsg, inst.CorrelationID,
 	)
 	if err != nil {
 		return fmt.Errorf("update workflow_instance %q: %w", inst.ID, err)
@@ -553,6 +559,16 @@ const terminalStatusesSQL = "('succeeded','rejected','compensated','compensation
 // the instance id. A lease that has not yet expired cannot be claimed — not
 // even by the same owner (use RenewLease to extend).
 //
+// Runnable means: preparing (needs Prepare), running with a timed-out waiting
+// action (needs Redispatch), or compensating with a timed-out compensating
+// action. A transiently-failed forward action (running + ActionFailed) is
+// deliberately NOT claimed: processInstance only handles Prepare and
+// Redispatch, neither of which retries a failed action, so claiming such an
+// instance would release it every poll tick forever (busyspin). Forward-retry
+// of transiently-failed actions is a known limitation NOT implemented in this
+// engine plan; such instances require operator intervention or a future retry
+// path.
+//
 // Implementation: a single CTE-based UPDATE whose WITH clause SELECTs matching
 // rows with FOR UPDATE OF wi SKIP LOCKED, then UPDATEs them. SKIP LOCKED
 // ensures concurrent ClaimRunnable calls divide work rather than block each
@@ -574,7 +590,6 @@ func (s *PostgresStore) ClaimRunnable(ctx context.Context, owner string, now tim
 		    AND (wi.lease_owner IS NULL OR wi.lease_until <= $1)
 		    AND (
 		      wi.status = 'preparing'
-		      OR (wi.status = 'running'    AND wa.status = 'failed')
 		      OR (wi.status = 'running'    AND wa.status = 'waiting_result'
 		                                   AND wa.deadline_at IS NOT NULL
 		                                   AND wa.deadline_at < $1)

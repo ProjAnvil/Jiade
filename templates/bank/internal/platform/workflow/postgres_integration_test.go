@@ -122,7 +122,7 @@ func loadInstanceDirect(t *testing.T, db *sql.DB, workflowID string) Instance {
 		SELECT workflow_id, type, definition_version, status, input_json,
 		       prepared_context_json, current_action, revision, lease_owner,
 		       lease_until, next_wakeup_at, operational_deadline,
-		       last_error_class, last_error
+		       last_error_class, last_error, correlation_id
 		FROM workflow_instance WHERE workflow_id = $1`, workflowID)
 	inst, err := scanInstanceRow(row)
 	if err != nil {
@@ -166,11 +166,12 @@ func scanInstanceRow(s rowScanner) (Instance, error) {
 		operational       sql.NullTime
 		lastErrorClass    sql.NullString
 		lastError         sql.NullString
+		correlationID     sql.NullString
 	)
 	if err := s.Scan(
 		&inst.ID, &inst.Type, &inst.Version, &inst.Status, &input, &preparedCtx,
 		&inst.CurrentAction, &inst.Revision, &leaseOwner, &leaseUntil, &nextWakeup,
-		&operational, &lastErrorClass, &lastError,
+		&operational, &lastErrorClass, &lastError, &correlationID,
 	); err != nil {
 		return Instance{}, err
 	}
@@ -195,6 +196,9 @@ func scanInstanceRow(s rowScanner) (Instance, error) {
 	}
 	if lastError.Valid {
 		inst.LastError = lastError.String
+	}
+	if correlationID.Valid {
+		inst.CorrelationID = correlationID.String
 	}
 	return inst, nil
 }
