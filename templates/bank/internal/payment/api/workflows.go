@@ -78,8 +78,9 @@ type WorkflowStatusResponse struct {
 
 // ReverseWorkflowResponse is the reverse endpoint body.
 type ReverseWorkflowResponse struct {
-	WorkflowID string
-	Status     string
+	WorkflowID        string
+	ReversalWorkflowID string
+	Status            string
 }
 
 // Sentinel errors consumed by the handlers live in package payment
@@ -128,8 +129,9 @@ type workflowStatusResponse struct {
 
 // reverseWorkflowResponse is the JSON body returned on reverse.
 type reverseWorkflowResponse struct {
-	WorkflowID string `json:"workflow_id"`
-	Status     string `json:"status"`
+	WorkflowID         string `json:"workflow_id"`
+	ReversalWorkflowID string `json:"reversal_workflow_id,omitempty"`
+	Status             string `json:"status"`
 }
 
 // ---------------------------------------------------------------------------
@@ -287,8 +289,9 @@ func (h *Handlers) ReversePaymentWorkflow(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusAccepted, reverseWorkflowResponse{
-		WorkflowID: resp.WorkflowID,
-		Status:     resp.Status,
+		WorkflowID:         resp.WorkflowID,
+		ReversalWorkflowID: resp.ReversalWorkflowID,
+		Status:             resp.Status,
 	})
 }
 

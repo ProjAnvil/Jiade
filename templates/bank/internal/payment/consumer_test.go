@@ -238,3 +238,187 @@ func TestConsumer_MapsInstanceStatusToIntentStatus(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Completion emission tests (Task 8).
+//
+// payment.completed.v1 is emitted ONCE — exactly once — when the
+// payment-transfer workflow transitions to StatusSucceeded. The consumer
+// reads the intent's previous status to detect a fresh transition; a
+// duplicate delivery for an already-succeeded workflow does NOT re-emit.
+// ---------------------------------------------------------------------------
+
+// fakeCompletionOutbox records EmitCompletion calls so tests can assert
+// "exactly one outbox event" without a *sql.DB.
+type fakeCompletionOutbox struct {
+	mu    sync.Mutex
+	calls []messaging.Envelope
+	err   error
+}
+
+func (f *fakeCompletionOutbox) EmitCompletion(_ context.Context, env messaging.Envelope) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, env)
+	if f.err != nil {
+		return f.err
+	}
+	return nil
+}
+
+func (f *fakeCompletionOutbox) Calls() []messaging.Envelope {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]messaging.Envelope, len(f.calls))
+	copy(out, f.calls)
+	return out
+}
+
+// fakeIntentReader returns a canned PaymentIntent for a workflow id. It lets
+// the consumer detect fresh succeeded transitions without a *sql.DB.
+type fakeIntentReader struct {
+	mu     sync.Mutex
+	intent PaymentIntent
+	err    error
+}
+
+func (f *fakeIntentReader) GetByWorkflowID(_ context.Context, _ string) (PaymentIntent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return PaymentIntent{}, f.err
+	}
+	return f.intent, nil
+}
+
+func (f *fakeIntentReader) SetStatus(status PaymentIntentStatus) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.intent.Status = status
+}
+
+// newTestConsumerWithCompletion wires a Consumer with completion-outbox and
+// intent-reader stubs so the emission path can be exercised end-to-end.
+func newTestConsumerWithCompletion(
+	engine *fakeApplyResulter,
+	status InstanceStatusReader,
+	intents IntentStatusUpdater,
+	intentReader IntentReader,
+	outbox CompletionOutbox,
+) *Consumer {
+	return &Consumer{
+		engine:          engine,
+		statusReader:    status,
+		intentUpdater:   intents,
+		intentReader:    intentReader,
+		completionOutbox: outbox,
+	}
+}
+
+// TestConsumer_EmitsCompletionOnceOnSuccess: when the workflow transitions to
+// succeeded, the consumer emits exactly ONE payment.completed.v1 outbox event
+// AND commits payment_intent.status to succeeded.
+func TestConsumer_EmitsCompletionOnceOnSuccess(t *testing.T) {
+	engine := &fakeApplyResulter{}
+	statusReader := &fakeInstanceStatusReader{exists: true, status: "succeeded"}
+	updater := &fakeIntentUpdater{}
+	// Intent was running before this event — this is a fresh transition.
+	intentReader := &fakeIntentReader{intent: PaymentIntent{
+		WorkflowID: "wf-1", PayerCustomerID: "C-100",
+		Currency: "CNY", AmountMinor: 50000, Status: IntentRunning,
+	}}
+	outbox := &fakeCompletionOutbox{}
+	c := newTestConsumerWithCompletion(engine, statusReader, updater, intentReader, outbox)
+
+	env := sampleEnvelope(t, "core.transfer-posted.v1", "wf-1")
+	if err := c.handleResult(context.Background(), env); err != nil {
+		t.Fatalf("handleResult: %v", err)
+	}
+
+	// Exactly one completion event.
+	calls := outbox.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("completion outbox calls = %d, want 1", len(calls))
+	}
+	if calls[0].MessageType != "payment.completed.v1" {
+		t.Errorf("completion message_type = %q, want payment.completed.v1", calls[0].MessageType)
+	}
+	if calls[0].WorkflowID != "wf-1" {
+		t.Errorf("completion workflow_id = %q, want wf-1", calls[0].WorkflowID)
+	}
+	// Payment status committed to succeeded.
+	updates := updater.Updates()
+	if len(updates) != 1 {
+		t.Fatalf("intent updates = %d, want 1", len(updates))
+	}
+	if updates[0].Status != IntentSucceeded {
+		t.Errorf("intent status = %q, want %q", updates[0].Status, IntentSucceeded)
+	}
+}
+
+// TestConsumer_DoesNotEmitCompletionOnNonSuccess: a non-succeeded result
+// (e.g. hold-placed → running) MUST NOT emit payment.completed.v1.
+func TestConsumer_DoesNotEmitCompletionOnNonSuccess(t *testing.T) {
+	engine := &fakeApplyResulter{}
+	statusReader := &fakeInstanceStatusReader{exists: true, status: "running"}
+	updater := &fakeIntentUpdater{}
+	intentReader := &fakeIntentReader{intent: PaymentIntent{Status: IntentPending}}
+	outbox := &fakeCompletionOutbox{}
+	c := newTestConsumerWithCompletion(engine, statusReader, updater, intentReader, outbox)
+
+	env := sampleEnvelope(t, "core.hold-placed.v1", "wf-1")
+	if err := c.handleResult(context.Background(), env); err != nil {
+		t.Fatalf("handleResult: %v", err)
+	}
+	if calls := outbox.Calls(); len(calls) != 0 {
+		t.Errorf("completion outbox calls = %d, want 0 for non-succeeded status", len(calls))
+	}
+}
+
+// TestConsumer_DoesNotReemitCompletionForAlreadySucceeded: if a duplicate
+// delivery arrives for an already-succeeded workflow (late redelivery
+// bypassing the outer Inbox), the consumer MUST NOT emit a second completion
+// event. The intent's previous status gate guards the exactly-once emission.
+func TestConsumer_DoesNotReemitCompletionForAlreadySucceeded(t *testing.T) {
+	engine := &fakeApplyResulter{}
+	statusReader := &fakeInstanceStatusReader{exists: true, status: "succeeded"}
+	updater := &fakeIntentUpdater{}
+	// Intent was already succeeded — this is NOT a fresh transition.
+	intentReader := &fakeIntentReader{intent: PaymentIntent{Status: IntentSucceeded}}
+	outbox := &fakeCompletionOutbox{}
+	c := newTestConsumerWithCompletion(engine, statusReader, updater, intentReader, outbox)
+
+	env := sampleEnvelope(t, "core.transfer-posted.v1", "wf-1")
+	if err := c.handleResult(context.Background(), env); err != nil {
+		t.Fatalf("handleResult: %v", err)
+	}
+	if calls := outbox.Calls(); len(calls) != 0 {
+		t.Errorf("completion outbox calls = %d, want 0 for already-succeeded intent", len(calls))
+	}
+}
+
+// TestConsumer_EmitsCompletionWithoutIntentReader: when no intent reader is
+// wired (e.g. a legacy deployment), the consumer still emits completion on
+// every successful ApplyResult. The intent-reader is an optimization to
+// suppress duplicates; its absence falls back to emit-on-success.
+func TestConsumer_EmitsCompletionWithoutIntentReader(t *testing.T) {
+	engine := &fakeApplyResulter{}
+	statusReader := &fakeInstanceStatusReader{exists: true, status: "succeeded"}
+	updater := &fakeIntentUpdater{}
+	outbox := &fakeCompletionOutbox{}
+	// No intentReader — completionOutbox is still wired.
+	c := &Consumer{
+		engine:           engine,
+		statusReader:     statusReader,
+		intentUpdater:    updater,
+		completionOutbox: outbox,
+	}
+
+	env := sampleEnvelope(t, "core.transfer-posted.v1", "wf-1")
+	if err := c.handleResult(context.Background(), env); err != nil {
+		t.Fatalf("handleResult: %v", err)
+	}
+	if calls := outbox.Calls(); len(calls) != 1 {
+		t.Errorf("completion outbox calls = %d, want 1 when intent reader is absent", len(calls))
+	}
+}

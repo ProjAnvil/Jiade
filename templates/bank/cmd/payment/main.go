@@ -2,14 +2,17 @@
 // payment-transfer saga driver (workflow engine + result-event consumer +
 // outbox relay + recovery loop).
 //
-// Composition (Task 7):
+// Composition (Task 8):
 //   - HTTP server: /api/v1/payments/... routes (read-only + workflow create /
 //     status / reverse) and /readyz, /livez, /metrics.
-//   - Workflow engine + registry: the payment-transfer v1 definition.
+//   - Workflow engine + registry: the payment-transfer v1 definition AND the
+//     payment-reversal v1 definition (Task 8).
 //   - Outbox relay: drains outbox_message rows the engine's AppendOutbox wrote
-//     (saga dispatch commands) and publishes them to RabbitMQ.
+//     (saga dispatch commands) AND the payment.completed.v1 events the
+//     consumer emits, and publishes them to RabbitMQ.
 //   - Result-event consumer: subscribes to the payment.results queue and feeds
-//     each envelope to Engine.ApplyResult, then syncs payment_intent.status.
+//     each envelope to Engine.ApplyResult, then syncs payment_intent.status
+//     and emits payment.completed.v1 on a fresh succeeded transition.
 //   - Recovery scheduler: claims preparing/timed-out instances and advances
 //     them via Engine.Prepare / Engine.Redispatch.
 //
@@ -90,6 +93,12 @@ func run() error {
 	if err := registry.Register(workflows.NewPaymentTransferDefinition(preparation)); err != nil {
 		return fmt.Errorf("register payment-transfer definition: %w", err)
 	}
+	// Task 8: register the payment-reversal definition alongside the transfer
+	// definition. Both versions coexist in the same Registry; the reverse
+	// endpoint starts a payment-reversal instance to undo a SUCCEEDED transfer.
+	if err := registry.Register(workflows.NewPaymentReversalDefinition(workflows.NewReversalPreparation())); err != nil {
+		return fmt.Errorf("register payment-reversal definition: %w", err)
+	}
 	wfStore := workflow.NewPostgresStore(db)
 	engine := workflow.NewEngine(wfStore, registry, workflow.EngineConfig{})
 	recovery := workflow.NewRecovery(wfStore, engine, registry, workflow.RecoveryConfig{
@@ -100,10 +109,13 @@ func run() error {
 	intentRepo := payment.NewPaymentIntentRepo(db)
 	statusRepo := payment.NewInstanceStatusRepo(db)
 	starter := payment.NewWorkflowStarter(db, intentRepo, wfStore, time.Now)
+	completionOutbox := payment.NewPgCompletionOutbox(db)
 	workflowAPI := &paymentWorkflowAPI{
-		starter: starter,
-		intents: intentRepo,
-		newUUID: newWorkflowUUID,
+		starter:    starter,
+		intents:    intentRepo,
+		wfStore:    wfStore,
+		engine:     engine,
+		newUUID:    newWorkflowUUID,
 	}
 
 	// --- HTTP handlers: read-only service + workflow REST API ---
@@ -133,7 +145,7 @@ func run() error {
 		RetryRoutingKey:      getenv("PAYMENT_RETRY_KEY", "payment.retry"),
 		DeadLetterRoutingKey: getenv("PAYMENT_DLQ_KEY", "payment.dlq"),
 	}
-	consumer := payment.NewConsumer(db, engine, statusRepo, intentRepo, retryPolicy)
+	consumer := payment.NewConsumer(db, engine, statusRepo, intentRepo, intentRepo, completionOutbox, retryPolicy)
 
 	// Outbox relay: eagerly dial the broker so a broker-down condition fails
 	// the process at startup rather than silently skipping event delivery.
@@ -194,6 +206,8 @@ var _ api.WorkflowAPI = (*paymentWorkflowAPI)(nil)
 type paymentWorkflowAPI struct {
 	starter *payment.WorkflowStarter
 	intents *payment.PaymentIntentRepo
+	wfStore *workflow.PostgresStore
+	engine  *workflow.Engine
 	newUUID func() string
 }
 
@@ -259,19 +273,98 @@ func (a *paymentWorkflowAPI) Status(ctx context.Context, workflowID string) (api
 	}, nil
 }
 
-// Reverse marks the payment intent reversed. Triggering actual saga
-// compensation (emitting reverse commands to ledger/core) requires engine
-// support for externally-initiated compensation of a succeeded instance; that
-// is a follow-up task. For now the endpoint records the operator-initiated
-// reversal so GET reports reversed=true and status=reversed.
+// Reverse starts a payment-reversal workflow that undoes a SUCCEEDED
+// payment-transfer by dispatching core.reverse-transfer.v1. The Task-7
+// implementation prematurely persisted reversed=true before the reversal saga
+// ran; Task 8 fixes this by recording reversal_pending and only flipping to
+// reversed after the reversal workflow succeeds (the consumer detects the
+// transition via Engine.ApplyResult and calls MarkReversedByWorkflowID).
+//
+// The endpoint:
+//  1. Loads the original intent to verify it exists and capture context.
+//  2. Reads the succeeded transfer's PostLedgerTransfer action Output to
+//     extract the voucher_no the reversal must reference.
+//  3. Atomically starts a new payment-reversal workflow instance via
+//     Engine.Start + Engine.Prepare.
+//  4. Marks the original intent reversal_pending.
+//  5. Returns the reversal workflow id so the caller can poll its status.
 func (a *paymentWorkflowAPI) Reverse(ctx context.Context, workflowID string) (api.ReverseWorkflowResponse, error) {
-	if err := a.intents.MarkReversedByWorkflowID(ctx, workflowID); err != nil {
+	intent, err := a.intents.GetByWorkflowID(ctx, workflowID)
+	if err != nil {
 		return api.ReverseWorkflowResponse{}, err
 	}
+	// Only a succeeded payment can be reversed. A payment in any other state
+	// has no committed posting to undo.
+	if intent.Status != payment.IntentSucceeded {
+		return api.ReverseWorkflowResponse{}, fmt.Errorf("payment %s status %q is not succeeded; cannot reverse", workflowID, intent.Status)
+	}
+
+	// Extract the voucher_no from the succeeded transfer's final action
+	// Output. The reversal workflow carries this in its ReversalContext so
+	// the core-banking consumer can identify the posting to reverse.
+	voucherNo, err := readTransferVoucherNo(ctx, a.wfStore, workflowID)
+	if err != nil {
+		return api.ReverseWorkflowResponse{}, fmt.Errorf("reverse %s: %w", workflowID, err)
+	}
+
+	// Start the reversal workflow.
+	reversalID := "wf-rev-" + a.newUUID()
+	input := workflows.ReversalInput{
+		OriginalWorkflowID: workflowID,
+		OriginalVoucherNo:  voucherNo,
+	}
+	inputBytes, err := json.Marshal(input)
+	if err != nil {
+		return api.ReverseWorkflowResponse{}, fmt.Errorf("marshal reversal input: %w", err)
+	}
+	if _, err := a.engine.Start(ctx, workflow.StartRequest{
+		WorkflowID:    reversalID,
+		Type:          "payment-reversal",
+		Version:       1,
+		Input:         inputBytes,
+		CorrelationID: workflowID,
+	}); err != nil {
+		return api.ReverseWorkflowResponse{}, fmt.Errorf("start reversal workflow: %w", err)
+	}
+	if err := a.engine.Prepare(ctx, reversalID); err != nil {
+		return api.ReverseWorkflowResponse{}, fmt.Errorf("prepare reversal workflow: %w", err)
+	}
+
+	// Record reversal_pending on the original intent so GET reports the
+	// reversal-in-flight status. reversed=true is set later by the consumer
+	// when the reversal workflow reaches StatusSucceeded.
+	if err := a.intents.MarkReversalPendingByWorkflowID(ctx, workflowID); err != nil {
+		return api.ReverseWorkflowResponse{}, fmt.Errorf("mark reversal_pending: %w", err)
+	}
 	return api.ReverseWorkflowResponse{
-		WorkflowID: workflowID,
-		Status:     string(payment.IntentReversed),
+		WorkflowID:         workflowID,
+		ReversalWorkflowID: reversalID,
+		Status:             string(payment.IntentReversalPending),
 	}, nil
+}
+
+// readTransferVoucherNo reads the PostLedgerTransfer action's forward Output
+// from the succeeded payment-transfer workflow instance to extract the
+// voucher_no the reversal must reference. It uses the engine's Store
+// directly because the engine's public API does not expose action records.
+func readTransferVoucherNo(ctx context.Context, store *workflow.PostgresStore, workflowID string) (string, error) {
+	var voucherNo string
+	err := store.WithInstance(ctx, workflowID, func(tx workflow.Tx) error {
+		for _, a := range tx.Instance().Actions {
+			if a.Name == "PostLedgerTransfer" && a.Status == workflow.ActionSucceeded {
+				var out struct {
+					VoucherNo string `json:"voucher_no"`
+				}
+				if err := json.Unmarshal(a.Output, &out); err != nil {
+					return fmt.Errorf("decode PostLedgerTransfer output: %w", err)
+				}
+				voucherNo = out.VoucherNo
+				return nil
+			}
+		}
+		return fmt.Errorf("no succeeded PostLedgerTransfer action on workflow %s", workflowID)
+	})
+	return voucherNo, err
 }
 
 // newWorkflowUUID generates a v4 UUID hex string (no dashes) suitable as a

@@ -172,6 +172,7 @@ CREATE TABLE IF NOT EXISTS payment_intent (
         'compensated',
         'compensation_failed',
         'rejected',
+        'reversal_pending',
         'reversed'
     ))
 );

@@ -1,8 +1,17 @@
-// Package main is the reward read-only API service entrance.
+// Package main is the reward service entrance: read-only HTTP API + the
+// payment-completion consumer that earns points on a successful payment.
+//
+// Composition (Task 8):
+//   - HTTP server: /api/v1/points/... /api/v1/coupons/... read-only routes.
+//   - Result-event consumer: subscribes to the reward.events queue, consumes
+//     payment.completed.v1, and earns points for the payer. A NON-CRITICAL
+//     consumer: failures route to the reward DLQ and never affect payment
+//     status.
 package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
@@ -13,9 +22,11 @@ import (
 	customerv1 "bank/gen/bank/customer/v1"
 	"bank/internal/platform/grpcx"
 	"bank/internal/platform/httpx"
+	"bank/internal/platform/messaging"
 	"bank/internal/platform/pg"
 	"bank/internal/platform/runx"
 	"bank/internal/platform/serviceclient"
+	"bank/internal/reward"
 	"bank/internal/reward/api"
 	"bank/internal/reward/repo"
 	"bank/internal/reward/service"
@@ -58,8 +69,52 @@ func run() error {
 		Ready:    func(ctx context.Context) error { return db.PingContext(ctx) },
 	})
 
-	log.Printf("reward HTTP 监听 %s (db=%s)", httpAddr, dbName)
-	return runx.Serve(signalCtx, srv, nil, 5*time.Second)
+	// Task 8: payment-completion consumer. Subscribes to payment.completed.v1
+	// and earns points for the payer. Failures route to reward DLQ and never
+	// affect payment status.
+	amqpURL := getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/")
+	eventQueue := getenv("REWARD_EVENT_QUEUE", "reward.events")
+	retryPolicy := messaging.RetryPolicy{
+		MaxAttempts:          3,
+		RetryRoutingKey:      getenv("REWARD_RETRY_KEY", "reward.retry"),
+		DeadLetterRoutingKey: getenv("REWARD_DLQ_KEY", "reward.dlq"),
+	}
+	consumer := reward.NewConsumer(db, &pointsEarner{db: db}, retryPolicy)
+
+	workers := []runx.Worker{
+		runx.WorkerFunc(func(ctx context.Context) error {
+			return consumer.Run(ctx, amqpURL, eventQueue)
+		}),
+	}
+
+	log.Printf("reward HTTP 监听 %s (db=%s), 事件队列=%s", httpAddr, dbName, eventQueue)
+	return runx.Serve(signalCtx, srv, nil, 5*time.Second, workers...)
+}
+
+// pointsEarner is the concrete reward.PointsEarner: it records a points-earn
+// txn against the payer's points_acct. A real implementation would compute
+// earn rates by member level, check campaign eligibility, etc.; this minimal
+// implementation records a flat 1 point per minor unit so the wiring is
+// end-to-end functional. Returning an error causes the consumer to retry and
+// eventually DLQ the delivery — payment status is never affected.
+type pointsEarner struct {
+	db *sql.DB
+}
+
+func (e *pointsEarner) EarnPoints(ctx context.Context, paymentID, customerID string, amountMinor int64, currency string) error {
+	if customerID == "" || amountMinor <= 0 {
+		return fmt.Errorf("reward: cannot earn points for payment %s (customer=%s amount=%d)", paymentID, customerID, amountMinor)
+	}
+	// Minimal earn: 1 point per minor unit. A real implementation would
+	// compute based on member level, campaign, currency conversion, etc.
+	points := int(amountMinor)
+	_, err := e.db.ExecContext(ctx,
+		`UPDATE points_acct SET points_balance = points_balance + $2, update_biz_date = CURRENT_DATE WHERE cust_id = $1`,
+		customerID, points)
+	if err != nil {
+		return fmt.Errorf("reward: earn points for %s: %w", customerID, err)
+	}
+	return nil
 }
 
 type pinger interface{ Ping() error }
