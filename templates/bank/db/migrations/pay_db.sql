@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS settlement_record (
     settle_ts  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE workflow_instance (
+CREATE TABLE IF NOT EXISTS workflow_instance (
     workflow_id TEXT PRIMARY KEY,
     type TEXT NOT NULL,
     definition_version INTEGER NOT NULL,
@@ -103,12 +103,12 @@ CREATE TABLE workflow_instance (
     )
 );
 
-CREATE INDEX idx_workflow_instance_status_wakeup
+CREATE INDEX IF NOT EXISTS idx_workflow_instance_status_wakeup
     ON workflow_instance(status, next_wakeup_at);
-CREATE INDEX idx_workflow_instance_lease_until
+CREATE INDEX IF NOT EXISTS idx_workflow_instance_lease_until
     ON workflow_instance(lease_until);
 
-CREATE TABLE workflow_action (
+CREATE TABLE IF NOT EXISTS workflow_action (
     action_id BIGSERIAL PRIMARY KEY,
     workflow_id TEXT NOT NULL,
     action_index INTEGER NOT NULL,
@@ -145,5 +145,5 @@ CREATE TABLE workflow_action (
     )
 );
 
-CREATE UNIQUE INDEX idx_workflow_action_command_id
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_action_command_id
     ON workflow_action(command_id) WHERE command_id IS NOT NULL;

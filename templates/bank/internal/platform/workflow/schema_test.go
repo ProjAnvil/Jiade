@@ -22,13 +22,13 @@ func TestPaymentMigrationContainsWorkflowSchema(t *testing.T) {
 	got := string(body)
 
 	required := []string{
-		"CREATE TABLE workflow_instance",
+		"CREATE TABLE IF NOT EXISTS workflow_instance",
 		"definition_version INTEGER NOT NULL",
 		"prepared_context_json JSONB",
 		"revision BIGINT NOT NULL",
 		"lease_owner TEXT",
 		"lease_until TIMESTAMPTZ",
-		"CREATE TABLE workflow_action",
+		"CREATE TABLE IF NOT EXISTS workflow_action",
 		"UNIQUE (workflow_id, action_index)",
 		"idempotency_key TEXT NOT NULL",
 		"command_id TEXT",
