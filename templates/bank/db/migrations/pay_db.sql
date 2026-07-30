@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS workflow_action (
     output JSONB,
     last_error_class TEXT,
     last_error TEXT,
+    accepted_result_types JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (workflow_id, action_index),
@@ -144,6 +145,11 @@ CREATE TABLE IF NOT EXISTS workflow_action (
         OR jsonb_typeof(output) = 'object'
     )
 );
+
+-- Migration safety net: add the column to pre-existing tables (Task 7
+-- back-fill). IF NOT EXISTS makes this a no-op when the CREATE TABLE above
+-- already provisioned the column on a fresh database.
+ALTER TABLE workflow_action ADD COLUMN IF NOT EXISTS accepted_result_types JSONB;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_action_command_id
     ON workflow_action(command_id) WHERE command_id IS NOT NULL;
