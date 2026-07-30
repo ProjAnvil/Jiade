@@ -45,13 +45,13 @@ spec:
             - {name: DB_HOST, value: "core-banking-db"}
             - {name: DB_NAME, value: "core_db"}
           readinessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /readyz, port: http}
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 12
           livenessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /livez, port: http}
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 3
@@ -94,13 +94,13 @@ spec:
               # Service for proper client-side load balancing.
             - {name: CORE_BANKING_GRPC_TARGET, value: "dns:///core-banking-grpc:9090"}
           readinessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /readyz, port: http}
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 12
           livenessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /livez, port: http}
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 3
@@ -142,13 +142,13 @@ spec:
             - {name: CORE_BANKING_GRPC_TARGET, value: "dns:///core-banking-grpc:9090"}
             - {name: CUSTOMER_GRPC_TARGET, value: "dns:///customer-grpc:9090"}
           readinessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /readyz, port: http}
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 12
           livenessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /livez, port: http}
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 3
@@ -189,13 +189,13 @@ spec:
             - {name: DB_NAME, value: "reward_db"}
             - {name: CUSTOMER_GRPC_TARGET, value: "dns:///customer-grpc:9090"}
           readinessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /readyz, port: http}
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 12
           livenessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /livez, port: http}
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 3
@@ -236,13 +236,13 @@ spec:
             - {name: DB_NAME, value: "risk_db"}
             - {name: CUSTOMER_GRPC_TARGET, value: "dns:///customer-grpc:9090"}
           readinessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /readyz, port: http}
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 12
           livenessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /livez, port: http}
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 3
@@ -283,13 +283,13 @@ spec:
             - {name: DB_NAME, value: "loan_db"}
             - {name: CUSTOMER_GRPC_TARGET, value: "dns:///customer-grpc:9090"}
           readinessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /readyz, port: http}
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 12
           livenessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /livez, port: http}
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 3
@@ -330,13 +330,13 @@ spec:
             - {name: DB_NAME, value: "wealth_db"}
             - {name: CUSTOMER_GRPC_TARGET, value: "dns:///customer-grpc:9090"}
           readinessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /readyz, port: http}
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 12
           livenessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /livez, port: http}
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 3
