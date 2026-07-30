@@ -17,6 +17,10 @@ func NewRouter(h *Handlers) http.Handler {
 		r.Get("/payments/transfers/{txn_id}", h.GetTransfer)
 		r.Get("/payments/transfers/{txn_id}/parties", h.GetTransferParties)
 		r.Get("/merchants/{merchant_id}", h.GetMerchant)
+		// Payment-workflow saga endpoints (Task 7). Create, status, reverse.
+		r.Post("/payments/workflows", h.CreatePaymentWorkflow)
+		r.Get("/payments/workflows/{workflow_id}", h.GetPaymentWorkflow)
+		r.Post("/payments/workflows/{workflow_id}/reverse", h.ReversePaymentWorkflow)
 	})
 	return r
 }

@@ -150,3 +150,31 @@ CREATE TABLE IF NOT EXISTS workflow_action (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_action_command_id
     ON workflow_action(command_id) WHERE command_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS payment_intent (
+    idempotency_key    TEXT PRIMARY KEY,
+    request_hash       TEXT NOT NULL,
+    workflow_id        TEXT NOT NULL UNIQUE,
+    payer_customer_id  TEXT NOT NULL,
+    payer_account_no   TEXT NOT NULL,
+    payee_account_no   TEXT NOT NULL,
+    currency           TEXT NOT NULL,
+    amount_minor       BIGINT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'pending',
+    reversed           BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT ck_payment_intent_amount CHECK (amount_minor > 0),
+    CONSTRAINT ck_payment_intent_status CHECK (status IN (
+        'pending',
+        'running',
+        'succeeded',
+        'compensated',
+        'compensation_failed',
+        'rejected',
+        'reversed'
+    ))
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_intent_workflow ON payment_intent(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_payment_intent_status ON payment_intent(status);

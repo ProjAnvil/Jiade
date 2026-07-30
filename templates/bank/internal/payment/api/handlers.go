@@ -18,6 +18,11 @@ import (
 // service.NewPaymentService(fakePayRepo) injection.
 type Handlers struct {
 	Svc *service.PaymentService
+	// Workflows, when non-nil, serves the payment-workflow REST endpoints
+	// (create / status / reverse). Nil is treated as "not wired": the
+	// workflow handlers respond 503 with code workflow_api_unavailable so
+	// legacy callers that only built a read-only Handlers are unaffected.
+	Workflows WorkflowAPI
 }
 
 // Healthz Survival Check.
