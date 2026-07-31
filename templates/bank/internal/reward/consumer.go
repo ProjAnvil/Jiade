@@ -175,7 +175,10 @@ func (c *Consumer) Run(ctx context.Context, amqpURL, queue string) error {
 		return fmt.Errorf("reward consumer: set QoS: %w", err)
 	}
 
-	publisher, err := messaging.NewRabbitPublisher(ch, "")
+	// Retry router publisher: the exchange field is unused for retry routing
+	// (Route is called with the RetryPolicy's explicit exchanges); bank.events
+	// is the semantically meaningful default for a result-event consumer.
+	publisher, err := messaging.NewRabbitPublisher(ch, messaging.ExchangeEvents)
 	if err != nil {
 		return fmt.Errorf("reward consumer: retry publisher: %w", err)
 	}

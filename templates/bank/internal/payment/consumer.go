@@ -942,8 +942,11 @@ func (c *Consumer) Run(ctx context.Context, amqpURL, queue string) error {
 	}
 
 	// Wire the retry policy's publisher so ProcessDelivery can route replacement
-	// deliveries to retry/DLQ destinations.
-	publisher, err := messaging.NewRabbitPublisher(ch, "")
+	// deliveries to retry/DLQ destinations. The publisher's exchange is unused
+	// for retry routing (Route is called with the RetryPolicy's explicit
+	// RetryExchange/DeadLetterExchange); bank.events is set as the semantically
+	// meaningful default for a result-event consumer.
+	publisher, err := messaging.NewRabbitPublisher(ch, messaging.ExchangeEvents)
 	if err != nil {
 		return fmt.Errorf("payment consumer: retry publisher: %w", err)
 	}
@@ -977,11 +980,12 @@ func (c *Consumer) Run(ctx context.Context, amqpURL, queue string) error {
 // (workflow dispatch commands) and publishes them to the broker.
 // ---------------------------------------------------------------------------
 
-// Publisher publishes a result envelope to the broker under a routing key.
-// *messaging.RabbitPublisher satisfies this interface. Re-declared here to
-// keep payment's runtime self-contained (corebanking exports the same shape).
+// Publisher publishes a result envelope to the broker under an explicit
+// exchange and routing key. *messaging.RabbitPublisher satisfies this
+// interface. Re-declared here to keep payment's runtime self-contained
+// (corebanking exports the same shape).
 type Publisher interface {
-	Publish(ctx context.Context, routingKey string, envelope messaging.Envelope) error
+	PublishTo(ctx context.Context, exchange, routingKey string, envelope messaging.Envelope) error
 }
 
 // OutboxRelay drains undispatched outbox_message rows and publishes them.
@@ -1065,7 +1069,15 @@ func (r *OutboxRelay) drain(ctx context.Context) error {
 			log.Printf("payment outbox relay: poison message %s: %v", p.msgID, err)
 			continue
 		}
-		if err := r.publisher.Publish(ctx, p.routeKey, env); err != nil {
+		// Derive the topic exchange from the routing key: saga dispatch
+		// commands (risk.*.v1, core.*.v1) route through bank.commands while
+		// result events (risk.payment.*, core.hold.*, core.transfer.*,
+		// payment.completed, *.command.rejected) route through bank.events.
+		// The payment outbox holds both shapes, so the exchange MUST be
+		// resolved per row — a single fixed exchange would NO_ROUTE half the
+		// saga traffic.
+		exchange := messaging.ExchangeForRoutingKey(p.routeKey)
+		if err := r.publisher.PublishTo(ctx, exchange, p.routeKey, env); err != nil {
 			return fmt.Errorf("publish %s: %w", p.msgID, err)
 		}
 		if _, err := r.db.ExecContext(ctx,

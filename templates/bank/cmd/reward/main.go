@@ -3,10 +3,10 @@
 //
 // Composition (Task 8):
 //   - HTTP server: /api/v1/points/... /api/v1/coupons/... read-only routes.
-//   - Result-event consumer: subscribes to the reward.events queue, consumes
-//     payment.completed.v1, and earns points for the payer. A NON-CRITICAL
-//     consumer: failures route to the reward DLQ and never affect payment
-//     status.
+//   - Result-event consumer: subscribes to the reward.payment-events queue,
+//     consumes payment.completed.v1, and earns points for the payer. A
+//     NON-CRITICAL consumer: failures route to the reward DLQ and never affect
+//     payment status.
 package main
 
 import (
@@ -87,11 +87,19 @@ func run() error {
 	// and earns points for the payer. Failures route to reward DLQ and never
 	// affect payment status.
 	amqpURL := getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/")
-	eventQueue := getenv("REWARD_EVENT_QUEUE", "reward.events")
+	// REWARD_EVENT_QUEUE default matches definitions.json's
+	// reward.payment-events queue, which is bound to bank.events under
+	// payment.completed and reward.payment-events.
+	eventQueue := getenv("REWARD_EVENT_QUEUE", "reward.payment-events")
+	// Retry/DLQ routing keys MUST match definitions.json: bank.retry →
+	// reward.payment-events.retry (TTLs back to bank.events with routing key
+	// reward.payment-events) and bank.dlx → reward.payment-events.dead.
 	retryPolicy := messaging.RetryPolicy{
 		MaxAttempts:          3,
-		RetryRoutingKey:      getenv("REWARD_RETRY_KEY", "reward.retry"),
-		DeadLetterRoutingKey: getenv("REWARD_DLQ_KEY", "reward.dlq"),
+		RetryExchange:        getenv("REWARD_RETRY_EXCHANGE", messaging.ExchangeRetry),
+		RetryRoutingKey:      getenv("REWARD_RETRY_KEY", "reward.payment-events.retry"),
+		DeadLetterExchange:   getenv("REWARD_DLQ_EXCHANGE", messaging.ExchangeDeadLetter),
+		DeadLetterRoutingKey: getenv("REWARD_DLQ_KEY", "reward.payment-events.dead"),
 	}
 	consumer := reward.NewConsumer(db, &pointsEarner{db: db}, retryPolicy)
 

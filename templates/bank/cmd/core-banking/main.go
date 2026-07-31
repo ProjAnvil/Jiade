@@ -100,10 +100,18 @@ func run() error {
 	// --- Saga command consumer + outbox relay ---
 	amqpURL := getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/")
 	commandQueue := getenv("CORE_BANKING_COMMAND_QUEUE", "core-banking.commands")
+	// Retry/DLQ routing keys MUST match the bindings in
+	// deploy/rabbitmq/definitions.json: bank.retry → core-banking.commands.retry
+	// (which TTLs back to bank.commands with routing key core-banking.commands)
+	// and bank.dlx → core-banking.commands.dead. The retry queue's
+	// x-dead-letter-routing-key "core-banking.commands" re-delivers to this
+	// service's command queue after the TTL expires.
 	retryPolicy := messaging.RetryPolicy{
 		MaxAttempts:          3,
-		RetryRoutingKey:      getenv("CORE_BANKING_RETRY_KEY", "core-banking.retry"),
-		DeadLetterRoutingKey: getenv("CORE_BANKING_DLQ_KEY", "core-banking.dlq"),
+		RetryExchange:        getenv("CORE_BANKING_RETRY_EXCHANGE", messaging.ExchangeRetry),
+		RetryRoutingKey:      getenv("CORE_BANKING_RETRY_KEY", "core-banking.commands.retry"),
+		DeadLetterExchange:   getenv("CORE_BANKING_DLQ_EXCHANGE", messaging.ExchangeDeadLetter),
+		DeadLetterRoutingKey: getenv("CORE_BANKING_DLQ_KEY", "core-banking.commands.dead"),
 	}
 	consumer := corebanking.NewConsumer(db, holdSvc, transferSvc, ledgerRepo, retryPolicy, nil)
 
@@ -118,7 +126,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("core-banking outbox relay 打开 channel 失败: %w", err)
 	}
-	relayPublisher, err := messaging.NewRabbitPublisher(relayCh, "")
+	// The relay derives the topic exchange per outbox row (bank.commands vs
+	// bank.events) via messaging.ExchangeForRoutingKey, so the publisher's
+	// constructor exchange is never used for the relay's own publishes.
+	// bank.events is the documented default because core-banking's outbox
+	// holds result events (core.hold.*, core.transfer.*, *.command.rejected).
+	relayPublisher, err := messaging.NewRabbitPublisher(relayCh, messaging.ExchangeEvents)
 	if err != nil {
 		return fmt.Errorf("core-banking outbox relay publisher 失败: %w", err)
 	}

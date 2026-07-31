@@ -101,11 +101,23 @@ func (publisher *RabbitPublisher) Close() error {
 	return closeErr
 }
 
-// Publish publishes envelope to routingKey and returns only after RabbitMQ
-// positively confirms it.
+// Publish publishes envelope to the publisher's configured exchange under
+// routingKey and returns only after RabbitMQ positively confirms it.
 func (publisher *RabbitPublisher) Publish(ctx context.Context, routingKey string, envelope Envelope) error {
+	return publisher.PublishTo(ctx, publisher.exchange, routingKey, envelope)
+}
+
+// PublishTo publishes envelope to the explicit exchange under routingKey and
+// returns only after RabbitMQ positively confirms it. The OutboxRelay uses this
+// form so it can derive the exchange per routing key (bank.commands vs
+// bank.events) via ExchangeForRoutingKey instead of pinning a single exchange
+// at publisher construction time.
+func (publisher *RabbitPublisher) PublishTo(ctx context.Context, exchange, routingKey string, envelope Envelope) error {
 	if publisher == nil || publisher.channel == nil {
 		return errors.New("rabbit publisher is nil")
+	}
+	if exchange == "" {
+		return errors.New("rabbit exchange is required")
 	}
 	if routingKey == "" {
 		return errors.New("rabbit routing key is required")
@@ -133,7 +145,7 @@ func (publisher *RabbitPublisher) Publish(ctx context.Context, routingKey string
 	}
 	telemetry.InjectAMQP(publishCtx, headers)
 
-	return publisher.Route(publishCtx, publisher.exchange, routingKey, amqp.Publishing{
+	return publisher.Route(publishCtx, exchange, routingKey, amqp.Publishing{
 		DeliveryMode: amqp.Persistent,
 		ContentType:  "application/json",
 		MessageId:    envelope.MessageID,

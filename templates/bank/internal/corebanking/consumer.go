@@ -560,8 +560,11 @@ func (c *Consumer) Run(ctx context.Context, amqpURL, queue string) error {
 	}
 
 	// Wire the retry policy's publisher so ProcessDelivery can route
-	// replacement deliveries to retry/DLQ destinations.
-	publisher, err := messaging.NewRabbitPublisher(ch, "")
+	// replacement deliveries to retry/DLQ destinations. The publisher's
+	// exchange is unused for retry routing (Route is called with the
+	// RetryPolicy's explicit RetryExchange/DeadLetterExchange); bank.commands
+	// is set as the semantically meaningful default for a command consumer.
+	publisher, err := messaging.NewRabbitPublisher(ch, messaging.ExchangeCommands)
 	if err != nil {
 		return fmt.Errorf("corebanking consumer: retry publisher: %w", err)
 	}
@@ -594,10 +597,10 @@ func (c *Consumer) Run(ctx context.Context, amqpURL, queue string) error {
 // Outbox relay: drains outbox_message rows and publishes them to the broker
 // ---------------------------------------------------------------------------
 
-// Publisher publishes a result envelope to the broker under the given routing
-// key. *messaging.RabbitPublisher satisfies this interface.
+// Publisher publishes a result envelope to the broker under the given exchange
+// and routing key. *messaging.RabbitPublisher satisfies this interface.
 type Publisher interface {
-	Publish(ctx context.Context, routingKey string, envelope messaging.Envelope) error
+	PublishTo(ctx context.Context, exchange, routingKey string, envelope messaging.Envelope) error
 }
 
 // OutboxRelay drains undispatched outbox_message rows and publishes them to the
@@ -687,7 +690,13 @@ func (r *OutboxRelay) drain(ctx context.Context) error {
 			log.Printf("outbox relay: poison message %s: %v", p.msgID, err)
 			continue
 		}
-		if err := r.publisher.Publish(ctx, p.routeKey, env); err != nil {
+		// Derive the topic exchange from the routing key so result events
+		// (core.hold.*, core.transfer.*, *.command.rejected) route through
+		// bank.events and any versioned command through bank.commands. The
+		// core-banking outbox only holds result events today, but deriving
+		// per row keeps the relay robust if a command is ever appended here.
+		exchange := messaging.ExchangeForRoutingKey(p.routeKey)
+		if err := r.publisher.PublishTo(ctx, exchange, p.routeKey, env); err != nil {
 			return fmt.Errorf("publish %s: %w", p.msgID, err)
 		}
 		if _, err := r.db.ExecContext(ctx,

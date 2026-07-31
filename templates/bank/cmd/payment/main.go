@@ -10,9 +10,10 @@
 //   - Outbox relay: drains outbox_message rows the engine's AppendOutbox wrote
 //     (saga dispatch commands) AND the payment.completed.v1 events the
 //     consumer emits, and publishes them to RabbitMQ.
-//   - Result-event consumer: subscribes to the payment.results queue and feeds
-//     each envelope to Engine.ApplyResult, then syncs payment_intent.status
-//     and emits payment.completed.v1 on a fresh succeeded transition.
+//   - Result-event consumer: subscribes to the payment.workflow.events queue
+//     and feeds each envelope to Engine.ApplyResult, then syncs
+//     payment_intent.status and emits payment.completed.v1 on a fresh
+//     succeeded transition.
 //   - Recovery scheduler: claims preparing/timed-out instances and advances
 //     them via Engine.Prepare / Engine.Redispatch.
 //
@@ -159,11 +160,19 @@ func run() error {
 
 	// --- Result-event consumer + outbox relay + recovery ---
 	amqpURL := getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/")
-	resultQueue := getenv("PAYMENT_RESULT_QUEUE", "payment.results")
+	// PAYMENT_RESULT_QUEUE default matches definitions.json's
+	// payment.workflow.events queue, which is bound to bank.events under
+	// risk.#, core.#, and payment.workflow.events.
+	resultQueue := getenv("PAYMENT_RESULT_QUEUE", "payment.workflow.events")
+	// Retry/DLQ routing keys MUST match definitions.json: bank.retry →
+	// payment-workflow.retry (TTLs back to bank.events with routing key
+	// payment.workflow.events) and bank.dlx → payment-workflow.dead.
 	retryPolicy := messaging.RetryPolicy{
 		MaxAttempts:          3,
-		RetryRoutingKey:      getenv("PAYMENT_RETRY_KEY", "payment.retry"),
-		DeadLetterRoutingKey: getenv("PAYMENT_DLQ_KEY", "payment.dlq"),
+		RetryExchange:        getenv("PAYMENT_RETRY_EXCHANGE", messaging.ExchangeRetry),
+		RetryRoutingKey:      getenv("PAYMENT_RETRY_KEY", "payment-workflow.retry"),
+		DeadLetterExchange:   getenv("PAYMENT_DLQ_EXCHANGE", messaging.ExchangeDeadLetter),
+		DeadLetterRoutingKey: getenv("PAYMENT_DLQ_KEY", "payment-workflow.dead"),
 	}
 	consumer := payment.NewConsumer(db, engine, statusRepo, intentRepo, intentRepo, completionOutbox, retryPolicy).
 		WithAtomicCompletion(intentRepo, completionOutbox).
@@ -180,7 +189,13 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("payment outbox relay 打开 channel 失败: %w", err)
 	}
-	relayPublisher, err := messaging.NewRabbitPublisher(relayCh, "")
+	// The relay derives the topic exchange per outbox row (bank.commands vs
+	// bank.events) via messaging.ExchangeForRoutingKey, so the publisher's
+	// constructor exchange is never used for the relay's own publishes.
+	// bank.commands is the documented default because payment's outbox
+	// primarily holds saga dispatch commands (risk.*.v1, core.*.v1); the
+	// payment.completed.v1 event is also derived to bank.events per row.
+	relayPublisher, err := messaging.NewRabbitPublisher(relayCh, messaging.ExchangeCommands)
 	if err != nil {
 		return fmt.Errorf("payment outbox relay publisher 失败: %w", err)
 	}
