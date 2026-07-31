@@ -1,6 +1,6 @@
 name: bank
-description: A compact core-banking system with core, customer, payment, reward, risk, loan, and wealth services
-version: 0.5.0
+description: A compact core-banking system with core, customer, payment, reward, risk, loan, and wealth services — durable payment-transfer saga, internal gRPC reads, RabbitMQ commands/events, full observability stack, and dev/prod Kubernetes overlays
+version: 0.6.0
 databases:
   - name: core_db
     migrate: db/migrations/core_db.sql

@@ -12,7 +12,7 @@ Each template is a standalone Go module that ships its own README and ARCHITECTU
 
 | Template | What it is | Docs |
 |----------|------------|------|
-| `bank` | Core banking microcosm — 7 Go services, 7 dedicated PostgreSQL databases, internal gRPC reads, RabbitMQ commands/events, Traefik gateway (:18000), double-entry ledger, daily rolling balances. | [templates/bank/README.md](templates/bank/README.md) · [ARCHITECTURE.md](templates/bank/ARCHITECTURE.md) |
+| `bank` | Core banking microcosm — 7 Go services, 7 dedicated PostgreSQL databases, internal gRPC reads, RabbitMQ commands/events, Traefik gateway (:18000), double-entry ledger, daily rolling balances, **durable payment-transfer saga** (risk→hold→transfer forward, reverse-order compensation, operator admin gRPC), **full observability stack** (OTel/Jaeger/Prometheus/Grafana + 5 alerts), and **dev/prod Kubernetes overlays** (dev = stateful, prod = external state + SecretProviderClass). | [templates/bank/README.md](templates/bank/README.md) · [ARCHITECTURE.md](templates/bank/ARCHITECTURE.md) |
 | `commerce` | Commerce backend microcosm — 6 Go services, 6 PostgreSQL databases, RabbitMQ saga, Traefik gateway. | [templates/commerce/README.md](templates/commerce/README.md) · [ARCHITECTURE.md](templates/commerce/ARCHITECTURE.md) |
 
 ```bash
