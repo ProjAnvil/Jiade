@@ -70,14 +70,23 @@ func main() {
 
 	epoch := time.Unix(0, 0)
 	for _, rel := range paths {
-		data, err := os.ReadFile(filepath.Join(templateRoot, rel))
+		full := filepath.Join(templateRoot, rel)
+		data, err := os.ReadFile(full)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "read %s: %v\n", rel, err)
 			os.Exit(1)
 		}
+		// Preserve source file permissions so TestTemplateArchiveMatchesTemplateSources
+		// (which compares perm bits) passes. Git tracks only 0644/0755, so this
+		// stays deterministic across macOS and Linux.
+		info, err := os.Stat(full)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stat %s: %v\n", rel, err)
+			os.Exit(1)
+		}
 		hdr := &tar.Header{
 			Name:     rel,
-			Mode:     0644,
+			Mode:     int64(info.Mode().Perm()),
 			Size:     int64(len(data)),
 			ModTime:  epoch,
 			Typeflag: tar.TypeReg,
