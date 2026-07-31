@@ -259,6 +259,17 @@ func (c *Consumer) handlePostHeldTransfer(ctx context.Context, q pg.DBTX, env me
 			workflow.BusinessRejected, "smoke: transfer posting failed (transient)")
 	}
 
+	// Test-only smoke gate: smoke-compfail workflows fail the forward
+	// post-held-transfer terminally (business_rejected) so the saga enters
+	// compensation. The release-hold compensation then fails transiently
+	// on every attempt (see handleReleaseHold), exhausting
+	// CompensationMaxAttempts and transitioning the instance to
+	// compensation_failed. Inert in production.
+	if testfail.IsCompFail(env.WorkflowID) {
+		return c.emitFailure(ctx, q, env, EventTransferFailed, RouteTransferFailed,
+			workflow.BusinessRejected, "smoke: transfer posting failed (compfail)")
+	}
+
 	_, err := c.transfers.PostHeldTransfer(ctx, service.PostHeldTransfer{
 		IdempotencyKey: payloadIdempotencyKey(env, payload.IdempotencyKey),
 		HoldID:         payload.HoldID,

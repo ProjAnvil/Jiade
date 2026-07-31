@@ -5,7 +5,11 @@ gateway=${GATEWAY:-http://localhost:18100}
 jaeger_network=${JAEGER_NETWORK:-commerce-obs}
 request_id="trace-smoke-$(date +%s)"
 
-curl -fsS -H "X-Request-ID: ${request_id}" "${gateway}/api/v1/products?limit=1" >/dev/null
+# The observability overlay recreates app containers (new env vars), and
+# Traefik needs a moment to re-discover them. Retry to bridge that gap.
+curl -fsS --retry 15 --retry-delay 1 --retry-connrefused \
+  -H "X-Request-ID: ${request_id}" \
+  "${gateway}/api/v1/products?limit=1" >/dev/null
 for _ in $(seq 1 30); do
   if docker run --rm --network "${jaeger_network}" curlimages/curl:8.10.1 \
     -fsS "http://jaeger:16686/api/traces?service=catalog&limit=20" |

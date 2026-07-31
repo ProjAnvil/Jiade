@@ -31,25 +31,14 @@ commerce-ci:
 	cd templates/commerce && $(MAKE) config-check
 	kubectl kustomize templates/commerce/deploy/k8s >/tmp/commerce-k8s.yaml
 
-# End-to-end smoke (requires docker; acceptance #4/#5)
-# Two-stage startup: postgres → seed → then start the service to eliminate startup race conditions
+# End-to-end smoke (requires docker; acceptance #4/#5).
+# Generates a bank project from the embedded template, boots the full
+# multi-database + Traefik topology, and runs the 10-gate smoke suite.
 e2e: generate
 	rm -rf /tmp/jiade-e2e
 	go run ./cmd/jiade init --template bank --dir /tmp/jiade-e2e --force
-	cd /tmp/jiade-e2e && docker compose up -d --build postgres
-	@until docker compose -f /tmp/jiade-e2e/docker-compose.yaml exec -T postgres pg_isready -U bank >/dev/null 2>&1; do sleep 1; done
-	cd /tmp/jiade-e2e && go run ./cmd/seed --scale=dev --reset
-	cd /tmp/jiade-e2e && docker compose up -d --build core-banking customer payment
-	# Three services healthz (Acceptance #4)
-	curl -sf --retry 10 --retry-connrefused --retry-delay 2 localhost:18080/healthz
-	curl -sf --retry 10 --retry-connrefused --retry-delay 2 localhost:18081/healthz
-	curl -sf --retry 10 --retry-connrefused --retry-delay 2 localhost:18082/healthz
-	# core-banking read-only (Spec A)
-	curl -sf localhost:18080/api/v1/accounts/D0000000001
-	curl -sf "localhost:18080/api/v1/accounts/D0000000001/balance"
-	# 2 cross-service HTTP aggregation endpoints (Acceptance #5)
-	curl -sf localhost:18081/api/v1/customers/C0000001/accounts
-	curl -sf localhost:18082/api/v1/payments/transfers/PT000000000001/parties
+	cd /tmp/jiade-e2e && make up
+	cd /tmp/jiade-e2e && make smoke
 	@echo "E2E OK"
 
 clean:

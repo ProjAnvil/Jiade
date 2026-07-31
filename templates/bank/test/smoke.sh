@@ -440,16 +440,21 @@ gate_10_negative_probes() {
   # token gate rejects an unauthenticated RPC — the service is up but
   # refuses the call when BANK_OPERATOR_TOKEN is empty (fail-closed).
   local admin_probe
+  # NOTE: || true (not || echo "000") — curl -w '%{http_code}' already
+  # writes "000" on connection failure, and appending another "000"
+  # produces "000000" which falls through the case below.  Using || true
+  # lets curl's own status code stand; an empty string (docker run itself
+  # failed) is also acceptable.
   admin_probe=$(docker run --rm --network bank-data curlimages/curl:8.10.1 \
     -s -o /dev/null -w '%{http_code}' \
-    "http://payment:9091/" 2>/dev/null || echo "000")
+    "http://payment:9091/" 2>/dev/null || true)
   # gRPC servers respond 200 to a plain HTTP/1.1 probe with a 415/400
   # content-type mismatch; the key assertion is that the port is NOT
-  # silent (service is listening inside the network). 000 means the
-  # container could not reach the port at all — also acceptable since
+  # silent (service is listening inside the network). 000 or empty means
+  # the container could not reach the port at all — also acceptable since
   # the surface is protected.
   case "$admin_probe" in
-    000|200|400|415) ;;  # acceptable: listening but rejects
+    000|200|400|415|"") ;;  # acceptable: listening but rejects
     *) problems+="admin-grpc in-network http=${admin_probe} (unexpected); " ;;
   esac
 
