@@ -1,4 +1,13 @@
+SHELL := /usr/bin/env bash
+
+COMPOSE       ?= docker compose
+COMPOSE_FILES := -f compose.yaml
+COMPOSE_OBS   := -f compose.yaml -f compose.observability.yaml
+
+GATEWAY ?= http://localhost:18000
+
 .PHONY: up down seed scale config-check topology-test test integration-test proto
+.PHONY: observability observability-down trace-smoke observability-check
 
 proto:
 	docker run --rm -v "$(CURDIR):/workspace" -w /workspace bufbuild/buf:1.47.2 generate
@@ -28,3 +37,18 @@ test:
 
 integration-test:
 	go test -tags=integration -p 1 ./...
+
+observability: ## Bring up the otel/prometheus/grafana/jaeger overlay.
+	$(COMPOSE) $(COMPOSE_OBS) --profile observability up -d --wait
+
+observability-down: ## Remove the observability overlay containers only.
+	$(COMPOSE) $(COMPOSE_OBS) --profile observability down --remove-orphans
+
+trace-smoke: ## Verify a payment request trace reaches Jaeger.
+	GATEWAY=$(GATEWAY) bash test/trace-smoke.sh
+
+observability-check: ## Validate dashboard JSON and Prometheus config.
+	jq empty deploy/grafana/dashboards/*.json
+	docker run --rm --entrypoint /bin/promtool \
+	  -v "$(CURDIR)/deploy/prometheus:/etc/prometheus:ro" prom/prometheus:v2.54.1 \
+	  check config /etc/prometheus/prometheus.yaml

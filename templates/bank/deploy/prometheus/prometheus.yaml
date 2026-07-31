@@ -1,0 +1,52 @@
+# Prometheus scrape configuration for the bank observability overlay.
+#
+# The seven Go services expose /metrics on their HTTP port (8080) via the
+# standard promhttp handler. We use DNS service discovery over the bank-data
+# network so all service replicas are scraped. The otel collector also exposes
+# its own converted metrics on :8888. RabbitMQ's management image exposes
+# Prometheus metrics on :15692.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+  external_labels:
+    cluster: bank-local
+
+# Alerting rules are loaded from alerts.yaml and evaluated at the
+# evaluation_interval configured above.
+rule_files:
+  - alerts.yaml
+
+scrape_configs:
+  - job_name: bank-services
+    dns_sd_configs:
+      - names:
+          - core-banking
+          - customer
+          - payment
+          - reward
+          - risk
+          - loan
+          - wealth
+        type: A
+        port: 8080
+        refresh_interval: 15s
+    metrics_path: /metrics
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: service
+        regex: '^([a-z\-]+):.*'
+        replacement: '${1}'
+
+  - job_name: bank-otel-collector
+    static_configs:
+      - targets: ['otel-collector:8888']
+        labels:
+          service: otel-collector
+
+  - job_name: bank-rabbitmq
+    static_configs:
+      - targets: ['rabbitmq:15692']
+        labels:
+          service: rabbitmq
