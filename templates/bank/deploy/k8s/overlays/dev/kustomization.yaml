@@ -1,0 +1,58 @@
+# Runnable dev overlay: wires the application base to in-cluster PostgreSQL
+# and RabbitMQ StatefulSets plus dev-only credentials.
+#
+# `kubectl apply -k deploy/k8s/overlays/dev` produces a self-contained bank
+# topology: the seven application Deployments, their Services/Ingress, the
+# NetworkPolicy baseline, eight StatefulSets (7 PostgreSQL + 1 RabbitMQ) with
+# PVCs, and a single dev Secret. All stateful resources and the Secret carry
+# `bank.jiade/unsafe: dev-only`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: bank
+
+resources:
+  - ../../base
+  - state.yaml
+  - secret.yaml
+
+# Patch the seven application Deployments so each container loads DB_PASSWORD,
+# BROKER_URL, and BANK_OPERATOR_TOKEN from the dev Secret via envFrom. The
+# base leaves these unset intentionally; this overlay makes the topology
+# runnable. JSON Patch appends a secretRef entry to the existing envFrom list
+# (which already carries the bank-config ConfigMap).
+patches:
+  - target: {kind: Deployment, name: core-banking}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: {secretRef: {name: bank-dev-secrets}}
+  - target: {kind: Deployment, name: customer}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: {secretRef: {name: bank-dev-secrets}}
+  - target: {kind: Deployment, name: payment}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: {secretRef: {name: bank-dev-secrets}}
+  - target: {kind: Deployment, name: reward}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: {secretRef: {name: bank-dev-secrets}}
+  - target: {kind: Deployment, name: risk}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: {secretRef: {name: bank-dev-secrets}}
+  - target: {kind: Deployment, name: loan}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: {secretRef: {name: bank-dev-secrets}}
+  - target: {kind: Deployment, name: wealth}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: {secretRef: {name: bank-dev-secrets}}

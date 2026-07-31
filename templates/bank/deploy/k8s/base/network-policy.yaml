@@ -1,0 +1,205 @@
+# NetworkPolicies: namespace-wide default-deny plus the explicit allow matrix
+# required by the seven bank services.
+#
+# This file coexists with networking.yaml, which separately locks the protected
+# payment admin gRPC port (9091) to pods labelled role=bank-operator. Splitting
+# the broad allow matrix from the focused admin lockdown means overlays that
+# open inter-service mesh traffic can never accidentally widen admin gRPC
+# ingress — the union semantics of Kubernetes NetworkPolicy keep 9091
+# reachable only from operator identities regardless of what this file allows.
+#
+# Kubernetes NetworkPolicy is additive: a flow is allowed when ANY policy
+# selecting the pod allows it. We therefore declare two namespace-wide
+# default-deny policies (one for Ingress, one for Egress) and then layer
+# narrowly-scoped allow rules for every required flow. The default-deny
+# baseline plus additive allows yields least-privilege without naming every
+# destination twice.
+#
+# Destination namespaces (traefik, observability, kube-system) are matched by
+# the built-in kubernetes.io/metadata.name label (stable since Kubernetes 1.21).
+# Clusters that use different namespace names or labels must adjust the
+# namespaceSelectors below.
+
+# ===================== Default deny (baseline) =====================
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bank-default-deny-ingress
+spec:
+  # Empty podSelector selects every pod in the namespace.
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bank-default-deny-egress
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+
+# ===================== DNS egress =====================
+# Required so pods can resolve Service, ExternalName, and kube-dns names.
+# Without this, the egress default-deny above breaks name resolution.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            # CoreDNS (k8s-app=kube-dns) and legacy kube-dns both carry this.
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+
+# ===================== Public gateway -> REST :8080 =====================
+# The platform ingress controller (Traefik by default) terminates external
+# traffic and forwards it to the REST Services on port 8080. Only the ingress
+# namespace may open connections to the REST port; the public Ingress in
+# gateway.yaml never routes gRPC or admin paths.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway-to-rest
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [core-banking, customer, payment, reward, risk, loan, wealth]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - {protocol: TCP, port: 8080}
+
+# ===================== Internal gRPC mesh (:9090) =====================
+# Internal gRPC: payment->customer/core, customer->core, and
+# reward/risk/loan/wealth->customer. Callers run inside this namespace, so the
+# ingress policy allows intra-namespace pods to reach the two gRPC-serving
+# services (core-banking, customer) on :9090. The matching egress policy below
+# permits the seven app pods to place those calls.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-internal-grpc-ingress
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [core-banking, customer]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        # Same-namespace pods only (podSelector without namespaceSelector
+        # matches pods in the policy's own namespace).
+        - podSelector: {}
+      ports:
+        - {protocol: TCP, port: 9090}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-grpc-egress
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [core-banking, customer, payment, reward, risk, loan, wealth]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {}
+      ports:
+        - {protocol: TCP, port: 9090}
+
+# ===================== Application -> PostgreSQL / RabbitMQ =====================
+# The dev overlay provisions in-cluster StatefulSets; the prod overlay points
+# the same Service names at ExternalName managed endpoints. Because prod
+# destinations are outside the cluster, the egress allows are port-scoped
+# rather than destination-scoped. Each app's DB_HOST env still pins it to its
+# own database, so the application layer enforces the per-service pairing even
+# though the network policy allows the data ports broadly.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-data-egress
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [core-banking, customer, payment, reward, risk, loan, wealth]
+  policyTypes: [Egress]
+  egress:
+    # PostgreSQL.
+    - ports:
+        - {protocol: TCP, port: 5432}
+    # RabbitMQ AMQP.
+    - ports:
+        - {protocol: TCP, port: 5672}
+
+# ===================== Telemetry =====================
+# (a) Prometheus scrapes /metrics on the app HTTP port from the observability
+#     namespace (ingress on :8080).
+# (b) Apps push OTLP traces to the collector in the observability namespace
+#      on :4317 (egress). Both directions are required for the Task 4
+#      observability stack to function under the default-deny baseline.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [core-banking, customer, payment, reward, risk, loan, wealth]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - {protocol: TCP, port: 8080}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-otlp-egress
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [core-banking, customer, payment, reward, risk, loan, wealth]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - {protocol: TCP, port: 4317}
