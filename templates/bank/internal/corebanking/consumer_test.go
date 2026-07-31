@@ -295,6 +295,65 @@ func TestConsumer_Routing_DecodesPayload(t *testing.T) {
 	}
 }
 
+// TestConsumer_Transfers_PropagateSagaRouting verifies the consumer threads
+// the command envelope's saga-routing fields into the service input so the
+// service-emitted transfer-posted/reversed result envelopes carry the full
+// routing context the saga engine's ApplyResult correlates on (Bug 7).
+func TestConsumer_Transfers_PropagateSagaRouting(t *testing.T) {
+	c, _, transfers, _ := newTestConsumer(t)
+
+	// post-held-transfer
+	env := makeEnvelope(CmdPostHeldTransfer, postHeldTransferPayload{
+		HoldID: "H1", FromAccount: "D1", ToAccount: "D2", AmountCents: 5000, Currency: "CNY",
+	})
+	env.CommandID = "cmd-post-1"
+	if err := c.processEnvelope(context.Background(), nil, env); err != nil {
+		t.Fatalf("post-held-transfer: %v", err)
+	}
+	if len(transfers.postCalls) != 1 {
+		t.Fatalf("post calls = %d", len(transfers.postCalls))
+	}
+	pc := transfers.postCalls[0]
+	if pc.SagaRouting.WorkflowID != env.WorkflowID {
+		t.Errorf("post SagaRouting.WorkflowID = %q, want %q", pc.SagaRouting.WorkflowID, env.WorkflowID)
+	}
+	if pc.SagaRouting.ActionName != env.ActionName {
+		t.Errorf("post SagaRouting.ActionName = %q, want %q", pc.SagaRouting.ActionName, env.ActionName)
+	}
+	if pc.SagaRouting.CommandID != "cmd-post-1" {
+		t.Errorf("post SagaRouting.CommandID = %q, want cmd-post-1", pc.SagaRouting.CommandID)
+	}
+	if pc.SagaRouting.CorrelationID != env.CorrelationID {
+		t.Errorf("post SagaRouting.CorrelationID = %q, want %q", pc.SagaRouting.CorrelationID, env.CorrelationID)
+	}
+	if pc.SagaRouting.CommandMessageID != env.MessageID {
+		t.Errorf("post SagaRouting.CommandMessageID = %q, want %q", pc.SagaRouting.CommandMessageID, env.MessageID)
+	}
+
+	// reverse-transfer
+	env = makeEnvelope(CmdReverseTransfer, reverseTransferPayload{OriginalVoucherNo: "V1"})
+	env.CommandID = "cmd-rev-1"
+	if err := c.processEnvelope(context.Background(), nil, env); err != nil {
+		t.Fatalf("reverse-transfer: %v", err)
+	}
+	if len(transfers.reverseCalls) != 1 {
+		t.Fatalf("reverse calls = %d", len(transfers.reverseCalls))
+	}
+	rc := transfers.reverseCalls[0]
+	if rc.SagaRouting.WorkflowID != env.WorkflowID {
+		t.Errorf("reverse SagaRouting.WorkflowID = %q, want %q", rc.SagaRouting.WorkflowID, env.WorkflowID)
+	}
+	if rc.SagaRouting.CommandID != "cmd-rev-1" {
+		t.Errorf("reverse SagaRouting.CommandID = %q, want cmd-rev-1", rc.SagaRouting.CommandID)
+	}
+	if rc.SagaRouting.CorrelationID != env.CorrelationID {
+		t.Errorf("reverse SagaRouting.CorrelationID = %q, want %q", rc.SagaRouting.CorrelationID, env.CorrelationID)
+	}
+	if rc.SagaRouting.CommandMessageID != env.MessageID {
+		t.Errorf("reverse SagaRouting.CommandMessageID = %q, want %q", rc.SagaRouting.CommandMessageID, env.MessageID)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Step 1: Idempotency — deliver each message twice → one mutation + one
 // outbox row (Inbox dedup simulated).

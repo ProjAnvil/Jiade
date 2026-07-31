@@ -267,6 +267,13 @@ func (c *Consumer) handlePostHeldTransfer(ctx context.Context, q pg.DBTX, env me
 		Amount:         domain.NewMoneyFromCents(payload.AmountCents),
 		Ccy:            payload.Currency,
 		Summary:        payload.Summary,
+		SagaRouting: service.SagaRouting{
+			WorkflowID:       env.WorkflowID,
+			ActionName:       env.ActionName,
+			CommandID:        env.CommandID,
+			CorrelationID:    env.CorrelationID,
+			CommandMessageID: env.MessageID,
+		},
 	})
 	if err != nil {
 		return c.handleServiceError(ctx, q, env, err, EventTransferFailed, RouteTransferFailed)
@@ -290,6 +297,13 @@ func (c *Consumer) handleReverseTransfer(ctx context.Context, q pg.DBTX, env mes
 		IdempotencyKey:    payloadIdempotencyKey(env, payload.IdempotencyKey),
 		OriginalVoucherNo: payload.OriginalVoucherNo,
 		Summary:           payload.Summary,
+		SagaRouting: service.SagaRouting{
+			WorkflowID:       env.WorkflowID,
+			ActionName:       env.ActionName,
+			CommandID:        env.CommandID,
+			CorrelationID:    env.CorrelationID,
+			CommandMessageID: env.MessageID,
+		},
 	})
 	if err != nil {
 		return c.handleServiceError(ctx, q, env, err, EventTransferReverseFailed, RouteTransferReverseFailed)

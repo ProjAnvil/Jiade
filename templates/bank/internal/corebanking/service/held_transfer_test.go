@@ -482,3 +482,106 @@ func TestPostHeldTransfer_OutboxPayload_ValidJSON(t *testing.T) {
 		t.Errorf("payload amount_cents=%v want 5000", payload["amount_cents"])
 	}
 }
+
+// TestPostHeldTransfer_OutboxEnvelope_StampsSagaRouting verifies the
+// service-emitted core.transfer-posted.v1 envelope carries the full saga
+// routing context (workflow_id, action_name, command_id, correlation_id)
+// propagated from the command input. Without these the outbox relay rejects
+// the envelope and the saga action stalls in waiting_result (Bug 7).
+func TestPostHeldTransfer_OutboxEnvelope_StampsSagaRouting(t *testing.T) {
+	hold := activeHold("H1", "D1", domain.NewMoneyFromCents(5000))
+	svc, _, _, transfers := newHeldTransferSvc(t, hold, map[string]domain.DemandAccount{
+		"D1": {AccountNo: "D1", SubjectCode: "2011", Ccy: "CNY", Status: domain.AccountStatusActive},
+		"D2": {AccountNo: "D2", SubjectCode: "2011", Ccy: "CNY", Status: domain.AccountStatusActive},
+	})
+	routing := SagaRouting{
+		WorkflowID:       "wf-saga-1",
+		ActionName:       "PostLedgerTransfer",
+		CommandID:        "cmd-abc",
+		CorrelationID:    "corr-xyz",
+		CommandMessageID: "msg-orig-1",
+	}
+
+	_, err := svc.PostHeldTransfer(context.Background(), PostHeldTransfer{
+		IdempotencyKey: "K1", HoldID: "H1",
+		FromAccount: "D1", ToAccount: "D2",
+		Amount:      domain.NewMoneyFromCents(5000),
+		Ccy:         "CNY",
+		SagaRouting: routing,
+	})
+	if err != nil {
+		t.Fatalf("PostHeldTransfer 应成功: %v", err)
+	}
+	if len(transfers.outboxMsgs) != 1 {
+		t.Fatalf("应 1 条 outbox, got %d", len(transfers.outboxMsgs))
+	}
+	env := transfers.outboxMsgs[0].Envelope
+	if env.WorkflowID != routing.WorkflowID {
+		t.Errorf("workflow_id = %q, want %q", env.WorkflowID, routing.WorkflowID)
+	}
+	if env.ActionName != routing.ActionName {
+		t.Errorf("action_name = %q, want %q", env.ActionName, routing.ActionName)
+	}
+	if env.CommandID != routing.CommandID {
+		t.Errorf("command_id = %q, want %q", env.CommandID, routing.CommandID)
+	}
+	if env.CorrelationID != routing.CorrelationID {
+		t.Errorf("correlation_id = %q, want %q", env.CorrelationID, routing.CorrelationID)
+	}
+	if env.CausationID != routing.CommandMessageID {
+		t.Errorf("causation_id = %q, want %q", env.CausationID, routing.CommandMessageID)
+	}
+	if env.IdempotencyKey != "K1" {
+		t.Errorf("idempotency_key = %q, want K1", env.IdempotencyKey)
+	}
+}
+
+// TestReverseTransfer_OutboxEnvelope_StampsSagaRouting verifies the
+// service-emitted core.transfer-reversed.v1 envelope carries the full saga
+// routing context propagated from the command input (Bug 7).
+func TestReverseTransfer_OutboxEnvelope_StampsSagaRouting(t *testing.T) {
+	originalTxns := []domain.Txn{
+		{TxnID: "T1", AccountNo: "D1", DCFlag: domain.DCDebit, Amount: domain.NewMoneyFromCents(5000), SubjectCode: "2011", VoucherNo: "V-ORIG", Ccy: "CNY", TxnStatus: domain.TxnStatusNormal},
+		{TxnID: "T2", AccountNo: "D2", DCFlag: domain.DCCredit, Amount: domain.NewMoneyFromCents(5000), SubjectCode: "2011", VoucherNo: "V-ORIG", Ccy: "CNY", TxnStatus: domain.TxnStatusNormal},
+	}
+	svc, _, ledgerStore, transfers := newHeldTransferSvc(t, domain.Hold{}, nil)
+	ledgerStore.voucherTxns = originalTxns
+	routing := SagaRouting{
+		WorkflowID:       "wf-saga-2",
+		ActionName:       "ReverseLedgerTransfer",
+		CommandID:        "cmd-def",
+		CorrelationID:    "corr-uvw",
+		CommandMessageID: "msg-orig-2",
+	}
+
+	_, err := svc.ReverseTransfer(context.Background(), ReverseTransfer{
+		IdempotencyKey:    "RK1",
+		OriginalVoucherNo: "V-ORIG",
+		SagaRouting:       routing,
+	})
+	if err != nil {
+		t.Fatalf("ReverseTransfer 应成功: %v", err)
+	}
+	if len(transfers.outboxMsgs) != 1 {
+		t.Fatalf("应 1 条 outbox, got %d", len(transfers.outboxMsgs))
+	}
+	env := transfers.outboxMsgs[0].Envelope
+	if env.WorkflowID != routing.WorkflowID {
+		t.Errorf("workflow_id = %q, want %q", env.WorkflowID, routing.WorkflowID)
+	}
+	if env.ActionName != routing.ActionName {
+		t.Errorf("action_name = %q, want %q", env.ActionName, routing.ActionName)
+	}
+	if env.CommandID != routing.CommandID {
+		t.Errorf("command_id = %q, want %q", env.CommandID, routing.CommandID)
+	}
+	if env.CorrelationID != routing.CorrelationID {
+		t.Errorf("correlation_id = %q, want %q", env.CorrelationID, routing.CorrelationID)
+	}
+	if env.CausationID != routing.CommandMessageID {
+		t.Errorf("causation_id = %q, want %q", env.CausationID, routing.CommandMessageID)
+	}
+	if env.IdempotencyKey != "RK1" {
+		t.Errorf("idempotency_key = %q, want RK1", env.IdempotencyKey)
+	}
+}

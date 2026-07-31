@@ -44,6 +44,22 @@ var (
 	ErrVoucherAlreadyReversed = fmt.Errorf("transfer: 凭证已冲正")
 )
 
+// SagaRouting carries the command envelope's saga-routing fields through the
+// service so the service-emitted result envelope (core.transfer-posted.v1 /
+// core.transfer-reversed.v1) carries the same correlation/causation context
+// that the consumer stamps on its own events via makeResultEnvelope. The saga
+// engine's ApplyResult correlates results on workflow_id + action_name +
+// command_id; without these the outbox relay rejects the envelope
+// ("correlation_id is required") and the action stalls in waiting_result.
+// The consumer populates these fields from the inbound command envelope.
+type SagaRouting struct {
+	WorkflowID       string
+	ActionName       string
+	CommandID        string
+	CorrelationID    string
+	CommandMessageID string // the command envelope's MessageID, echoed as CausationID
+}
+
 // PostHeldTransfer command: captures an active hold and posts balanced
 // debit/credit entries in one core-banking transaction. Amount, currency and
 // from-account must exactly match the hold. Idempotent on IdempotencyKey.
@@ -55,6 +71,7 @@ type PostHeldTransfer struct {
 	Amount         domain.Money // must match hold's amount exactly
 	Ccy            string       // must match hold's currency exactly
 	Summary        string
+	SagaRouting    SagaRouting
 }
 
 // ReverseTransfer command: creates a red-reversal voucher whose two entries
@@ -65,6 +82,7 @@ type ReverseTransfer struct {
 	IdempotencyKey    string
 	OriginalVoucherNo string
 	Summary           string
+	SagaRouting       SagaRouting
 }
 
 // TransferStore is the persistence port for held-transfer posting and
@@ -255,7 +273,7 @@ func (s *HeldTransferService) PostHeldTransfer(ctx context.Context, in PostHeldT
 		if err != nil {
 			return err
 		}
-		env := messaging.NewEnvelope(EventTransferPosted, "", payload, time.Now)
+		env := makeTransferResultEnvelope(EventTransferPosted, in.IdempotencyKey, in.SagaRouting, payload)
 		if err := s.transfers.AppendOutbox(ctx, q, env, RouteTransferPosted); err != nil {
 			return err
 		}
@@ -350,7 +368,7 @@ func (s *HeldTransferService) ReverseTransfer(ctx context.Context, in ReverseTra
 		if err != nil {
 			return err
 		}
-		env := messaging.NewEnvelope(EventTransferReversed, "", payload, time.Now)
+		env := makeTransferResultEnvelope(EventTransferReversed, in.IdempotencyKey, in.SagaRouting, payload)
 		if err := s.transfers.AppendOutbox(ctx, q, env, RouteTransferReversed); err != nil {
 			return err
 		}
@@ -365,6 +383,21 @@ func (s *HeldTransferService) ReverseTransfer(ctx context.Context, in ReverseTra
 }
 
 // --- Outbox payload helpers ---
+
+// makeTransferResultEnvelope stamps the saga routing context from the command
+// onto a result envelope, mirroring corebanking.makeResultEnvelope (consumer
+// side) and risk.makeResultEnvelope. The service needs its own helper because
+// it emits transfer-posted/reversed from within its own transaction, where it
+// has the routing fields on the input struct rather than the command envelope.
+func makeTransferResultEnvelope(messageType, idempotencyKey string, routing SagaRouting, payload json.RawMessage) messaging.Envelope {
+	env := messaging.NewEnvelope(messageType, routing.CorrelationID, payload, time.Now)
+	env.WorkflowID = routing.WorkflowID
+	env.ActionName = routing.ActionName
+	env.CommandID = routing.CommandID
+	env.IdempotencyKey = idempotencyKey
+	env.CausationID = routing.CommandMessageID
+	return env
+}
 
 type transferPostedPayload struct {
 	VoucherNo   string `json:"voucher_no"`
