@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"bank/internal/platform/messaging"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Direction values persisted on ActionRecord; mirrored from the DB CHECK
@@ -18,6 +21,16 @@ const (
 	directionForward      = "forward"
 	directionCompensation = "compensation"
 )
+
+// workflowTracerName is the OpenTelemetry tracer name for workflow spans.
+const workflowTracerName = "bank.workflow"
+
+// tracer returns the workflow tracer from the global provider. Tests install an
+// in-memory exporter as the global provider; production wiring installs the
+// real OTLP exporter via the telemetry package.
+func (e *Engine) tracer() trace.Tracer {
+	return otel.GetTracerProvider().Tracer(workflowTracerName)
+}
 
 // Engine is the durable workflow orchestrator. It advances Instances through
 // a Definition's ordered Actions by preparing an immutable context, emitting
@@ -124,6 +137,18 @@ func (e *Engine) Prepare(ctx context.Context, id string) error {
 	if header.Status != StatusPreparing {
 		return nil
 	}
+
+	// Open a workflow.prepare span carrying the brief-mandated attributes so
+	// the preparation phase is traceable end-to-end. The span wraps both
+	// Definition.Prepare and the first-action dispatch so the execute/wait
+	// spans descend from it.
+	ctx, prepareSpan := e.tracer().Start(ctx, "workflow.prepare",
+		trace.WithAttributes(
+			attribute.String("workflow.id", header.ID),
+			attribute.String("workflow.type", header.Type),
+		),
+	)
+	defer prepareSpan.End()
 
 	def, ok := e.registry.Get(header.Type, header.Version)
 	if !ok {
@@ -234,9 +259,22 @@ func (e *Engine) persistActionDispatch(tx Tx, inst Instance, def Definition, ctx
 	idx := inst.CurrentAction
 	action := actions[idx]
 
+	// Open a workflow.action.execute span around the action's Execute call.
+	// The command.id attribute is stamped after the CommandID is generated so
+	// the span carries the same transport identity as the dispatched command.
+	executeCtx, executeSpan := e.tracer().Start(ctx, "workflow.action.execute",
+		trace.WithAttributes(
+			attribute.String("workflow.id", inst.ID),
+			attribute.String("workflow.type", inst.Type),
+			attribute.String("workflow.action", action.Name()),
+			attribute.String("workflow.direction", directionForward),
+		),
+	)
+	defer executeSpan.End()
+
 	view := View{Instance: inst, Action: ActionRecord{Index: idx, Name: action.Name()}}
 	start := e.config.Now()
-	dispatch, err := action.Execute(ctx, view)
+	dispatch, err := action.Execute(executeCtx, view)
 	took := e.config.Now().Sub(start)
 	// Record dispatch metrics regardless of the error: an Execute that failed
 	// still consumed a dispatch attempt and is operationally interesting. The
@@ -244,6 +282,7 @@ func (e *Engine) persistActionDispatch(tx Tx, inst Instance, def Definition, ctx
 	// — operators want to see failed dispatches too.
 	e.metrics.observeAction(action.Name(), directionForward, took)
 	if err != nil {
+		executeSpan.RecordError(err)
 		// Propagate to caller for retry; the Tx rolls back.
 		return fmt.Errorf("action %q Execute: %w", action.Name(), err)
 	}
@@ -253,6 +292,9 @@ func (e *Engine) persistActionDispatch(tx Tx, inst Instance, def Definition, ctx
 	if idempotencyKey == "" {
 		idempotencyKey = fmt.Sprintf("%s:%s:%d", inst.ID, action.Name(), 1)
 	}
+	commandID := newUUID()
+	executeSpan.SetAttributes(attribute.String("command.id", commandID))
+
 	actionRec := ActionRecord{
 		Index:               idx,
 		Name:                action.Name(),
@@ -260,13 +302,26 @@ func (e *Engine) persistActionDispatch(tx Tx, inst Instance, def Definition, ctx
 		Direction:           directionForward,
 		Attempt:             1,
 		IdempotencyKey:      idempotencyKey,
-		CommandID:           newUUID(),
+		CommandID:           commandID,
 		DeadlineAt:          deadlineAt(now, dispatch.Deadline),
 		AcceptedResultTypes: dispatch.AcceptedResultTypes,
 	}
 	if err := tx.SaveAction(actionRec); err != nil {
 		return fmt.Errorf("save action %q: %w", action.Name(), err)
 	}
+
+	// Mark the transition into the waiting-for-result phase with a
+	// workflow.action.wait span carrying the same identity attributes.
+	_, waitSpan := e.tracer().Start(ctx, "workflow.action.wait",
+		trace.WithAttributes(
+			attribute.String("workflow.id", inst.ID),
+			attribute.String("workflow.type", inst.Type),
+			attribute.String("workflow.action", action.Name()),
+			attribute.String("workflow.direction", directionForward),
+			attribute.String("command.id", commandID),
+		),
+	)
+	waitSpan.End()
 
 	env := buildCommandEnvelope(inst, action.Name(), actionRec, dispatch, e.config.Now)
 	if err := tx.AppendOutbox(env, dispatch.RoutingKey); err != nil {
@@ -517,11 +572,24 @@ func (e *Engine) persistCompensationDispatch(tx Tx, inst Instance, def Definitio
 	actions := def.Actions()
 	action := actions[idx]
 
+	// Open a workflow.action.compensate span around the action's Compensate
+	// call, with workflow.direction=compensation. The command.id attribute is
+	// stamped after the fresh CommandID is generated.
+	compensateCtx, compensateSpan := e.tracer().Start(ctx, "workflow.action.compensate",
+		trace.WithAttributes(
+			attribute.String("workflow.id", inst.ID),
+			attribute.String("workflow.type", inst.Type),
+			attribute.String("workflow.action", action.Name()),
+			attribute.String("workflow.direction", directionCompensation),
+		),
+	)
+	defer compensateSpan.End()
+
 	// View carries the CURRENT action record (still succeeded from the forward
 	// pass) so Compensate can read the forward Output to construct the undo.
 	view := View{Instance: inst, Action: inst.Actions[idx]}
 	start := e.config.Now()
-	dispatch, err := action.Compensate(ctx, view)
+	dispatch, err := action.Compensate(compensateCtx, view)
 	took := e.config.Now().Sub(start)
 	// Record dispatch metrics regardless of the error — a failed Compensate is
 	// still a dispatch attempt the engine acted on, and the surrounding Tx
@@ -529,6 +597,7 @@ func (e *Engine) persistCompensationDispatch(tx Tx, inst Instance, def Definitio
 	e.metrics.observeAction(action.Name(), directionCompensation, took)
 	e.metrics.observeCompensationDispatch(action.Name())
 	if err != nil {
+		compensateSpan.RecordError(err)
 		return fmt.Errorf("action %q Compensate: %w", action.Name(), err)
 	}
 
@@ -538,6 +607,8 @@ func (e *Engine) persistCompensationDispatch(tx Tx, inst Instance, def Definitio
 		// Stable semantic key: same across compensation retries of this action.
 		idempotencyKey = fmt.Sprintf("%s:%s:compensate", inst.ID, action.Name())
 	}
+	commandID := newUUID()
+	compensateSpan.SetAttributes(attribute.String("command.id", commandID))
 
 	oldRec := inst.Actions[idx]
 	actionRec := ActionRecord{
@@ -547,7 +618,7 @@ func (e *Engine) persistCompensationDispatch(tx Tx, inst Instance, def Definitio
 		Direction:           directionCompensation,
 		Attempt:             attempt,
 		IdempotencyKey:      idempotencyKey,
-		CommandID:           newUUID(),
+		CommandID:           commandID,
 		DeadlineAt:          deadlineAt(now, dispatch.Deadline),
 		AcceptedResultTypes: dispatch.AcceptedResultTypes,
 		// Preserve forward provenance for audit and for Compensate on retry.

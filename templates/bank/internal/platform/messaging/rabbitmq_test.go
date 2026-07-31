@@ -16,7 +16,109 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"bank/internal/platform/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
+
+// TestRabbitPublisherEmitsPublishSpanAndInjectsTraceContext drives a single
+// publish through the confirmed-publish path and asserts that:
+//   - a span named exactly "bank.messaging.publish" is recorded, and
+//   - the broker message carries a W3C traceparent in its AMQP headers (so the
+//     consumer can continue the trace).
+func TestRabbitPublisherEmitsPublishSpanAndInjectsTraceContext(t *testing.T) {
+	exporter := installMessagingTrace(t)
+
+	channel := newFakeRabbitChannel()
+	publisher, err := newRabbitPublisher(channel, "bank.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- publisher.Publish(context.Background(), "payment.initiated", testEnvelope(t))
+	}()
+	<-channel.published
+	channel.confirmations <- amqp.Confirmation{DeliveryTag: 1, Ack: true}
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+
+	if name := firstMessagingSpanName(exporter); name != "bank.messaging.publish" {
+		t.Fatalf("span name=%q, want %q", name, "bank.messaging.publish")
+	}
+	if _, ok := channel.message.Headers["traceparent"].(string); !ok {
+		t.Fatalf("published headers=%#v, want traceparent string", channel.message.Headers)
+	}
+}
+
+// TestProcessDeliveryEmitsConsumeSpanAndExtractsTraceContext drives a delivery
+// through ProcessDelivery and asserts that:
+//   - a span named exactly "bank.messaging.consume" is recorded, and
+//   - the consumer-side trace context continues the publish-side trace (matching
+//     trace IDs) when the delivery carries a W3C traceparent header.
+func TestProcessDeliveryEmitsConsumeSpanAndExtractsTraceContext(t *testing.T) {
+	exporter := installMessagingTrace(t)
+	tracer := otel.GetTracerProvider().Tracer("test")
+
+	// Build a parent publish context and inject it into the delivery headers.
+	ctx, span := tracer.Start(context.Background(), "publish-parent")
+	defer span.End()
+	headers := amqp.Table{}
+	telemetry.InjectAMQP(ctx, headers)
+	parentTraceID := span.SpanContext().TraceID()
+
+	recorder := &txRecorder{rowsAffected: 1}
+	tx := beginRecordingTx(t, recorder)
+	delivery := recordingDelivery(recorder, nil)
+	delivery.Headers = headers
+
+	var handlerTraceID string
+	err := ProcessDelivery(context.Background(), tx, "payment-workflow", delivery, func(ctx context.Context, _ Envelope) error {
+		handlerTraceID = oteltrace.SpanContextFromContext(ctx).TraceID().String()
+		return nil
+	}, RetryPolicy{MaxAttempts: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if name := firstMessagingSpanName(exporter); name != "bank.messaging.consume" {
+		t.Fatalf("span name=%q, want %q", name, "bank.messaging.consume")
+	}
+	if handlerTraceID != parentTraceID.String() {
+		t.Fatalf("handler trace ID=%q, want parent %q", handlerTraceID, parentTraceID)
+	}
+}
+
+// installMessagingTrace wires an in-memory span exporter and the W3C trace
+// context propagator as process globals for the duration of a test.
+func installMessagingTrace(t *testing.T) *tracetest.InMemoryExporter {
+	t.Helper()
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSyncer(exporter),
+	)
+	otel.SetTracerProvider(provider)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	return exporter
+}
+
+func firstMessagingSpanName(exporter *tracetest.InMemoryExporter) string {
+	spans := exporter.GetSpans()
+	if len(spans) == 0 {
+		return ""
+	}
+	return spans[0].Name
+}
 
 func TestRabbitPublisherUsesPersistentMandatoryConfirmedMessages(t *testing.T) {
 	channel := newFakeRabbitChannel()

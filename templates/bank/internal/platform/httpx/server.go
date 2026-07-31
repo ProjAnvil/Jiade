@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // ServerConfig configures a bank service HTTP server.
@@ -57,8 +58,11 @@ func NewServer(config ServerConfig) *Server {
 		mux.Handle("/", config.Handler)
 	}
 	server.server = &http.Server{
-		Addr:              config.Addr,
-		Handler:           mux,
+		Addr: config.Addr,
+		// Wrap the mux in an otelhttp span named "bank.http" so the W3C trace
+		// context continues from the downstream caller through every bank
+		// service's HTTP entry point.
+		Handler:           otelhttp.NewHandler(mux, "bank.http"),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

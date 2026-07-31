@@ -9,7 +9,9 @@ import (
 	"strings"
 	"sync"
 
+	"bank/internal/platform/telemetry"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel"
 )
 
 // ConfirmedRouter publishes a replacement delivery and returns only after its
@@ -119,18 +121,26 @@ func (publisher *RabbitPublisher) Publish(ctx context.Context, routingKey string
 		ctx = context.Background()
 	}
 
-	return publisher.Route(ctx, publisher.exchange, routingKey, amqp.Publishing{
+	// Start a bank.messaging.publish span and inject the W3C trace context
+	// into the AMQP headers so the consumer can continue the trace.
+	publishCtx, span := otel.Tracer("bank.messaging").Start(ctx, "bank.messaging.publish")
+	defer span.End()
+
+	headers := amqp.Table{
+		"schema_version": envelope.SchemaVersion,
+		"correlation_id": envelope.CorrelationID,
+		"causation_id":   envelope.CausationID,
+	}
+	telemetry.InjectAMQP(publishCtx, headers)
+
+	return publisher.Route(publishCtx, publisher.exchange, routingKey, amqp.Publishing{
 		DeliveryMode: amqp.Persistent,
 		ContentType:  "application/json",
 		MessageId:    envelope.MessageID,
 		Type:         envelope.MessageType,
 		Timestamp:    envelope.OccurredAt,
-		Headers: amqp.Table{
-			"schema_version": envelope.SchemaVersion,
-			"correlation_id": envelope.CorrelationID,
-			"causation_id":   envelope.CausationID,
-		},
-		Body: body,
+		Headers:      headers,
+		Body:         body,
 	})
 }
 
@@ -282,6 +292,14 @@ func ProcessDelivery(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Extract the W3C trace context the publisher injected into the AMQP
+	// headers, then open a bank.messaging.consume span so the consumer-side
+	// processing continues the publisher's trace. The handler receives the
+	// span context so downstream work shares the same trace ID.
+	ctx = telemetry.ExtractAMQP(ctx, delivery.Headers)
+	ctx, consumeSpan := otel.Tracer("bank.messaging").Start(ctx, "bank.messaging.consume")
+	defer consumeSpan.End()
+
 	if delivery.Acknowledger == nil {
 		if tx != nil {
 			_ = tx.Rollback()

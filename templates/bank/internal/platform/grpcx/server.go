@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
@@ -36,7 +38,16 @@ type readinessTracker struct {
 // NewServer creates a gRPC server with the standard health implementation. It
 // remains NOT_SERVING until its tracked dependency readiness lifecycle succeeds.
 func NewServer(cfg ServerConfig) *grpc.Server {
-	server := grpc.NewServer()
+	server := grpc.NewServer(
+		// otelgrpc's stats handler propagates the W3C trace context through
+		// gRPC metadata and records standard RPC spans on the server side.
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		// A unary interceptor renames the stats handler's server span to the
+		// brief-mandated name (bank.grpc.<domain>.<Method>); the stats
+		// handler's span is already in the context by the time the unary
+		// interceptor runs on the server side.
+		grpc.UnaryInterceptor(bankUnaryServerInterceptor),
+	)
 	healthServer := health.NewServer()
 	healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	grpc_health_v1.RegisterHealthServer(server, healthServer)
@@ -88,4 +99,13 @@ func Shutdown(ctx context.Context, server GracefulStopper) {
 	case <-ctx.Done():
 		server.Stop()
 	}
+}
+
+// bankUnaryServerInterceptor renames the otelgrpc stats handler's server span
+// to the brief-mandated name (bank.grpc.<domain>.<Method>). On the server side
+// the stats handler runs before the interceptor chain, so its span is already
+// in the context; SetName mutates that same span in place before it ends.
+func bankUnaryServerInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	trace.SpanFromContext(ctx).SetName(bankGRPCSpanName(info.FullMethod))
+	return handler(ctx, req)
 }

@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func TestLiveAndReadyUseDifferentDependencySemantics(t *testing.T) {
@@ -57,6 +60,43 @@ func TestServerExposesMetricsAndApplicationHandler(t *testing.T) {
 
 	assertStatus(t, server.server.Handler, "/metrics", http.StatusOK)
 	assertStatus(t, server.server.Handler, "/payments", http.StatusCreated)
+}
+
+// TestHTTPServerEmitsBankHTTPSpan asserts the inbound handler chain is wrapped
+// by an OpenTelemetry span named exactly "bank.http" so the W3C trace context
+// continues from the downstream caller through every bank service's HTTP entry.
+func TestHTTPServerEmitsBankHTTPSpan(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSyncer(exporter),
+	)
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+
+	server := NewServer(ServerConfig{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}),
+	})
+
+	recorder := httptest.NewRecorder()
+	server.server.Handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/payments", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	if name := firstSpanName(exporter); name != "bank.http" {
+		t.Fatalf("span name=%q, want %q", name, "bank.http")
+	}
+}
+
+func firstSpanName(exporter *tracetest.InMemoryExporter) string {
+	spans := exporter.GetSpans()
+	if len(spans) == 0 {
+		return ""
+	}
+	return spans[0].Name
 }
 
 func TestActiveServerDrainsInFlightRequestWhileLivezStaysHealthy(t *testing.T) {
