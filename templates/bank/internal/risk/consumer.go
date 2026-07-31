@@ -16,6 +16,7 @@ import (
 
 	"bank/internal/platform/messaging"
 	"bank/internal/platform/pg"
+	"bank/internal/platform/workflow"
 	"bank/internal/risk/service"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -32,7 +33,23 @@ const (
 	RoutePaymentAuthorized          = "risk.payment.authorized"
 	RoutePaymentRejected            = "risk.payment.rejected"
 	RoutePaymentAuthorizationVoided = "risk.payment.authorization.voided"
+	RouteCommandRejected            = "risk.command.rejected"
 )
+
+// Result event types produced by the consumer.
+const (
+	// EventCommandRejected is emitted for unknown / undecodable command types
+	// so the saga engine can cleanly terminate the instance with an
+	// invalid_message classification. Mirrors corebanking's pattern.
+	EventCommandRejected = "risk.command-rejected.v1"
+)
+
+// OutboxWriter appends a result envelope to the outbox within the consumer's
+// transaction. The concrete risk-DB repository satisfies this interface; a
+// stub is used in unit tests. Mirrors corebanking.OutboxWriter.
+type OutboxWriter interface {
+	AppendOutbox(ctx context.Context, q pg.DBTX, env messaging.Envelope, routingKey string) error
+}
 
 // ConsumerName is the Inbox consumer identifier used for deduplication.
 const ConsumerName = "risk"
@@ -41,17 +58,19 @@ const ConsumerName = "risk"
 type Consumer struct {
 	db      *sql.DB
 	service *service.AuthorizationService
+	outbox  OutboxWriter
 	policy  messaging.RetryPolicy
 	now     func() time.Time
 }
 
 // NewConsumer constructs a Consumer. The db must point at the risk database
 // (which contains both inbox_message/outbox_message and payment_authorization).
-func NewConsumer(db *sql.DB, svc *service.AuthorizationService, policy messaging.RetryPolicy, now func() time.Time) *Consumer {
+// outbox appends result events to the outbox within the consumer's tx.
+func NewConsumer(db *sql.DB, svc *service.AuthorizationService, outbox OutboxWriter, policy messaging.RetryPolicy, now func() time.Time) *Consumer {
 	if now == nil {
 		now = time.Now
 	}
-	return &Consumer{db: db, service: svc, policy: policy, now: now}
+	return &Consumer{db: db, service: svc, outbox: outbox, policy: policy, now: now}
 }
 
 // ConsumeDelivery is the AMQP entry point. It begins a risk-DB transaction,
@@ -79,6 +98,9 @@ func (c *Consumer) handler(tx *sql.Tx) func(context.Context, messaging.Envelope)
 
 // processEnvelope dispatches the envelope to the authorize or void handler
 // based on message type. All database writes (domain + Outbox) use the same tx.
+// Unknown command types emit an invalid_message failure event (terminal) so the
+// saga engine can cleanly terminate the instance, and return nil so
+// ProcessDelivery acks the delivery. This mirrors corebanking's pattern.
 func (c *Consumer) processEnvelope(ctx context.Context, q pg.DBTX, env messaging.Envelope) error {
 	switch env.MessageType {
 	case CmdAuthorizePayment:
@@ -86,7 +108,8 @@ func (c *Consumer) processEnvelope(ctx context.Context, q pg.DBTX, env messaging
 	case CmdVoidAuthorization:
 		return c.handleVoid(ctx, q, env)
 	default:
-		return fmt.Errorf("risk consumer: unknown message type %q", env.MessageType)
+		return c.emitFailure(ctx, q, env,
+			fmt.Sprintf("unknown message type %q", env.MessageType))
 	}
 }
 
@@ -118,7 +141,7 @@ func (c *Consumer) handleAuthorize(ctx context.Context, q pg.DBTX, env messaging
 	if err != nil {
 		return err
 	}
-	return appendOutbox(ctx, q, resultEnv, routingKey)
+	return c.outbox.AppendOutbox(ctx, q, resultEnv, routingKey)
 }
 
 // handleVoid decodes a void-payment-authorization command, calls the service,
@@ -142,7 +165,7 @@ func (c *Consumer) handleVoid(ctx context.Context, q pg.DBTX, env messaging.Enve
 		return nil
 	}
 	resultEnv := buildVoidResultEnvelope(env, result, c.now())
-	return appendOutbox(ctx, q, resultEnv, RoutePaymentAuthorizationVoided)
+	return c.outbox.AppendOutbox(ctx, q, resultEnv, RoutePaymentAuthorizationVoided)
 }
 
 // ---------------------------------------------------------------------------
@@ -243,10 +266,50 @@ type voidResultPayload struct {
 	WorkflowID      string `json:"workflow_id,omitempty"`
 }
 
-// appendOutbox enqueues an envelope for at-least-once publishing once the
+// failurePayload mirrors corebanking.failurePayload so the saga engine can
+// classify terminal risk-command failures uniformly.
+type failurePayload struct {
+	ErrorClass   string `json:"error_class"`
+	ErrorMessage string `json:"error_message,omitempty"`
+	WorkflowID   string `json:"workflow_id,omitempty"`
+}
+
+// emitFailure builds and appends an invalid_message failure result event for
+// an unknown / undecodable risk command. Returns nil on success so
+// messaging.ProcessDelivery acks the delivery; the saga engine reacts to the
+// terminal invalid_message classification by compensating or rejecting.
+func (c *Consumer) emitFailure(ctx context.Context, q pg.DBTX, cmdEnv messaging.Envelope, message string) error {
+	payload := failurePayload{
+		ErrorClass:   string(workflow.InvalidMessage),
+		ErrorMessage: message,
+		WorkflowID:   cmdEnv.WorkflowID,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal %s payload: %w", EventCommandRejected, err)
+	}
+	env := makeResultEnvelope(cmdEnv, EventCommandRejected, body, c.now())
+	return c.outbox.AppendOutbox(ctx, q, env, RouteCommandRejected)
+}
+
+// ---------------------------------------------------------------------------
+// Concrete OutboxWriter — backed by the risk DB.
+// ---------------------------------------------------------------------------
+
+// RiskOutbox writes result envelopes to the risk DB's outbox_message table.
+// It implements OutboxWriter so the consumer can commit the outbox row inside
+// the same transaction as the Inbox insert + domain mutation.
+type RiskOutbox struct {
+	db *sql.DB
+}
+
+// NewRiskOutbox binds a *sql.DB (risk_db). The caller owns the pool.
+func NewRiskOutbox(db *sql.DB) *RiskOutbox { return &RiskOutbox{db: db} }
+
+// AppendOutbox enqueues an envelope for at-least-once publishing once the
 // surrounding transaction commits. Mirrors the workflow engine's AppendOutbox
 // SQL so the shared outbox_message table is populated identically.
-func appendOutbox(ctx context.Context, q pg.DBTX, env messaging.Envelope, routingKey string) error {
+func (o *RiskOutbox) AppendOutbox(ctx context.Context, q pg.DBTX, env messaging.Envelope, routingKey string) error {
 	body, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("marshal outbox envelope %s: %w", env.MessageID, err)

@@ -145,7 +145,9 @@ func run() error {
 		RetryRoutingKey:      getenv("PAYMENT_RETRY_KEY", "payment.retry"),
 		DeadLetterRoutingKey: getenv("PAYMENT_DLQ_KEY", "payment.dlq"),
 	}
-	consumer := payment.NewConsumer(db, engine, statusRepo, intentRepo, intentRepo, completionOutbox, retryPolicy)
+	consumer := payment.NewConsumer(db, engine, statusRepo, intentRepo, intentRepo, completionOutbox, retryPolicy).
+		WithAtomicCompletion(intentRepo, completionOutbox).
+		WithReversalAutoDetection(statusRepo, intentRepo)
 
 	// Outbox relay: eagerly dial the broker so a broker-down condition fails
 	// the process at startup rather than silently skipping event delivery.
@@ -274,13 +276,10 @@ func (a *paymentWorkflowAPI) Status(ctx context.Context, workflowID string) (api
 }
 
 // Reverse starts a payment-reversal workflow that undoes a SUCCEEDED
-// payment-transfer by dispatching core.reverse-transfer.v1. The Task-7
-// implementation prematurely persisted reversed=true before the reversal saga
-// ran; Task 8 fixes this by recording reversal_pending and leaving
-// reversed=false. Automatically flipping the original intent to reversed=true
-// when the reversal workflow succeeds is a DEFERRED follow-up; until that
-// lands, the operator polls the reversal saga via the returned
-// reversal_workflow_id.
+// payment-transfer by dispatching core.reverse-transfer.v1. The endpoint
+// records reversal_pending (reversed stays false); the payment consumer's
+// reversal auto-detection flips reversed=true once the reversal workflow
+// reaches StatusSucceeded.
 //
 // The endpoint:
 //  1. Loads the original intent to verify it exists and capture context.
@@ -333,9 +332,9 @@ func (a *paymentWorkflowAPI) Reverse(ctx context.Context, workflowID string) (ap
 	}
 
 	// Record reversal_pending on the original intent so GET reports the
-	// reversal-in-flight status. reversed stays false here; auto-flipping it
-	// to true on reversal-workflow success is a DEFERRED follow-up (the
-	// operator polls via the reversal_workflow_id returned below).
+	// reversal-in-flight status. reversed stays false here; the payment
+	// consumer's auto-detection flips it to true when the reversal workflow
+	// reaches StatusSucceeded.
 	if err := a.intents.MarkReversalPendingByWorkflowID(ctx, workflowID); err != nil {
 		return api.ReverseWorkflowResponse{}, fmt.Errorf("mark reversal_pending: %w", err)
 	}

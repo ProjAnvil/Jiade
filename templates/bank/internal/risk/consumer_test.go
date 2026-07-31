@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"bank/internal/platform/messaging"
 	"bank/internal/platform/pg"
 	"bank/internal/platform/serviceclient"
+	"bank/internal/platform/workflow"
 	"bank/internal/risk/domain"
 	"bank/internal/risk/service"
 )
@@ -18,12 +20,69 @@ import (
 // consumer's pure functions (payload decode, result envelope building) and the
 // dispatch routing without needing a real DB or AMQP.
 
-func TestProcessEnvelope_UnknownMessageType(t *testing.T) {
-	consumer := newTestConsumer(nil)
-	env := messaging.Envelope{MessageType: "risk.unknown.v1"}
+// capturingOutbox records every AppendOutbox call. It implements OutboxWriter
+// so tests can assert "exactly one invalid_message event" without a *sql.DB.
+type capturingOutbox struct {
+	mu   sync.Mutex
+	msgs []capturedOutboxMsg
+	err  error
+}
+
+type capturedOutboxMsg struct {
+	Envelope   messaging.Envelope
+	RoutingKey string
+}
+
+func (o *capturingOutbox) AppendOutbox(_ context.Context, _ pg.DBTX, env messaging.Envelope, routingKey string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.err != nil {
+		return o.err
+	}
+	o.msgs = append(o.msgs, capturedOutboxMsg{Envelope: env, RoutingKey: routingKey})
+	return nil
+}
+
+func (o *capturingOutbox) Messages() []capturedOutboxMsg {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := make([]capturedOutboxMsg, len(o.msgs))
+	copy(out, o.msgs)
+	return out
+}
+
+func TestProcessEnvelope_UnknownMessageType_EmitsInvalidMessage(t *testing.T) {
+	consumer, outbox := newTestConsumerWithOutbox(t, nil)
+	env := messaging.Envelope{
+		MessageID:     testUUID(),
+		MessageType:   "risk.unknown.v1",
+		SchemaVersion: messaging.CurrentSchemaVersion,
+		WorkflowID:    "wf-1",
+		CorrelationID: testUUID(),
+		OccurredAt:    time.Now(),
+		Payload:       json.RawMessage(`{}`),
+	}
 	err := consumer.processEnvelope(context.Background(), nil, env)
-	if err == nil {
-		t.Fatal("expected error for unknown message type")
+	if err != nil {
+		t.Fatalf("unknown message type should NOT return error (emit invalid_message event + ack): %v", err)
+	}
+	msgs := outbox.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("outbox msgs = %d, want 1", len(msgs))
+	}
+	msg := msgs[0]
+	if msg.Envelope.MessageType != EventCommandRejected {
+		t.Errorf("event type = %q, want %q", msg.Envelope.MessageType, EventCommandRejected)
+	}
+	if msg.RoutingKey != RouteCommandRejected {
+		t.Errorf("route = %q, want %q", msg.RoutingKey, RouteCommandRejected)
+	}
+	var payload failurePayload
+	if err := json.Unmarshal(msg.Envelope.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.ErrorClass != string(workflow.InvalidMessage) {
+		t.Errorf("error_class = %q, want %q", payload.ErrorClass, workflow.InvalidMessage)
 	}
 }
 
@@ -206,8 +265,25 @@ func newTestConsumer(svc *service.AuthorizationService) *Consumer {
 	}
 	return &Consumer{
 		service: svc,
+		outbox:  &capturingOutbox{},
 		now:     fixedNowConsumer,
 	}
+}
+
+// newTestConsumerWithOutbox returns a Consumer wired with a capturingOutbox so
+// tests can assert emitted events without a *sql.DB.
+func newTestConsumerWithOutbox(t *testing.T, svc *service.AuthorizationService) (*Consumer, *capturingOutbox) {
+	t.Helper()
+	if svc == nil {
+		svc = service.NewAuthorizationService(nil, nil, fixedNowConsumer)
+	}
+	outbox := &capturingOutbox{}
+	c := &Consumer{
+		service: svc,
+		outbox:  outbox,
+		now:     fixedNowConsumer,
+	}
+	return c, outbox
 }
 
 func fixedNowConsumer() time.Time {

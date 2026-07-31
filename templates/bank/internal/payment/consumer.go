@@ -199,7 +199,17 @@ func (r *PaymentIntentRepo) GetByWorkflowID(ctx context.Context, workflowID stri
 // error: the consumer may process a result event for a workflow whose intent
 // was deleted.
 func (r *PaymentIntentRepo) UpdateStatusByWorkflowID(ctx context.Context, workflowID string, status PaymentIntentStatus) error {
-	_, err := r.db.ExecContext(ctx, `
+	return r.UpdateStatusByWorkflowIDInTx(ctx, r.db, workflowID, status)
+}
+
+// UpdateStatusByWorkflowIDInTx is the tx-aware variant: it writes the status
+// update via the caller-supplied pg.DBTX so the consumer can commit the status
+// change AND the completion-outbox row in one transaction. This closes the
+// "completion dropped after status commit" gap: if the outbox write fails, the
+// status update rolls back too, so the next resync delivery still observes a
+// non-succeeded previous status and re-attempts emission.
+func (r *PaymentIntentRepo) UpdateStatusByWorkflowIDInTx(ctx context.Context, q pg.DBTX, workflowID string, status PaymentIntentStatus) error {
+	_, err := q.ExecContext(ctx, `
 		UPDATE payment_intent
 		SET status = $2, updated_at = CURRENT_TIMESTAMP
 		WHERE workflow_id = $1`,
@@ -211,11 +221,10 @@ func (r *PaymentIntentRepo) UpdateStatusByWorkflowID(ctx context.Context, workfl
 }
 
 // MarkReversedByWorkflowID flips the reversed flag on the intent owning
-// workflowID. It is a FUTURE hook reserved for the deferred reversal-completion
-// auto-detection follow-up (the consumer will call it once that feature lands
-// and it detects the reversal workflow reaching StatusSucceeded). It is NOT
-// currently called from production code. Returns ErrWorkflowNotFound when the
-// workflow id does not exist (zero rows affected).
+// workflowID. The consumer calls it when a payment-reversal workflow reaches
+// StatusSucceeded (detected via WithReversalAutoDetection). Returns
+// ErrWorkflowNotFound when the workflow id does not exist (zero rows
+// affected).
 func (r *PaymentIntentRepo) MarkReversedByWorkflowID(ctx context.Context, workflowID string) error {
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE payment_intent
@@ -395,6 +404,37 @@ type InstanceStatusReader interface {
 	InstanceStatus(ctx context.Context, workflowID string) (string, error)
 }
 
+// InstanceMeta captures the status and metadata the consumer needs to both
+// sync payment_intent.status and detect payment-reversal completions in a
+// single query. Type is the workflow_instance.type column (e.g.
+// "payment-transfer" or "payment-reversal"); PreparedContext is the
+// prepared_context_json column (NULL → nil).
+type InstanceMeta struct {
+	Status          string
+	Type            string
+	PreparedContext json.RawMessage
+}
+
+// InstanceMetaReader reads InstanceMeta for a workflow instance. When wired
+// (via WithReversalAutoDetection), the consumer uses a single query for both
+// status sync and reversal auto-detection. *InstanceStatusRepo satisfies this
+// interface via InstanceMeta.
+type InstanceMetaReader interface {
+	InstanceMeta(ctx context.Context, workflowID string) (InstanceMeta, error)
+}
+
+// IntentReversalMarker flips the reversed flag (and status='reversed') on the
+// intent owning the ORIGINAL workflow id when a payment-reversal workflow
+// reaches StatusSucceeded. *PaymentIntentRepo satisfies this interface.
+type IntentReversalMarker interface {
+	MarkReversedByWorkflowID(ctx context.Context, workflowID string) error
+}
+
+// WorkflowReversalType identifies the payment-reversal workflow definition
+// type. Used by the consumer to discriminate reversal instances from
+// payment-transfer instances so reversal success can be auto-detected.
+const WorkflowReversalType = "payment-reversal"
+
 // IntentStatusUpdater updates payment_intent.status by workflow id. The
 // concrete implementation is *PaymentIntentRepo.
 type IntentStatusUpdater interface {
@@ -420,6 +460,23 @@ type CompletionOutbox interface {
 	EmitCompletion(ctx context.Context, env messaging.Envelope) error
 }
 
+// IntentStatusTxUpdater is the optional tx-aware variant of IntentStatusUpdater.
+// When wired (via WithAtomicCompletion), the consumer writes the intent status
+// update AND the completion-outbox row inside one pg.RunInTx so a transient
+// outbox failure rolls back the status update too — closing the "completion
+// dropped after status commit" gap. *PaymentIntentRepo satisfies this interface.
+type IntentStatusTxUpdater interface {
+	UpdateStatusByWorkflowIDInTx(ctx context.Context, q pg.DBTX, workflowID string, status PaymentIntentStatus) error
+}
+
+// CompletionTxOutbox is the optional tx-aware variant of CompletionOutbox. When
+// wired (via WithAtomicCompletion), the consumer writes the completion-outbox
+// row inside the same transaction as the intent status update.
+// *PgCompletionOutbox satisfies this interface.
+type CompletionTxOutbox interface {
+	EmitCompletionInTx(ctx context.Context, q pg.DBTX, env messaging.Envelope) error
+}
+
 // Consumer receives workflow result events from RabbitMQ and:
 //  1. Hands each decoded envelope to Engine.ApplyResult (the engine's own
 //     per-instance Inbox dedup makes ApplyResult idempotent).
@@ -431,13 +488,17 @@ type CompletionOutbox interface {
 // engine does that atomically via Store.WithInstance. The consumer only begins
 // a tx for the outer Inbox dedup that messaging.ProcessDelivery performs.
 type Consumer struct {
-	db            *sql.DB
-	engine        ApplyResulter
-	statusReader  InstanceStatusReader
-	intentUpdater IntentStatusUpdater
-	intentReader  IntentReader
-	completionOutbox CompletionOutbox
-	policy        messaging.RetryPolicy
+	db                 *sql.DB
+	engine             ApplyResulter
+	statusReader       InstanceStatusReader
+	intentUpdater      IntentStatusUpdater
+	intentReader       IntentReader
+	completionOutbox   CompletionOutbox
+	intentTxUpdater    IntentStatusTxUpdater  // optional; enables atomic status+emit
+	completionTxOutbox CompletionTxOutbox      // optional; enables atomic emit
+	instanceMetaReader InstanceMetaReader      // optional; enables reversal auto-detection
+	intentReversalMarker IntentReversalMarker  // optional; enables reversal auto-detection
+	policy             messaging.RetryPolicy
 }
 
 // NewConsumer wires the consumer for production. db is the pay_db connection
@@ -447,6 +508,10 @@ type Consumer struct {
 // emitting payment.completed.v1 (nil falls back to emit-on-success).
 // completionOutbox emits payment.completed.v1 (nil disables emission).
 // policy is the messaging retry/DLQ policy.
+//
+// The returned Consumer uses the legacy non-atomic status-sync path. Production
+// callers SHOULD chain WithAtomicCompletion to wrap the status update and the
+// completion-outbox row in one transaction.
 func NewConsumer(
 	db *sql.DB,
 	engine ApplyResulter,
@@ -465,6 +530,33 @@ func NewConsumer(
 		completionOutbox: completionOutbox,
 		policy:           policy,
 	}
+}
+
+// WithAtomicCompletion enables the atomic status-sync + completion-emit path.
+// When wired, the consumer wraps UpdateStatusByWorkflowIDInTx and
+// EmitCompletionInTx in one pg.RunInTx so a transient outbox failure rolls
+// back the status update too, preventing the "completion dropped after status
+// commit" gap documented on PgCompletionOutbox. Both arguments MUST be non-nil;
+// pass the same *PaymentIntentRepo and *PgCompletionOutbox already wired into
+// NewConsumer. The pointer receiver is returned for chaining.
+func (c *Consumer) WithAtomicCompletion(txUpdater IntentStatusTxUpdater, txOutbox CompletionTxOutbox) *Consumer {
+	c.intentTxUpdater = txUpdater
+	c.completionTxOutbox = txOutbox
+	return c
+}
+
+// WithReversalAutoDetection enables the reversal-completion auto-detection
+// path. When wired, the consumer reads InstanceMeta (status + type +
+// prepared_context) in a single query; on detecting a payment-reversal
+// instance reaching StatusSucceeded it calls MarkReversedByWorkflowID on the
+// ORIGINAL workflow_id (extracted from the reversal's prepared context) so the
+// original intent flips to reversed without operator intervention. Both
+// arguments MUST be non-nil; pass the *InstanceStatusRepo and
+// *PaymentIntentRepo already wired into NewConsumer.
+func (c *Consumer) WithReversalAutoDetection(metaReader InstanceMetaReader, marker IntentReversalMarker) *Consumer {
+	c.instanceMetaReader = metaReader
+	c.intentReversalMarker = marker
+	return c
 }
 
 // ConsumeDelivery is the AMQP entry point. It begins a pay_db tx, then
@@ -507,76 +599,174 @@ func (c *Consumer) handleResult(ctx context.Context, env messaging.Envelope) err
 		// untouched — the saga state has not observably changed.
 		return err
 	}
-	// ApplyResult succeeded: sync payment_intent.status from the instance so
-	// the GET endpoint reflects the latest saga outcome. A status-sync failure
-	// is logged and swallowed: it does not invalidate the (already-applied)
-	// result event, and the next event for this workflow will resync.
-	if c.statusReader != nil && c.intentUpdater != nil && env.WorkflowID != "" {
-		status, err := c.statusReader.InstanceStatus(ctx, env.WorkflowID)
+	if env.WorkflowID == "" {
+		return nil
+	}
+
+	// Read the workflow instance status (and optionally metadata) so the
+	// consumer can sync payment_intent.status and detect payment-reversal
+	// completions. When instanceMetaReader is wired, a single query returns
+	// status + type + prepared_context; otherwise the legacy statusReader
+	// path is used (no reversal auto-detection).
+	var (
+		status string
+		meta   *InstanceMeta
+	)
+	if c.instanceMetaReader != nil {
+		m, err := c.instanceMetaReader.InstanceMeta(ctx, env.WorkflowID)
+		if err != nil {
+			log.Printf("payment consumer: read meta for %s: %v", env.WorkflowID, err)
+			return nil
+		}
+		meta = &m
+		status = m.Status
+	} else if c.statusReader != nil {
+		s, err := c.statusReader.InstanceStatus(ctx, env.WorkflowID)
 		if err != nil {
 			log.Printf("payment consumer: read status for %s: %v", env.WorkflowID, err)
 			return nil
 		}
-		intentStatus := mapInstanceStatusToIntent(status)
+		status = s
+	} else {
+		return nil
+	}
 
-		// Read the intent's PREVIOUS status to detect a fresh succeeded
-		// transition. This guards the exactly-once emission of
-		// payment.completed.v1: a duplicate delivery for an already-succeeded
-		// workflow (late redelivery bypassing the outer Inbox) must not
-		// re-emit. When no IntentReader is wired, previousStatus is left empty
-		// so the emit-on-success fallback still fires.
-		//
-		// intentExists discriminates payment-transfer workflows (which own a
-		// payment_intent row) from payment-reversal workflows (which do
-		// not). A reversal workflow reaching StatusSucceeded has no intent to
-		// update or emit a completion event for — its outcome is observed via
-		// the reversal_workflow_id the reverse endpoint returned.
-		var previousStatus PaymentIntentStatus
-		intentExists := true
-		if c.intentReader != nil {
-			intent, readErr := c.intentReader.GetByWorkflowID(ctx, env.WorkflowID)
-			if readErr != nil {
-				intentExists = false
-			} else {
-				previousStatus = intent.Status
-			}
+	// Reversal auto-detection (Finding 2): if this is a payment-reversal
+	// workflow that just reached StatusSucceeded, flip the ORIGINAL
+	// payment_intent to reversed. The reversal workflow carries no
+	// payment_intent row of its own; its prepared context holds the
+	// original_workflow_id referencing the succeeded transfer being undone.
+	if meta != nil && meta.Type == WorkflowReversalType && status == "succeeded" && c.intentReversalMarker != nil {
+		c.handleReversalSuccess(ctx, env.WorkflowID, meta.PreparedContext)
+		return nil
+	}
+
+	if c.intentUpdater == nil {
+		return nil
+	}
+	intentStatus := mapInstanceStatusToIntent(status)
+
+	// Read the intent's PREVIOUS status to detect a fresh succeeded
+	// transition. This guards the exactly-once emission of
+	// payment.completed.v1: a duplicate delivery for an already-succeeded
+	// workflow (late redelivery bypassing the outer Inbox) must not
+	// re-emit. When no IntentReader is wired, previousStatus is left empty
+	// so the emit-on-success fallback still fires.
+	//
+	// intentExists discriminates payment-transfer workflows (which own a
+	// payment_intent row) from payment-reversal workflows (which do
+	// not). A reversal workflow reaching StatusSucceeded has no intent to
+	// update or emit a completion event for.
+	var previousStatus PaymentIntentStatus
+	intentExists := true
+	if c.intentReader != nil {
+		intent, readErr := c.intentReader.GetByWorkflowID(ctx, env.WorkflowID)
+		if readErr != nil {
+			intentExists = false
+		} else {
+			previousStatus = intent.Status
 		}
+	}
+	if !intentExists {
+		return nil
+	}
 
-		if intentExists {
-			if err := c.intentUpdater.UpdateStatusByWorkflowID(ctx, env.WorkflowID, intentStatus); err != nil {
-				log.Printf("payment consumer: sync intent status for %s: %v", env.WorkflowID, err)
-			}
+	// Emit payment.completed.v1 exactly once per fresh succeeded transition.
+	// The completion event drives the downstream reward consumer (a
+	// NON-CRITICAL consumer whose failures route to the reward DLQ and never
+	// affect payment status).
+	freshSucceeded := intentStatus == IntentSucceeded && previousStatus != IntentSucceeded && c.completionOutbox != nil
 
-			// Emit payment.completed.v1 exactly once per fresh succeeded
-			// transition. The completion event drives the downstream reward
-			// consumer (a NON-CRITICAL consumer whose failures route to the
-			// reward DLQ and never affect payment status). An emission failure
-			// is logged and swallowed: it does not invalidate the result
-			// event; the next resync event will detect the transition is no
-			// longer fresh and skip emission — so a transient outbox failure
-			// can drop the completion event. A future iteration may wrap the
-			// status update + emission in one transaction to close that gap;
-			// for Task 8 the emit-on-success path is the documented contract.
-			if intentStatus == IntentSucceeded && previousStatus != IntentSucceeded && c.completionOutbox != nil {
-				if err := c.emitCompletion(ctx, env.WorkflowID); err != nil {
-					log.Printf("payment consumer: emit completion for %s: %v", env.WorkflowID, err)
-				}
-			}
+	// Atomic path (Finding 1): wrap the status update AND the completion-outbox
+	// row in one pg.RunInTx. A transient outbox failure rolls back the status
+	// update too, so the next resync delivery still sees a non-succeeded
+	// previous status and re-attempts emission — closing the "completion
+	// dropped after status commit" gap. Engaged only when both tx-aware
+	// dependencies and a *sql.DB are wired.
+	if c.db != nil && c.intentTxUpdater != nil && (!freshSucceeded || c.completionTxOutbox != nil) {
+		if err := c.syncStatusAndEmitAtomically(ctx, env.WorkflowID, intentStatus, freshSucceeded); err != nil {
+			log.Printf("payment consumer: atomic status+emit for %s: %v", env.WorkflowID, err)
+		}
+		return nil
+	}
+
+	// Legacy path (non-atomic; preserved for unit tests and deployments that
+	// have not wired WithAtomicCompletion). A status-sync failure is logged
+	// and swallowed: it does not invalidate the (already-applied) result
+	// event, and the next event for this workflow will resync.
+	if err := c.intentUpdater.UpdateStatusByWorkflowID(ctx, env.WorkflowID, intentStatus); err != nil {
+		log.Printf("payment consumer: sync intent status for %s: %v", env.WorkflowID, err)
+	}
+	if freshSucceeded {
+		if err := c.emitCompletion(ctx, env.WorkflowID); err != nil {
+			log.Printf("payment consumer: emit completion for %s: %v", env.WorkflowID, err)
 		}
 	}
 	return nil
 }
 
-// emitCompletion builds the payment.completed.v1 envelope from the intent and
-// hands it to the CompletionOutbox. The payload carries the fields downstream
-// non-critical consumers need (customer id, amount, currency) so the reward
-// service does not have to call back into the payment API.
+// syncStatusAndEmitAtomically writes the intent status update and (when the
+// transition is a fresh succeeded) the completion-outbox row inside one
+// pg.RunInTx. Both commit together or roll back together.
+func (c *Consumer) syncStatusAndEmitAtomically(ctx context.Context, workflowID string, intentStatus PaymentIntentStatus, freshSucceeded bool) error {
+	return pg.RunInTx(ctx, c.db, func(q pg.DBTX) error {
+		if err := c.intentTxUpdater.UpdateStatusByWorkflowIDInTx(ctx, q, workflowID, intentStatus); err != nil {
+			return err
+		}
+		if !freshSucceeded {
+			return nil
+		}
+		env, err := c.buildCompletionEnvelope(ctx, workflowID)
+		if err != nil {
+			return err
+		}
+		return c.completionTxOutbox.EmitCompletionInTx(ctx, q, env)
+	})
+}
+
+// handleReversalSuccess extracts the original_workflow_id from the reversal
+// workflow's prepared context and flips the ORIGINAL payment_intent to
+// reversed. Errors are logged and swallowed: a failure here does not
+// invalidate the (already-applied) result event, and the next event for this
+// workflow will retry the detection.
+func (c *Consumer) handleReversalSuccess(ctx context.Context, reversalWorkflowID string, preparedContext json.RawMessage) {
+	if len(preparedContext) == 0 {
+		log.Printf("payment consumer: reversal %s has no prepared context; cannot auto-mark original reversed", reversalWorkflowID)
+		return
+	}
+	var rc reversalContextPayload
+	if err := json.Unmarshal(preparedContext, &rc); err != nil {
+		log.Printf("payment consumer: decode reversal context for %s: %v", reversalWorkflowID, err)
+		return
+	}
+	if rc.OriginalWorkflowID == "" {
+		log.Printf("payment consumer: reversal %s carries no original_workflow_id; cannot auto-mark reversed", reversalWorkflowID)
+		return
+	}
+	if err := c.intentReversalMarker.MarkReversedByWorkflowID(ctx, rc.OriginalWorkflowID); err != nil {
+		log.Printf("payment consumer: mark original %s reversed via reversal %s: %v", rc.OriginalWorkflowID, reversalWorkflowID, err)
+		return
+	}
+	log.Printf("payment consumer: reversal %s succeeded; original %s marked reversed", reversalWorkflowID, rc.OriginalWorkflowID)
+}
+
+// reversalContextPayload mirrors the JSON the payment-reversal workflow's
+// ReversalPreparation writes into prepared_context_json. Only the fields the
+// consumer needs are decoded.
+type reversalContextPayload struct {
+	OriginalWorkflowID string `json:"original_workflow_id"`
+	OriginalVoucherNo  string `json:"original_voucher_no"`
+}
+
+// buildCompletionEnvelope constructs the payment.completed.v1 envelope from
+// the intent. The payload carries the fields downstream non-critical consumers
+// need (customer id, amount, currency) so the reward service does not have to
+// call back into the payment API.
 //
-// When no IntentReader is wired, emitCompletion falls back to a minimal
-// payload carrying only the workflow_id so a legacy deployment without an
-// intent reader still emits the event; the reward consumer's handler
-// tolerates the missing fields by using env.WorkflowID.
-func (c *Consumer) emitCompletion(ctx context.Context, workflowID string) error {
+// When no IntentReader is wired, buildCompletionEnvelope falls back to a
+// minimal payload carrying only the workflow_id so a legacy deployment without
+// an intent reader still emits the event.
+func (c *Consumer) buildCompletionEnvelope(ctx context.Context, workflowID string) (messaging.Envelope, error) {
 	payload := struct {
 		WorkflowID      string `json:"workflow_id"`
 		PaymentID       string `json:"payment_id"`
@@ -590,7 +780,7 @@ func (c *Consumer) emitCompletion(ctx context.Context, workflowID string) error 
 	if c.intentReader != nil {
 		intent, err := c.intentReader.GetByWorkflowID(ctx, workflowID)
 		if err != nil {
-			return fmt.Errorf("read intent for completion: %w", err)
+			return messaging.Envelope{}, fmt.Errorf("read intent for completion: %w", err)
 		}
 		payload.PayerCustomerID = intent.PayerCustomerID
 		payload.AmountMinor = intent.AmountMinor
@@ -598,10 +788,21 @@ func (c *Consumer) emitCompletion(ctx context.Context, workflowID string) error 
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal completion payload: %w", err)
+		return messaging.Envelope{}, fmt.Errorf("marshal completion payload: %w", err)
 	}
 	env := messaging.NewEnvelope(EventPaymentCompleted, workflowID, body, time.Now)
 	env.WorkflowID = workflowID
+	return env, nil
+}
+
+// emitCompletion builds the payment.completed.v1 envelope and hands it to the
+// CompletionOutbox (legacy non-tx path). Prefer syncStatusAndEmitAtomically
+// when a *sql.DB and the tx-aware dependencies are wired.
+func (c *Consumer) emitCompletion(ctx context.Context, workflowID string) error {
+	env, err := c.buildCompletionEnvelope(ctx, workflowID)
+	if err != nil {
+		return err
+	}
 	return c.completionOutbox.EmitCompletion(ctx, env)
 }
 
@@ -658,6 +859,32 @@ func (r *InstanceStatusRepo) InstanceStatus(ctx context.Context, workflowID stri
 		return "", err
 	}
 	return status, nil
+}
+
+// InstanceMeta returns the status, type, and prepared_context of workflowID in
+// a single query. The consumer uses it to sync payment_intent.status AND
+// detect payment-reversal completions without a second round-trip. Returns
+// ErrWorkflowNotFound when no such instance exists.
+func (r *InstanceStatusRepo) InstanceMeta(ctx context.Context, workflowID string) (InstanceMeta, error) {
+	var (
+		meta         InstanceMeta
+		preparedCtx  []byte
+	)
+	err := r.db.QueryRowContext(ctx, `
+		SELECT status, type, prepared_context_json
+		FROM workflow_instance
+		WHERE workflow_id = $1`, workflowID,
+	).Scan(&meta.Status, &meta.Type, &preparedCtx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return InstanceMeta{}, fmt.Errorf("%w: workflow_id=%s", ErrWorkflowNotFound, workflowID)
+		}
+		return InstanceMeta{}, err
+	}
+	if len(preparedCtx) > 0 {
+		meta.PreparedContext = append(json.RawMessage(nil), preparedCtx...)
+	}
+	return meta, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -874,11 +1101,19 @@ func NewPgCompletionOutbox(db *sql.DB) *PgCompletionOutbox {
 // payment.completed routing key. The row's primary key (message_id) dedupes
 // a duplicate write of the same envelope silently.
 func (o *PgCompletionOutbox) EmitCompletion(ctx context.Context, env messaging.Envelope) error {
+	return o.EmitCompletionInTx(ctx, o.db, env)
+}
+
+// EmitCompletionInTx is the tx-aware variant: it writes the outbox row via the
+// caller-supplied pg.DBTX so the consumer can commit the status update AND the
+// completion-outbox row atomically. This closes the "completion dropped after
+// status commit" gap documented on PgCompletionOutbox.
+func (o *PgCompletionOutbox) EmitCompletionInTx(ctx context.Context, q pg.DBTX, env messaging.Envelope) error {
 	body, err := json.Marshal(env)
 	if err != nil {
 		return fmt.Errorf("marshal completion envelope: %w", err)
 	}
-	_, err = o.db.ExecContext(ctx, `
+	_, err = q.ExecContext(ctx, `
 		INSERT INTO outbox_message
 		  (message_id, message_type, schema_version, routing_key, envelope, created_at)
 		VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
@@ -901,11 +1136,9 @@ func (o *PgCompletionOutbox) EmitCompletion(ctx context.Context, env messaging.E
 // intent owning workflowID. Returns ErrWorkflowNotFound when the workflow id
 // does not exist (zero rows affected).
 //
-// This is the Task-7 follow-up fix: the reverse endpoint MUST NOT persist
-// reversed=true before the reversal saga runs. Instead it persists
-// reversal_pending and leaves reversed=false. Auto-flipping reversed to true
-// when the payment-reversal workflow reaches StatusSucceeded is a DEFERRED
-// follow-up; until it lands, the operator polls via the reversal_workflow_id.
+// The reverse endpoint calls this before the reversal saga runs; the consumer
+// later flips reversed=true (and status='reversed') via MarkReversedByWorkflowID
+// when it detects the payment-reversal workflow reaching StatusSucceeded.
 func (r *PaymentIntentRepo) MarkReversalPendingByWorkflowID(ctx context.Context, workflowID string) error {
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE payment_intent
@@ -928,7 +1161,6 @@ func (r *PaymentIntentRepo) MarkReversalPendingByWorkflowID(ctx context.Context,
 
 // IntentReversalPending is the status recorded when the reverse endpoint has
 // started a payment-reversal workflow but the reversal has not yet completed.
-// It is an intermediate state; transitioning it to IntentReversed once the
-// reversal workflow succeeds is a DEFERRED follow-up (until that lands, the
-// operator polls via the returned reversal_workflow_id).
+// The consumer transitions it to IntentReversed once the reversal workflow
+// reaches StatusSucceeded.
 const IntentReversalPending PaymentIntentStatus = "reversal_pending"
