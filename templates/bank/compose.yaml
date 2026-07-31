@@ -1,0 +1,369 @@
+name: bank
+
+# Production-shaped local topology: every service owns its database; Traefik is
+# the only host-published endpoint. Stateful services are intentionally
+# single-replica local dependencies, while stateless services have the replica
+# defaults described in template.yaml.
+
+x-service-common: &service-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 30s
+  mem_reservation: 128m
+  mem_limit: 512m
+  cpus: 1.0
+  networks: [edge, data]
+  environment: &service-env
+    DB_PORT: "5432"
+    DB_USER: bank
+    DB_PASSWORD: bank
+    DB_SSLMODE: disable
+    DB_MAX_CONNS: "10"
+    DB_MIN_CONNS: "1"
+    BROKER_URL: amqp://bank:bank@rabbitmq:5672/
+    AMQP_URL: amqp://bank:bank@rabbitmq:5672/
+    HTTP_ADDR: :8080
+    GRPC_ADDR: :9090
+    CLIENT_REQUEST_TIMEOUT: 8s
+    CLIENT_ATTEMPT_TIMEOUT: 3s
+    OUTBOX_BATCH_SIZE: "100"
+    OUTBOX_POLL_INTERVAL: 1s
+    SHUTDOWN_TIMEOUT: 25s
+
+x-postgres-common: &postgres-common
+  image: postgres:16-bookworm
+  init: true
+  restart: unless-stopped
+  environment:
+    POSTGRES_USER: bank
+    POSTGRES_PASSWORD: bank
+  cap_drop: [ALL]
+  cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 30s
+  mem_reservation: 128m
+  mem_limit: 768m
+  cpus: 1.0
+  networks: [data]
+  healthcheck:
+    test: [CMD-SHELL, pg_isready -U bank -d $$POSTGRES_DB]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+    start_period: 10s
+
+x-migration-common: &migration-common
+  image: postgres:16-bookworm
+  init: true
+  restart: "no"
+  networks: [data]
+  environment:
+    PGPASSWORD: bank
+  mem_reservation: 32m
+  mem_limit: 128m
+  cpus: 0.25
+  volumes:
+    - ./db/migrations:/migrations:ro
+
+networks:
+  edge:
+    name: bank-edge
+  data:
+    name: bank-data
+
+volumes:
+  pg-core-banking:
+  pg-customer:
+  pg-payment:
+  pg-reward:
+  pg-risk:
+  pg-loan:
+  pg-wealth:
+  rabbitmq-data:
+
+services:
+  traefik:
+    image: traefik:v3.7.8
+    init: true
+    restart: unless-stopped
+    command: [--configFile=/etc/traefik/traefik.yaml]
+    ports: ["18000:8080"]
+    volumes:
+      - ./deploy/traefik/traefik.yaml:/etc/traefik/traefik.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      edge:
+        aliases: [gateway]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30s
+    mem_reservation: 64m
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck:
+      test: [CMD-SHELL, wget -qO- http://127.0.0.1:9000/ping >/dev/null 2>&1 || exit 1]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  rabbitmq:
+    image: rabbitmq:4.0-management
+    init: true
+    restart: unless-stopped
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: bank
+      RABBITMQ_DEFAULT_PASS: bank
+      RABBITMQ_DEFAULT_VHOST: "/"
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: '-rabbit load_definitions "/etc/rabbitmq/definitions.json"'
+    volumes:
+      - ./deploy/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks: [data]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30s
+    mem_reservation: 256m
+    mem_limit: 768m
+    cpus: 1.0
+    healthcheck:
+      test: [CMD-SHELL, rabbitmq-diagnostics -q ping]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  core-banking-db:
+    <<: *postgres-common
+    environment: {POSTGRES_USER: bank, POSTGRES_PASSWORD: bank, POSTGRES_DB: core_db}
+    volumes: [pg-core-banking:/var/lib/postgresql/data]
+  customer-db:
+    <<: *postgres-common
+    environment: {POSTGRES_USER: bank, POSTGRES_PASSWORD: bank, POSTGRES_DB: cust_db}
+    volumes: [pg-customer:/var/lib/postgresql/data]
+  payment-db:
+    <<: *postgres-common
+    environment: {POSTGRES_USER: bank, POSTGRES_PASSWORD: bank, POSTGRES_DB: pay_db}
+    volumes: [pg-payment:/var/lib/postgresql/data]
+  reward-db:
+    <<: *postgres-common
+    environment: {POSTGRES_USER: bank, POSTGRES_PASSWORD: bank, POSTGRES_DB: reward_db}
+    volumes: [pg-reward:/var/lib/postgresql/data]
+  risk-db:
+    <<: *postgres-common
+    environment: {POSTGRES_USER: bank, POSTGRES_PASSWORD: bank, POSTGRES_DB: risk_db}
+    volumes: [pg-risk:/var/lib/postgresql/data]
+  loan-db:
+    <<: *postgres-common
+    environment: {POSTGRES_USER: bank, POSTGRES_PASSWORD: bank, POSTGRES_DB: loan_db}
+    volumes: [pg-loan:/var/lib/postgresql/data]
+  wealth-db:
+    <<: *postgres-common
+    environment: {POSTGRES_USER: bank, POSTGRES_PASSWORD: bank, POSTGRES_DB: wealth_db}
+    volumes: [pg-wealth:/var/lib/postgresql/data]
+
+  migrate-core-banking:
+    <<: *migration-common
+    depends_on: {core-banking-db: {condition: service_healthy}}
+    entrypoint: [sh, -ec, psql -v ON_ERROR_STOP=1 -h core-banking-db -U bank -d core_db -f /migrations/shared.sql -f /migrations/core_db.sql]
+  migrate-customer:
+    <<: *migration-common
+    depends_on: {customer-db: {condition: service_healthy}}
+    entrypoint: [sh, -ec, psql -v ON_ERROR_STOP=1 -h customer-db -U bank -d cust_db -f /migrations/shared.sql -f /migrations/cust_db.sql]
+  migrate-payment:
+    <<: *migration-common
+    depends_on: {payment-db: {condition: service_healthy}}
+    entrypoint: [sh, -ec, psql -v ON_ERROR_STOP=1 -h payment-db -U bank -d pay_db -f /migrations/shared.sql -f /migrations/pay_db.sql]
+  migrate-reward:
+    <<: *migration-common
+    depends_on: {reward-db: {condition: service_healthy}}
+    entrypoint: [sh, -ec, psql -v ON_ERROR_STOP=1 -h reward-db -U bank -d reward_db -f /migrations/shared.sql -f /migrations/reward_db.sql]
+  migrate-risk:
+    <<: *migration-common
+    depends_on: {risk-db: {condition: service_healthy}}
+    entrypoint: [sh, -ec, psql -v ON_ERROR_STOP=1 -h risk-db -U bank -d risk_db -f /migrations/shared.sql -f /migrations/risk_db.sql]
+  migrate-loan:
+    <<: *migration-common
+    depends_on: {loan-db: {condition: service_healthy}}
+    entrypoint: [sh, -ec, psql -v ON_ERROR_STOP=1 -h loan-db -U bank -d loan_db -f /migrations/shared.sql -f /migrations/loan_db.sql]
+  migrate-wealth:
+    <<: *migration-common
+    depends_on: {wealth-db: {condition: service_healthy}}
+    entrypoint: [sh, -ec, psql -v ON_ERROR_STOP=1 -h wealth-db -U bank -d wealth_db -f /migrations/shared.sql -f /migrations/wealth_db.sql]
+
+  core-banking:
+    <<: *service-common
+    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: core-banking}}
+    depends_on:
+      core-banking-db: {condition: service_healthy}
+      migrate-core-banking: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+    environment: {<<: *service-env, DB_HOST: core-banking-db, DB_NAME: core_db}
+    expose: ["8080", "9090"]
+    deploy: {replicas: 2}
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=bank-edge
+      - traefik.http.routers.core-banking.rule=PathPrefix(`/api/v1/accounts`) || PathPrefix(`/api/v1/txns`) || PathPrefix(`/api/v1/ledger`) || PathPrefix(`/api/v1/vouchers`)
+      - traefik.http.routers.core-banking.entrypoints=web
+      - traefik.http.services.core-banking.loadbalancer.server.port=8080
+    healthcheck: &app-healthcheck
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  customer:
+    <<: *service-common
+    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: customer}}
+    depends_on:
+      customer-db: {condition: service_healthy}
+      migrate-customer: {condition: service_completed_successfully}
+      core-banking: {condition: service_started}
+      rabbitmq: {condition: service_healthy}
+    environment: {<<: *service-env, DB_HOST: customer-db, DB_NAME: cust_db, CORE_BANKING_GRPC_TARGET: dns:///core-banking:9090}
+    expose: ["8080", "9090"]
+    deploy: {replicas: 1}
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=bank-edge
+      - traefik.http.routers.customer.rule=PathPrefix(`/api/v1/customers`)
+      - traefik.http.routers.customer.entrypoints=web
+      - traefik.http.services.customer.loadbalancer.server.port=8080
+    healthcheck: *app-healthcheck
+
+  payment:
+    <<: *service-common
+    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: payment}}
+    depends_on:
+      payment-db: {condition: service_healthy}
+      migrate-payment: {condition: service_completed_successfully}
+      core-banking: {condition: service_started}
+      customer: {condition: service_started}
+      rabbitmq: {condition: service_healthy}
+    environment: {<<: *service-env, DB_HOST: payment-db, DB_NAME: pay_db, CORE_BANKING_GRPC_TARGET: dns:///core-banking:9090, CUSTOMER_GRPC_TARGET: dns:///customer:9090}
+    expose: ["8080"]
+    deploy: {replicas: 2}
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=bank-edge
+      - traefik.http.routers.payment.rule=PathPrefix(`/api/v1/payments`) || PathPrefix(`/api/v1/merchants`)
+      - traefik.http.routers.payment.entrypoints=web
+      - traefik.http.services.payment.loadbalancer.server.port=8080
+    healthcheck: *app-healthcheck
+
+  reward:
+    <<: *service-common
+    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: reward}}
+    depends_on:
+      reward-db: {condition: service_healthy}
+      migrate-reward: {condition: service_completed_successfully}
+      customer: {condition: service_started}
+      rabbitmq: {condition: service_healthy}
+    environment: {<<: *service-env, DB_HOST: reward-db, DB_NAME: reward_db, CUSTOMER_GRPC_TARGET: dns:///customer:9090}
+    expose: ["8080"]
+    deploy: {replicas: 1}
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=bank-edge
+      - traefik.http.routers.reward.rule=PathPrefix(`/api/v1/reward`)
+      - traefik.http.routers.reward.entrypoints=web
+      - traefik.http.services.reward.loadbalancer.server.port=8080
+    healthcheck: *app-healthcheck
+
+  risk:
+    <<: *service-common
+    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: risk}}
+    depends_on:
+      risk-db: {condition: service_healthy}
+      migrate-risk: {condition: service_completed_successfully}
+      customer: {condition: service_started}
+      rabbitmq: {condition: service_healthy}
+    environment: {<<: *service-env, DB_HOST: risk-db, DB_NAME: risk_db, CUSTOMER_GRPC_TARGET: dns:///customer:9090}
+    expose: ["8080"]
+    deploy: {replicas: 2}
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=bank-edge
+      - traefik.http.routers.risk.rule=PathPrefix(`/api/v1/risk`)
+      - traefik.http.routers.risk.entrypoints=web
+      - traefik.http.services.risk.loadbalancer.server.port=8080
+    healthcheck: *app-healthcheck
+
+  loan:
+    <<: *service-common
+    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: loan}}
+    depends_on:
+      loan-db: {condition: service_healthy}
+      migrate-loan: {condition: service_completed_successfully}
+      customer: {condition: service_started}
+      rabbitmq: {condition: service_healthy}
+    environment: {<<: *service-env, DB_HOST: loan-db, DB_NAME: loan_db, CUSTOMER_GRPC_TARGET: dns:///customer:9090}
+    expose: ["8080"]
+    deploy: {replicas: 1}
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=bank-edge
+      - traefik.http.routers.loan.rule=PathPrefix(`/api/v1/loan`)
+      - traefik.http.routers.loan.entrypoints=web
+      - traefik.http.services.loan.loadbalancer.server.port=8080
+    healthcheck: *app-healthcheck
+
+  wealth:
+    <<: *service-common
+    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: wealth}}
+    depends_on:
+      wealth-db: {condition: service_healthy}
+      migrate-wealth: {condition: service_completed_successfully}
+      customer: {condition: service_started}
+      rabbitmq: {condition: service_healthy}
+    environment: {<<: *service-env, DB_HOST: wealth-db, DB_NAME: wealth_db, CUSTOMER_GRPC_TARGET: dns:///customer:9090}
+    expose: ["8080"]
+    deploy: {replicas: 1}
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=bank-edge
+      - traefik.http.routers.wealth.rule=PathPrefix(`/api/v1/wealth`)
+      - traefik.http.routers.wealth.entrypoints=web
+      - traefik.http.services.wealth.loadbalancer.server.port=8080
+    healthcheck: *app-healthcheck
+
+  seed:
+    profiles: [seed]
+    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: seed}}
+    init: true
+    restart: "no"
+    networks: [data]
+    depends_on:
+      migrate-core-banking: {condition: service_completed_successfully}
+      migrate-customer: {condition: service_completed_successfully}
+      migrate-payment: {condition: service_completed_successfully}
+      migrate-reward: {condition: service_completed_successfully}
+      migrate-risk: {condition: service_completed_successfully}
+      migrate-loan: {condition: service_completed_successfully}
+      migrate-wealth: {condition: service_completed_successfully}
+    environment:
+      DB_USER: bank
+      DB_PASSWORD: bank
+      DB_PORT: "5432"
+      DB_HOST_CORE_DB: core-banking-db
+      DB_HOST_CUST_DB: customer-db
+      DB_HOST_PAY_DB: payment-db
+      DB_HOST_REWARD_DB: reward-db
+      DB_HOST_RISK_DB: risk-db
+      DB_HOST_LOAN_DB: loan-db
+      DB_HOST_WEALTH_DB: wealth-db
+      DEDICATED_DATABASES: "true"
+    mem_reservation: 64m
+    mem_limit: 256m
+    cpus: 0.5

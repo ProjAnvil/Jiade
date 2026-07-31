@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"commerce/internal/platform/messaging"
+	"commerce/internal/platform/telemetry"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -18,9 +19,9 @@ const paymentConsumer = "payment"
 // transactional Inbox. Each delivery is settled inside the inbox transaction;
 // a duplicate event is a no-op.
 type Consumer struct {
-	store    *PostgresStore
-	service  *Service
-	policy   messaging.RetryPolicy
+	store      *PostgresStore
+	service    *Service
+	policy     messaging.RetryPolicy
 	retryQueue string
 }
 
@@ -57,17 +58,21 @@ func (consumer *Consumer) ProcessDelivery(ctx context.Context, delivery amqp.Del
 		return fmt.Errorf("begin payment delivery: %w", err)
 	}
 	return messaging.ProcessRabbitDeliveryForRetryQueue(ctx, tx, paymentConsumer, delivery,
-		consumer.retryQueue, consumer.applyEvent, consumer.policy)
+		consumer.retryQueue, consumer.applyEventContext, consumer.policy)
 }
 
 func (consumer *Consumer) applyEvent(event messaging.Event) error {
+	return consumer.applyEventContext(context.Background(), event)
+}
+
+func (consumer *Consumer) applyEventContext(ctx context.Context, event messaging.Event) error {
 	switch event.Type {
 	case "order.placed.v1":
-		return consumer.applyOrderPlaced(event)
+		return consumer.applyOrderPlaced(ctx, event)
 	case "payment.refund-requested.v1":
-		return consumer.applyRefundRequested(event)
+		return consumer.applyRefundRequested(ctx, event)
 	case "order.cancelled.v1":
-		return consumer.applyOrderCancelled(event)
+		return consumer.applyOrderCancelled(ctx, event)
 	default:
 		return messaging.NonRetryable(fmt.Errorf("unsupported payment event type %s", event.Type))
 	}
@@ -85,7 +90,7 @@ type orderPlacedPayload struct {
 	Lines      json.RawMessage `json:"lines"`
 }
 
-func (consumer *Consumer) applyOrderPlaced(event messaging.Event) error {
+func (consumer *Consumer) applyOrderPlaced(ctx context.Context, event messaging.Event) error {
 	var payload orderPlacedPayload
 	if err := decodePaymentEnvelope(event, &payload); err != nil {
 		return err
@@ -97,7 +102,7 @@ func (consumer *Consumer) applyOrderPlaced(event messaging.Event) error {
 		return messaging.NonRetryable(fmt.Errorf("invalid order.placed money %s/%d",
 			payload.Currency, payload.TotalMinor))
 	}
-	_, err := consumer.service.CaptureOrder(context.Background(), CaptureCommand{
+	_, err := consumer.service.CaptureOrder(ctx, CaptureCommand{
 		OrderID:        payload.OrderID,
 		Currency:       payload.Currency,
 		AmountMinor:    payload.TotalMinor,
@@ -117,7 +122,7 @@ func placeIntentKey(orderID string) string {
 	return "place:" + orderID
 }
 
-func (consumer *Consumer) applyRefundRequested(event messaging.Event) error {
+func (consumer *Consumer) applyRefundRequested(ctx context.Context, event messaging.Event) error {
 	var payload struct {
 		OrderID     string `json:"order_id"`
 		Currency    string `json:"currency"`
@@ -132,7 +137,7 @@ func (consumer *Consumer) applyRefundRequested(event messaging.Event) error {
 	if payload.AmountMinor <= 0 {
 		return messaging.NonRetryable(errors.New("refund amount must be positive"))
 	}
-	_, err := consumer.service.Refund(context.Background(), RefundCommand{
+	_, err := consumer.service.Refund(ctx, RefundCommand{
 		OrderID:        payload.OrderID,
 		Currency:       payload.Currency,
 		AmountMinor:    payload.AmountMinor,
@@ -145,7 +150,7 @@ func (consumer *Consumer) applyRefundRequested(event messaging.Event) error {
 	return err
 }
 
-func (consumer *Consumer) applyOrderCancelled(event messaging.Event) error {
+func (consumer *Consumer) applyOrderCancelled(ctx context.Context, event messaging.Event) error {
 	var payload struct {
 		OrderID string `json:"order_id"`
 		Reason  string `json:"reason"`
@@ -160,7 +165,7 @@ func (consumer *Consumer) applyOrderCancelled(event messaging.Event) error {
 	if reason == "" {
 		reason = "order.cancelled"
 	}
-	_, err := consumer.service.CancelIntent(context.Background(), CancelCommand{
+	_, err := consumer.service.CancelIntent(ctx, CancelCommand{
 		OrderID:        payload.OrderID,
 		Reason:         reason,
 		IdempotencyKey: "cancel:" + payload.OrderID,
@@ -299,6 +304,7 @@ func (acknowledger *retryAcknowledger) publishThenAck(tag uint64, exchange, key 
 		ctx = context.Background()
 	}
 	delivery := acknowledger.delivery
+	ctx = telemetry.ExtractAMQP(ctx, delivery.Headers)
 	if err := acknowledger.publisher.Route(ctx, exchange, key, amqp.Publishing{
 		Headers: delivery.Headers, ContentType: delivery.ContentType,
 		ContentEncoding: delivery.ContentEncoding, DeliveryMode: amqp.Persistent,

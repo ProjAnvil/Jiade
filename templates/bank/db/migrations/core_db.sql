@@ -99,3 +99,43 @@ CREATE TABLE IF NOT EXISTS gl_balance (
     ccy          TEXT NOT NULL,
     PRIMARY KEY (subject_code, biz_date, ccy)
 );
+
+-- Funds holds: reservations of available balance on a demand account.
+-- A hold reduces available = ledger balance - active holds; the ledger
+-- balance itself is only moved when the hold is captured (held transfer,
+-- Task 3) or released back to available.
+CREATE TABLE IF NOT EXISTS funds_hold (
+    hold_id         TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    account_no      TEXT NOT NULL,
+    amount          NUMERIC(18,2) NOT NULL,
+    ccy             TEXT NOT NULL,
+    workflow_id     TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'active',   -- active / released / captured
+    expires_at      TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Partial index: active holds by account (the hot-path query for available-balance computation).
+CREATE INDEX IF NOT EXISTS idx_funds_hold_account_active
+    ON funds_hold(account_no) WHERE status = 'active';
+
+-- Held transfer idempotency: maps idempotency key to posted voucher.
+-- The PRIMARY KEY on idempotency_key is the last-line guard against
+-- concurrent duplicate PostHeldTransfer calls for the same hold.
+CREATE TABLE IF NOT EXISTS held_transfer (
+    idempotency_key  TEXT PRIMARY KEY,
+    voucher_no       TEXT NOT NULL,
+    hold_id          TEXT NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Voucher reversal tracking: one row per reversal. The PRIMARY KEY on
+-- reverses_voucher_no is the hard guarantee that a voucher is reversed at
+-- most once (red reversal appends opposite entries; the original voucher
+-- status and entries are never modified).
+CREATE TABLE IF NOT EXISTS voucher_reversal (
+    reverses_voucher_no  TEXT PRIMARY KEY,
+    reversal_voucher_no  TEXT NOT NULL,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);

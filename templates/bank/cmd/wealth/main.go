@@ -3,49 +3,77 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	customerv1 "bank/gen/bank/customer/v1"
+	"bank/internal/platform/grpcx"
+	"bank/internal/platform/httpx"
 	"bank/internal/platform/pg"
+	"bank/internal/platform/runx"
+	"bank/internal/platform/serviceclient"
+	"bank/internal/platform/telemetry"
 	"bank/internal/wealth/api"
 	"bank/internal/wealth/repo"
 	"bank/internal/wealth/service"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
+	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Initialise OpenTelemetry tracing early so the otelgrpc/otelhttp
+	// instrumentation installed in Task 2 exports spans via the global
+	// TracerProvider. OTel init failure MUST NOT block startup: on error we
+	// fall back to a NoOp provider so the process keeps serving traffic.
+	telemetryProvider := initTelemetry(signalCtx, "wealth", getenv("INSTANCE_ID", "wealth-1"))
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := telemetryProvider.Shutdown(shutdownCtx); err != nil {
+			log.Printf("wealth telemetry shutdown: %v", err)
+		}
+		cancel()
+	}()
+
 	dbName := getenv("DB_NAME", "wealth_db")
 	db, err := pg.Open(dbName)
 	if err != nil {
-		log.Fatalf("打开 %s 失败: %v", dbName, err)
+		return fmt.Errorf("打开 %s 失败: %w", dbName, err)
 	}
 	defer db.Close()
 	if err := waitForDB(db, 5, time.Second); err != nil {
-		log.Fatalf("连 %s 失败: %v（请先 make up 再 make seed）", dbName, err)
+		return fmt.Errorf("连 %s 失败（请先 make up 再 make seed）: %w", dbName, err)
 	}
+	customerConn, err := grpcx.Dial(signalCtx, grpcx.ClientConfig{Target: getenv("CUSTOMER_GRPC_TARGET", "dns:///customer:9090"), Timeout: 3 * time.Second})
+	if err != nil {
+		return fmt.Errorf("连接 customer gRPC 失败: %w", err)
+	}
+	defer customerConn.Close()
 
 	handlers := &api.Handlers{
-		Svc: service.NewWealthService(repo.NewWealthRepo(db)),
+		Svc: service.NewWealthService(repo.NewWealthRepo(db, serviceclient.NewCustomerReader(customerv1.NewCustomerQueryServiceClient(customerConn)))),
 	}
-	port := getenv("API_PORT", "18086")
-	srv := &http.Server{Addr: ":" + port, Handler: api.NewRouter(handlers)}
+	httpAddr := getenv("HTTP_ADDR", ":8080")
+	srv := httpx.NewServer(httpx.ServerConfig{
+		Service:  "wealth",
+		Instance: getenv("INSTANCE_ID", "wealth-1"),
+		Addr:     httpAddr,
+		Handler:  api.NewRouter(handlers),
+		Ready:    func(ctx context.Context) error { return db.PingContext(ctx) },
+	})
 
-	go func() {
-		log.Printf("wealth 监听 :%s (db=%s)", port, dbName)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal(err)
-		}
-	}()
-
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(ctx)
+	log.Printf("wealth HTTP 监听 %s (db=%s)", httpAddr, dbName)
+	return runx.Serve(signalCtx, srv, nil, 5*time.Second)
 }
 
 type pinger interface{ Ping() error }
@@ -66,4 +94,26 @@ func getenv(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// initTelemetry configures the global OpenTelemetry TracerProvider from the
+// OTEL_* env vars set by compose.observability.yaml. provider.New /
+// provider.Disabled install the provider globally (otel.SetTracerProvider +
+// otel.SetTextMapPropagator), so the otelgrpc/otelhttp instrumentation
+// installed in Task 2 picks it up automatically. On init failure it installs a
+// NoOp provider so OTel problems never block startup.
+func initTelemetry(ctx context.Context, service, instance string) *telemetry.Provider {
+	cfg := telemetry.Config{
+		Service:  service,
+		Instance: instance,
+		Endpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		Enabled:  os.Getenv("OTEL_ENABLED") == "true",
+		Insecure: os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "true",
+	}
+	provider, err := telemetry.New(ctx, cfg)
+	if err != nil {
+		log.Printf("%s: telemetry init 失败，降级到 NoOp provider: %v", service, err)
+		return telemetry.Disabled()
+	}
+	return provider
 }

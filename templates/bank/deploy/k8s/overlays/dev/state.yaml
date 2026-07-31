@@ -1,0 +1,501 @@
+# Dev-only stateful dependencies: seven PostgreSQL StatefulSets and one
+# RabbitMQ StatefulSet, each with a headless Service for stable DNS and a PVC
+# for durability across pod restarts.
+#
+# Together with secret.yaml this overlay makes `kubectl apply -k
+# deploy/k8s/overlays/dev` runnable end-to-end: every bank service can resolve
+# its DB_HOST and BROKER_URL inside the cluster. Production overlays do NOT use
+# StatefulSets — they ExternalName-resolve to managed equivalents.
+#
+# The service names (core-banking-db, customer-db, ..., rabbitmq) match the
+# DB_HOST / BROKER_URL values hard-coded in the base Deployments, so the
+# application code is identical between overlays.
+#
+# Every resource here carries `bank.jiade/unsafe: dev-only` to make the
+# non-production intent grep-able and to allow policy tools to flag any
+# dev-only object that leaks into a production render.
+
+# ===================== PostgreSQL: seven databases =====================
+# One StatefulSet per bank service, matching the compose volumes
+# pg-core-banking, pg-customer, pg-payment, pg-reward, pg-risk, pg-loan,
+# pg-wealth. POSTGRES_DB matches the DB_NAME env set on each base Deployment.
+
+# ---------- core-banking-db ----------
+apiVersion: v1
+kind: Service
+metadata:
+  name: core-banking-db
+  labels: {app: core-banking-db, bank.jiade/unsafe: dev-only}
+spec:
+  clusterIP: None
+  selector: {app: core-banking-db}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: core-banking-db
+  labels: {app: core-banking-db, bank.jiade/unsafe: dev-only}
+spec:
+  serviceName: core-banking-db
+  replicas: 1
+  selector: {matchLabels: {app: core-banking-db}}
+  template:
+    metadata:
+      labels: {app: core-banking-db, bank.jiade/unsafe: dev-only}
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: postgres
+          image: postgres:16-bookworm
+          ports: [{name: postgres, containerPort: 5432}]
+          env:
+            - {name: POSTGRES_USER, value: bank}
+            - {name: POSTGRES_PASSWORD, value: bank}
+            - {name: POSTGRES_DB, value: core_db}
+          readinessProbe:
+            exec: {command: [sh, -c, "pg_isready -U bank -d $POSTGRES_DB"]}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec: {command: [sh, -c, "pg_isready -U bank -d $POSTGRES_DB"]}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 1Gi}}
+
+# ---------- customer-db ----------
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customer-db
+  labels: {app: customer-db, bank.jiade/unsafe: dev-only}
+spec:
+  clusterIP: None
+  selector: {app: customer-db}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: customer-db
+  labels: {app: customer-db, bank.jiade/unsafe: dev-only}
+spec:
+  serviceName: customer-db
+  replicas: 1
+  selector: {matchLabels: {app: customer-db}}
+  template:
+    metadata:
+      labels: {app: customer-db, bank.jiade/unsafe: dev-only}
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: postgres
+          image: postgres:16-bookworm
+          ports: [{name: postgres, containerPort: 5432}]
+          env:
+            - {name: POSTGRES_USER, value: bank}
+            - {name: POSTGRES_PASSWORD, value: bank}
+            - {name: POSTGRES_DB, value: cust_db}
+          readinessProbe:
+            exec: {command: [sh, -c, "pg_isready -U bank -d $POSTGRES_DB"]}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec: {command: [sh, -c, "pg_isready -U bank -d $POSTGRES_DB"]}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 1Gi}}
+
+# ---------- payment-db ----------
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-db
+  labels: {app: payment-db, bank.jiade/unsafe: dev-only}
+spec:
+  clusterIP: None
+  selector: {app: payment-db}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: payment-db
+  labels: {app: payment-db, bank.jiade/unsafe: dev-only}
+spec:
+  serviceName: payment-db
+  replicas: 1
+  selector: {matchLabels: {app: payment-db}}
+  template:
+    metadata:
+      labels: {app: payment-db, bank.jiade/unsafe: dev-only}
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: postgres
+          image: postgres:16-bookworm
+          ports: [{name: postgres, containerPort: 5432}]
+          env:
+            - {name: POSTGRES_USER, value: bank}
+            - {name: POSTGRES_PASSWORD, value: bank}
+            - {name: POSTGRES_DB, value: pay_db}
+          readinessProbe:
+            exec: {command: [sh, -c, "pg_isready -U bank -d $POSTGRES_DB"]}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec: {command: [sh, -c, "pg_isready -U bank -d $POSTGRES_DB"]}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 1Gi}}
+
+# ---------- reward-db ----------
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reward-db
+  labels: {app: reward-db, bank.jiade/unsafe: dev-only}
+spec:
+  clusterIP: None
+  selector: {app: reward-db}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: reward-db
+  labels: {app: reward-db, bank.jiade/unsafe: dev-only}
+spec:
+  serviceName: reward-db
+  replicas: 1
+  selector: {matchLabels: {app: reward-db}}
+  template:
+    metadata:
+      labels: {app: reward-db, bank.jiade/unsafe: dev-only}
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: postgres
+          image: postgres:16-bookworm
+          ports: [{name: postgres, containerPort: 5432}]
+          env:
+            - {name: POSTGRES_USER, value: bank}
+            - {name: POSTGRES_PASSWORD, value: bank}
+            - {name: POSTGRES_DB, value: reward_db}
+          readinessProbe:
+            exec: {command: [sh, -c, "pg_isready -U bank -d $POSTGRES_DB"]}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec: {command: [sh, -c, "pg_isready -U bank -d $POSTGRES_DB"]}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 1Gi}}
+
+# ---------- risk-db ----------
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: risk-db
+  labels: {app: risk-db, bank.jiade/unsafe: dev-only}
+spec:
+  clusterIP: None
+  selector: {app: risk-db}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: risk-db
+  labels: {app: risk-db, bank.jiade/unsafe: dev-only}
+spec:
+  serviceName: risk-db
+  replicas: 1
+  selector: {matchLabels: {app: risk-db}}
+  template:
+    metadata:
+      labels: {app: risk-db, bank.jiade/unsafe: dev-only}
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: postgres
+          image: postgres:16-bookworm
+          ports: [{name: postgres, containerPort: 5432}]
+          env:
+            - {name: POSTGRES_USER, value: bank}
+            - {name: POSTGRES_PASSWORD, value: bank}
+            - {name: POSTGRES_DB, value: risk_db}
+          readinessProbe:
+            exec: {command: [sh, -c, "pg_isready -U bank -d $POSTGRES_DB"]}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec: {command: [sh, -c, "pg_isready -U bank -d $POSTGRES_DB"]}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 1Gi}}
+
+# ---------- loan-db ----------
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loan-db
+  labels: {app: loan-db, bank.jiade/unsafe: dev-only}
+spec:
+  clusterIP: None
+  selector: {app: loan-db}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loan-db
+  labels: {app: loan-db, bank.jiade/unsafe: dev-only}
+spec:
+  serviceName: loan-db
+  replicas: 1
+  selector: {matchLabels: {app: loan-db}}
+  template:
+    metadata:
+      labels: {app: loan-db, bank.jiade/unsafe: dev-only}
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: postgres
+          image: postgres:16-bookworm
+          ports: [{name: postgres, containerPort: 5432}]
+          env:
+            - {name: POSTGRES_USER, value: bank}
+            - {name: POSTGRES_PASSWORD, value: bank}
+            - {name: POSTGRES_DB, value: loan_db}
+          readinessProbe:
+            exec: {command: [sh, -c, "pg_isready -U bank -d $POSTGRES_DB"]}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec: {command: [sh, -c, "pg_isready -U bank -d $POSTGRES_DB"]}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 1Gi}}
+
+# ---------- wealth-db ----------
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wealth-db
+  labels: {app: wealth-db, bank.jiade/unsafe: dev-only}
+spec:
+  clusterIP: None
+  selector: {app: wealth-db}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wealth-db
+  labels: {app: wealth-db, bank.jiade/unsafe: dev-only}
+spec:
+  serviceName: wealth-db
+  replicas: 1
+  selector: {matchLabels: {app: wealth-db}}
+  template:
+    metadata:
+      labels: {app: wealth-db, bank.jiade/unsafe: dev-only}
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: postgres
+          image: postgres:16-bookworm
+          ports: [{name: postgres, containerPort: 5432}]
+          env:
+            - {name: POSTGRES_USER, value: bank}
+            - {name: POSTGRES_PASSWORD, value: bank}
+            - {name: POSTGRES_DB, value: wealth_db}
+          readinessProbe:
+            exec: {command: [sh, -c, "pg_isready -U bank -d $POSTGRES_DB"]}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec: {command: [sh, -c, "pg_isready -U bank -d $POSTGRES_DB"]}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 1Gi}}
+
+# ===================== RabbitMQ =====================
+# Single-broker StatefulSet matching the compose `rabbitmq` service. The
+# management UI port (15672) is exposed only inside the cluster.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  labels: {app: rabbitmq, bank.jiade/unsafe: dev-only}
+spec:
+  clusterIP: None
+  selector: {app: rabbitmq}
+  ports:
+    - {name: amqp, port: 5672, targetPort: amqp}
+    - {name: management, port: 15672, targetPort: management}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  labels: {app: rabbitmq, bank.jiade/unsafe: dev-only}
+spec:
+  serviceName: rabbitmq
+  replicas: 1
+  selector: {matchLabels: {app: rabbitmq}}
+  template:
+    metadata:
+      labels: {app: rabbitmq, bank.jiade/unsafe: dev-only}
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:4.0-management
+          ports:
+            - {name: amqp, containerPort: 5672}
+            - {name: management, containerPort: 15672}
+          env:
+            - {name: RABBITMQ_DEFAULT_USER, value: bank}
+            - {name: RABBITMQ_DEFAULT_PASS, value: bank}
+            - {name: RABBITMQ_DEFAULT_VHOST, value: "/"}
+          readinessProbe:
+            exec: {command: [rabbitmq-diagnostics, -q, ping]}
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            exec: {command: [rabbitmq-diagnostics, -q, ping]}
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          volumeMounts: [{name: data, mountPath: /var/lib/rabbitmq}]
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 768Mi}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 2Gi}}
+
+# ===================== Data-plane ingress NetworkPolicies =====================
+# The base network-policy.yaml default-denies all ingress; these two policies
+# open the data ports required by the in-cluster StatefulSets above. They are
+# dev-only because the prod overlay has no in-cluster PostgreSQL/RabbitMQ pods
+# (ExternalName routes to managed services), so the ingress selectors match
+# nothing in production and would be dead weight there.
+
+# Allow the seven app pods to reach their PostgreSQL databases on :5432.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-ingress
+  labels: {bank.jiade/unsafe: dev-only}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [core-banking-db, customer-db, payment-db, reward-db, risk-db, loan-db, wealth-db]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [core-banking, customer, payment, reward, risk, loan, wealth]
+      ports:
+        - {protocol: TCP, port: 5432}
+
+# Allow the seven app pods to reach RabbitMQ on :5672 (AMQP).
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-rabbitmq-ingress
+  labels: {bank.jiade/unsafe: dev-only}
+spec:
+  podSelector:
+    matchLabels: {app: rabbitmq}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [core-banking, customer, payment, reward, risk, loan, wealth]
+      ports:
+        - {protocol: TCP, port: 5672}

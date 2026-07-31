@@ -1,0 +1,37 @@
+# Kubernetes application base for the bank template.
+#
+# This is an APPLICATION-ONLY base: it renders Deployments, Services, an
+# Ingress, ConfigMap, PDBs, HPAs, and the namespace-wide NetworkPolicy baseline
+# for the seven bank services. It does NOT provision StatefulSets,
+# PersistentVolumes, real credentials, or the PostgreSQL/RabbitMQ stateful
+# dependencies — those belong to the operational-closure overlays.
+#
+# All seven Deployments reference a single shared container image; runtime
+# overlays patch per-service image tags and inject secrets.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: bank
+
+resources:
+  - namespace.yaml
+  - config.yaml
+  - apps.yaml
+  - services.yaml
+  - gateway.yaml
+  - availability.yaml
+  # network-policy.yaml: default-deny + allow matrix (Step 4).
+  # networking.yaml: focused lockdown of the payment admin gRPC port (9091)
+  # to operator identities (Task 3). Both files are intentionally separate so
+  # overlays can widen mesh traffic without touching the admin lockdown.
+  - network-policy.yaml
+  - networking.yaml
+
+# Add common app labels to every resource's metadata and to pod templates,
+# WITHOUT polluting label selectors (includeSelectors stays false so Service
+# selectors remain the per-service `app: <name>` written in each manifest).
+labels:
+  - includeTemplates: true
+    pairs:
+      app.kubernetes.io/name: bank
+      app.kubernetes.io/part-of: bank
+      app.kubernetes.io/managed-by: kustomize

@@ -3,6 +3,7 @@ package domains
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 
 	"bank/internal/customer/domain"
@@ -21,8 +22,10 @@ func GenCustomers(cfg fixtures.Config, n int) []domain.Customer {
 			Nationality:   "CN",
 			RiskLevel:     rng.Choice(fixtures.RiskLevels),
 			KYCStatus:     "passed",
+			Status:        "active",
 			CreateBizDate: fixtures.RandomDate(rng, cfg.StartBizDate, cfg.EndBizDate),
 		}
+		c.RiskTags = preparationRiskTags(c.RiskLevel)
 		if isOrg {
 			c.CustType = domain.CustTypeOrg
 			c.Name = orgName(rng)
@@ -66,15 +69,38 @@ func WriteCustomers(ctx context.Context, db *sql.DB, rows []domain.Customer) err
 		if c.Birthday != "" {
 			birthday = c.Birthday
 		}
+		riskTagsJSON, err := encodeRiskTagsJSON(c.RiskTags)
+		if err != nil {
+			return fmt.Errorf("编码 cust_info %s 风险标签: %w", c.CustID, err)
+		}
 		if _, err := db.ExecContext(ctx, `INSERT INTO cust_info
-			(cust_id,cust_type,name,cert_type,cert_no,gender,birthday,nationality,risk_level,kyc_status,create_biz_date)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+			(cust_id,cust_type,name,cert_type,cert_no,gender,birthday,nationality,risk_level,kyc_status,customer_status,risk_tags,create_biz_date)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,ARRAY(SELECT jsonb_array_elements_text($12::jsonb))::TEXT[],$13)`,
 			c.CustID, string(c.CustType), c.Name, c.CertType, c.CertNo,
-			gender, birthday, c.Nationality, c.RiskLevel, c.KYCStatus, c.CreateBizDate); err != nil {
+			gender, birthday, c.Nationality, c.RiskLevel, c.KYCStatus, c.Status, riskTagsJSON, c.CreateBizDate); err != nil {
 			return fmt.Errorf("插入 cust_info %s: %w", c.CustID, err)
 		}
 	}
 	return nil
+}
+
+func encodeRiskTagsJSON(tags []string) (string, error) {
+	if tags == nil {
+		tags = []string{}
+	}
+	encoded, err := json.Marshal(tags)
+	return string(encoded), err
+}
+
+func preparationRiskTags(riskLevel string) []string {
+	switch riskLevel {
+	case "high":
+		return []string{"high-risk"}
+	case "medium":
+		return []string{"enhanced-due-diligence"}
+	default:
+		return []string{}
+	}
 }
 
 // WriteAccountRels Idempotent writes cust_account_rel.

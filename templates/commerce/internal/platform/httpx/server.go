@@ -13,6 +13,7 @@ import (
 	"commerce/internal/platform/telemetry"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 const defaultBodyLimit = 1 << 20
@@ -71,23 +72,29 @@ func NewServer(config ServerConfig) *Server {
 	}
 
 	server := &Server{ready: config.Ready, shutdownTimeout: config.ShutdownTimeout}
+	if config.Registry == nil {
+		config.Registry = prometheus.NewRegistry()
+	}
+	metrics := newHTTPMetrics(config.Registry)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/readyz", server.readiness)
-	if config.Registry == nil {
-		mux.Handle("/metrics", promhttp.Handler())
-	} else {
-		mux.Handle("/metrics", promhttp.HandlerFor(config.Registry, promhttp.HandlerOpts{}))
-	}
+	mux.Handle("/metrics", promhttp.HandlerFor(config.Registry, promhttp.HandlerOpts{}))
 	if config.Handler != nil {
 		mux.Handle("/", config.Handler)
 	}
 
-	server.handler = requestID(serviceInstance(config.Instance,
-		accessLog(config.Logger, config.Service,
-			limitBody(config.RequestBodyLimit, recoverPanic(config.Logger, config.Service, mux)))))
+	server.handler = otelhttp.NewHandler(
+		requestID(serviceInstance(config.Instance,
+			accessLog(config.Logger, config.Service, metrics,
+				limitBody(config.RequestBodyLimit, recoverPanic(config.Logger, config.Service, mux))))),
+		config.Service+".http",
+		otelhttp.WithSpanNameFormatter(func(_ string, request *http.Request) string {
+			return request.Method + " " + request.URL.Path
+		}),
+	)
 	server.server = &http.Server{
 		Addr:              config.Addr,
 		Handler:           server.handler,

@@ -9,7 +9,24 @@ import (
 
 	"bank/internal/payment/repo"
 	"bank/internal/platform/pg"
+	"bank/internal/platform/serviceclient"
 )
+
+type deterministicAccountReader struct{}
+
+var _ serviceclient.AccountReader = deterministicAccountReader{}
+
+func (deterministicAccountReader) GetAccount(_ context.Context, accountNo, _ string) (serviceclient.Account, error) {
+	return serviceclient.Account{AccountNo: accountNo, CustomerID: "C-test", Currency: "CNY", Status: "active"}, nil
+}
+
+type deterministicCustomerReader struct{}
+
+var _ serviceclient.CustomerReader = deterministicCustomerReader{}
+
+func (deterministicCustomerReader) GetCustomer(_ context.Context, customerID, _ string) (serviceclient.Customer, error) {
+	return serviceclient.Customer{CustomerID: customerID, Name: "测试客户", CustomerType: "个人", KYCStatus: "passed", Status: "active"}, nil
+}
 
 func setupPayDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -27,7 +44,7 @@ func TestPaymentRepo_GetMerchant(t *testing.T) {
 	db := setupPayDB(t)
 	defer db.Close()
 	ctx := context.Background()
-	r := repo.NewPaymentRepo(db)
+	r := repo.NewPaymentRepo(db, deterministicAccountReader{}, deterministicCustomerReader{})
 	db.ExecContext(ctx, "DELETE FROM merchant WHERE merchant_id='IT-M1'")
 	db.ExecContext(ctx, `INSERT INTO merchant(merchant_id,merchant_name,mcc,region,status,create_biz_date)
 		VALUES ('IT-M1','测试商户','5411','华东','active','2026-01-01')`)
@@ -44,12 +61,12 @@ func TestPaymentRepo_TransfersAndParties(t *testing.T) {
 	db := setupPayDB(t)
 	defer db.Close()
 	ctx := context.Background()
-	r := repo.NewPaymentRepo(db)
+	r := repo.NewPaymentRepo(db, deterministicAccountReader{}, deterministicCustomerReader{})
 	_, err := r.ListTransfers(ctx, "", "", "", 10, 0)
 	if err != nil {
 		t.Fatalf("ListTransfers 失败: %v", err)
 	}
-	// Cross-service aggregation only requires no error reporting (depending on seed data and core-banking/customer services).
+	// Cross-service aggregation uses deterministic readers; only transfer storage is database-backed.
 	_, err = r.GetTransferParties(ctx, "PT000000000001")
 	if err != nil {
 		t.Errorf("GetTransferParties 跨服务聚合失败（先 make up）: %v", err)
@@ -59,7 +76,7 @@ func TestPaymentRepo_TransfersAndParties(t *testing.T) {
 func TestPaymentRepo_GetTransfer_NotFound(t *testing.T) {
 	db := setupPayDB(t)
 	defer db.Close()
-	_, err := repo.NewPaymentRepo(db).GetTransfer(context.Background(), "NOPE")
+	_, err := repo.NewPaymentRepo(db, deterministicAccountReader{}, deterministicCustomerReader{}).GetTransfer(context.Background(), "NOPE")
 	if err == nil {
 		t.Error("应返回错误（不存在）")
 	}

@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"commerce/internal/platform/messaging"
+	"commerce/internal/platform/telemetry"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -57,17 +58,21 @@ func (consumer *Consumer) ProcessDelivery(ctx context.Context, delivery amqp.Del
 		return fmt.Errorf("begin fulfillment delivery: %w", err)
 	}
 	return messaging.ProcessRabbitDeliveryForRetryQueue(ctx, tx, fulfillmentConsumer, delivery,
-		consumer.retryQueue, consumer.applyEvent, consumer.policy)
+		consumer.retryQueue, consumer.applyEventContext, consumer.policy)
 }
 
 func (consumer *Consumer) applyEvent(event messaging.Event) error {
+	return consumer.applyEventContext(context.Background(), event)
+}
+
+func (consumer *Consumer) applyEventContext(ctx context.Context, event messaging.Event) error {
 	switch event.Type {
 	case "order.paid.v1":
-		return consumer.applyOrderPaid(event)
+		return consumer.applyOrderPaid(ctx, event)
 	case "order.cancelled.v1":
-		return consumer.applyOrderCancelled(event)
+		return consumer.applyOrderCancelled(ctx, event)
 	case "fulfillment.cancel-requested.v1":
-		return consumer.applyCancelRequested(event)
+		return consumer.applyCancelRequested(ctx, event)
 	default:
 		return messaging.NonRetryable(fmt.Errorf("unsupported fulfillment event type %s", event.Type))
 	}
@@ -87,7 +92,7 @@ type orderCancelledPayload struct {
 	Reason  string `json:"reason"`
 }
 
-func (consumer *Consumer) applyOrderPaid(event messaging.Event) error {
+func (consumer *Consumer) applyOrderPaid(ctx context.Context, event messaging.Event) error {
 	var payload orderIDEventPayload
 	if err := decodeFulfillmentEnvelope(event, &payload); err != nil {
 		return err
@@ -95,7 +100,7 @@ func (consumer *Consumer) applyOrderPaid(event messaging.Event) error {
 	if err := validateFulfillmentSubject(event, payload.OrderID); err != nil {
 		return err
 	}
-	_, err := consumer.service.FulfillOrder(context.Background(), FulfillCommand{
+	_, err := consumer.service.FulfillOrder(ctx, FulfillCommand{
 		OrderID:        payload.OrderID,
 		IdempotencyKey: fulfillmentKey(payload.OrderID, "paid", event.ID),
 		CorrelationID:  event.CorrelationID,
@@ -105,7 +110,7 @@ func (consumer *Consumer) applyOrderPaid(event messaging.Event) error {
 	return err
 }
 
-func (consumer *Consumer) applyOrderCancelled(event messaging.Event) error {
+func (consumer *Consumer) applyOrderCancelled(ctx context.Context, event messaging.Event) error {
 	var payload orderCancelledPayload
 	if err := decodeFulfillmentEnvelope(event, &payload); err != nil {
 		return err
@@ -117,7 +122,7 @@ func (consumer *Consumer) applyOrderCancelled(event messaging.Event) error {
 	if reason == "" {
 		reason = "order.cancelled"
 	}
-	_, err := consumer.service.CancelOrder(context.Background(), CancelCommand{
+	_, err := consumer.service.CancelOrder(ctx, CancelCommand{
 		OrderID:        payload.OrderID,
 		Reason:         reason,
 		IdempotencyKey: fulfillmentKey(payload.OrderID, "cancel", event.ID),
@@ -128,7 +133,7 @@ func (consumer *Consumer) applyOrderCancelled(event messaging.Event) error {
 	return err
 }
 
-func (consumer *Consumer) applyCancelRequested(event messaging.Event) error {
+func (consumer *Consumer) applyCancelRequested(ctx context.Context, event messaging.Event) error {
 	var payload orderCancelledPayload
 	if err := decodeFulfillmentEnvelope(event, &payload); err != nil {
 		return err
@@ -140,7 +145,7 @@ func (consumer *Consumer) applyCancelRequested(event messaging.Event) error {
 	if reason == "" {
 		reason = "fulfillment.cancel-requested"
 	}
-	_, err := consumer.service.CancelOrder(context.Background(), CancelCommand{
+	_, err := consumer.service.CancelOrder(ctx, CancelCommand{
 		OrderID:        payload.OrderID,
 		Reason:         reason,
 		IdempotencyKey: fulfillmentKey(payload.OrderID, "cancel-request", event.ID),
@@ -287,6 +292,7 @@ func (acknowledger *retryAcknowledger) publishThenAck(tag uint64, exchange, key 
 		ctx = context.Background()
 	}
 	delivery := acknowledger.delivery
+	ctx = telemetry.ExtractAMQP(ctx, delivery.Headers)
 	if err := acknowledger.publisher.Route(ctx, exchange, key, amqp.Publishing{
 		Headers: delivery.Headers, ContentType: delivery.ContentType,
 		ContentEncoding: delivery.ContentEncoding, DeliveryMode: amqp.Persistent,

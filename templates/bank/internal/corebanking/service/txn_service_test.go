@@ -219,6 +219,30 @@ func TestReverse_NotFound(t *testing.T) {
 	}
 }
 
+// TestReverseEntries_FlipsDCFlag verifies that reverseEntries produces entries
+// with flipped DC flags and identical amounts — the core of red reversal
+// immutability (a new voucher with opposite entries, original untouched).
+func TestReverseEntries_FlipsDCFlag(t *testing.T) {
+	origs := []domain.Txn{
+		{TxnID: "T1", AccountNo: "D1", DCFlag: domain.DCDebit, Amount: domain.NewMoneyFromCents(5000), SubjectCode: "2011"},
+		{TxnID: "T2", AccountNo: "D2", DCFlag: domain.DCCredit, Amount: domain.NewMoneyFromCents(5000), SubjectCode: "2011"},
+	}
+	es := reverseEntries(origs)
+	if len(es) != 2 {
+		t.Fatalf("应 2 条反向分录, got %d", len(es))
+	}
+	// Debit → Credit, Credit → Debit; amounts unchanged.
+	if es[0].AccountNo != "D1" || es[0].DCFlag != domain.DCCredit {
+		t.Errorf("D1 应翻转为贷: %+v", es[0])
+	}
+	if es[1].AccountNo != "D2" || es[1].DCFlag != domain.DCDebit {
+		t.Errorf("D2 应翻转为借: %+v", es[1])
+	}
+	if es[0].Amount != origs[0].Amount || es[1].Amount != origs[1].Amount {
+		t.Errorf("反向分录金额应不变")
+	}
+}
+
 func TestRecord_BizDateFromSysParam(t *testing.T) {
 	store := &recordingLedgerStore{}
 	svc := NewTxnService(nil, fakeAccountsRdr{byNo: map[string]domain.DemandAccount{

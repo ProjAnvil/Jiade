@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package bank.core.v1;
+
+option go_package = "bank/gen/bank/core/v1;corev1";
+
+service AccountQueryService {
+  rpc GetAccount(GetAccountRequest) returns (AccountSnapshot);
+}
+
+message GetAccountRequest {
+  string account_no = 1;
+  string request_id = 2;
+}
+
+message AccountSnapshot {
+  string account_no = 1;
+  string customer_id = 2;
+  string currency = 3;
+  string status = 4;
+  int64 ledger_balance_minor = 5;
+  int64 available_balance_minor = 6;
+  string open_biz_date = 7;
+  string branch = 8;
+}

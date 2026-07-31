@@ -79,8 +79,12 @@ External routes (only reachable through the Traefik gateway on `:18100`):
 | POST | `/api/v1/payments/webhooks` | payment | idempotent webhook intake |
 | GET | `/api/v1/fulfillment/orders/{id}` | fulfillment | fulfillment + shipments |
 
-Internal-only routes (`/internal/v1/...`) are also routed through Traefik for
-service-to-service calls.
+Internal routes (`/internal/v1/...`) are reachable only over the service
+network by using service DNS. Traefik and the Kubernetes Ingress intentionally
+have no rules for these paths. They are service-to-service contracts, not a
+gateway fallback: clients must use a public `/api/v1/...` route, while a
+workload that needs an internal route must call the owning service by DNS on
+the private network.
 
 Every response includes an `X-Service-Instance` header naming the replica
 that served it. That header is the load-balancing verification probe — see
@@ -266,18 +270,36 @@ Jaeger) with the overlay:
 
 ```bash
 make observability         # brings up otel/prometheus/grafana/jaeger
+make trace-smoke           # assert a catalog request trace reaches Jaeger
 make observability-down    # removes only the observability containers
 ```
 
-The overlay only adds containers; it does not change the base topology.
-Prometheus scrapes each service's `/metrics` via the internal network, and
-the otel collector receives traces over OTLP.
+The overlay adds observability containers, overrides application telemetry
+environment, and may recreate services as Compose applies that environment.
+Prometheus scrapes each service's `/metrics` via the internal network, and the
+otel collector receives traces over OTLP. Run `make trace-smoke` after `make
+observability`; it sends a catalog request through the gateway and checks that
+Jaeger receives its trace.
+
+## CI gates
+
+The local static gate is `make commerce-ci`. It builds and tests all Commerce
+packages, runs race detection for `internal/platform`, validates every Compose
+configuration, and renders the Kubernetes kustomization to
+`/tmp/commerce-k8s.yaml` without applying it.
+
+GitHub Actions runs the same checks in the `commerce` job. The separate
+`commerce-e2e` job starts one replica of each mutable service, runs
+`make smoke`, enables the observability overlay, and runs `make trace-smoke`.
+On failure it captures the combined Compose logs; it always removes
+containers, volumes, and orphans before the runner exits.
 
 ## Kubernetes mapping
 
-The same topology runs on Kubernetes. The manifests in `deploy/k8s/` mirror
-compose.yaml 1:1 — same replicas, same resource envelopes, same probes, same
-env vars, same gateway routing.
+The Kubernetes manifests in `deploy/k8s/` provide a deployment mapping for
+the same application contracts. They are not a one-to-one copy of Compose:
+cluster networking, infrastructure ownership, and rollout behavior remain
+cluster-specific.
 
 ```bash
 # Render the rendered manifest without applying (Phase A gate):

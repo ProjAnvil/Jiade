@@ -1,27 +1,25 @@
-// Package repo is the data access layer of the loan service: this library SQL + customer HTTP API.
+// Package repo is the data access layer of the loan service: this library SQL + customer gRPC query.
 package repo
 
 import (
+	"bank/internal/loan/domain"
+	"bank/internal/platform/serviceclient"
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-
-	"bank/internal/loan/domain"
-	"bank/internal/platform/serviceclient"
 )
 
 // LoanRepo loan warehousing. This library only queries loan_*.
 type LoanRepo struct {
 	db       *sql.DB
-	customer *serviceclient.Client
+	customer serviceclient.CustomerReader
 }
 
 // NewLoanRepo constructs LoanRepo.
-func NewLoanRepo(db *sql.DB) *LoanRepo {
+func NewLoanRepo(db *sql.DB, customer serviceclient.CustomerReader) *LoanRepo {
 	return &LoanRepo{
 		db:       db,
-		customer: serviceclient.New(getenv("CUSTOMER_URL", "http://localhost:18081")),
+		customer: customer,
 	}
 }
 
@@ -181,14 +179,11 @@ func (r *LoanRepo) GetProfile(ctx context.Context, loanNo string) (domain.LoanPr
 	if p.Balance, err = domain.ParseCents(balance.String); err != nil {
 		return domain.LoanProfile{}, fmt.Errorf("repo: 解析借据余额: %w", err)
 	}
-	var customer struct {
-		Name     string `json:"name"`
-		CustType string `json:"cust_type"`
-	}
-	if err := r.customer.Get(ctx, "/api/v1/customers/"+serviceclient.EscapePath(p.CustID), &customer); err != nil {
+	customer, err := r.customer.GetCustomer(ctx, p.CustID, serviceclient.RequestID(ctx))
+	if err != nil {
 		return domain.LoanProfile{}, fmt.Errorf("repo: 从 customer 查客户 %s: %w", p.CustID, err)
 	}
-	p.Rate, p.Status, p.CustName, p.CustType = rate.String, status.String, customer.Name, customer.CustType
+	p.Rate, p.Status, p.CustName, p.CustType = rate.String, status.String, customer.Name, customer.CustomerType
 	return p, nil
 }
 
@@ -209,11 +204,4 @@ func scanAccount(scan func(dest ...any) error) (domain.LoanAccount, error) {
 	}
 	a.Rate, a.GuaranteeType, a.BranchCode = rate.String, guarantee.String, branch.String
 	return a, nil
-}
-
-func getenv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
 }

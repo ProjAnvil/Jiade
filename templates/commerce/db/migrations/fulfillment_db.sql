@@ -131,6 +131,9 @@ CREATE TABLE IF NOT EXISTS outbox_event (
   published_at timestamptz
 );
 
+ALTER TABLE outbox_event
+  ADD COLUMN IF NOT EXISTS propagation_headers jsonb NOT NULL DEFAULT '{}'::jsonb;
+
 CREATE INDEX IF NOT EXISTS idx_outbox_event_pending
   ON outbox_event(created_at, event_id)
   WHERE published_at IS NULL;

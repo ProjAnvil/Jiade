@@ -1,0 +1,28 @@
+entryPoints:
+  web:
+    address: ":8080"
+    transport:
+      respondingTimeouts:
+        readTimeout: 30s
+        writeTimeout: 30s
+        idleTimeout: 60s
+  traefik:
+    address: ":9000"
+
+ping:
+  entryPoint: traefik
+  manualRouting: false
+
+providers:
+  docker:
+    exposedByDefault: false
+    network: bank-edge
+    watch: true
+
+api:
+  dashboard: false
+  insecure: false
+
+log:
+  level: INFO
+  format: common

@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"commerce/internal/platform/messaging"
+	"commerce/internal/platform/telemetry"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -57,8 +58,8 @@ func (consumer *Consumer) ProcessDelivery(ctx context.Context, delivery amqp.Del
 		return fmt.Errorf("begin order delivery: %w", err)
 	}
 	return messaging.ProcessRabbitDeliveryForRetryQueue(ctx, tx, orderSagaConsumer, delivery, consumer.retryQueue,
-		func(event messaging.Event) error {
-			return consumer.store.applyEvent(ctx, tx, event)
+		func(handlerContext context.Context, event messaging.Event) error {
+			return consumer.store.applyEvent(handlerContext, tx, event)
 		}, consumer.policy)
 }
 
@@ -165,6 +166,7 @@ func (acknowledger *retryAcknowledger) publishThenAck(tag uint64, exchange, key 
 		ctx = context.Background()
 	}
 	delivery := acknowledger.delivery
+	ctx = telemetry.ExtractAMQP(ctx, delivery.Headers)
 	if err := acknowledger.publisher.Route(ctx, exchange, key, amqp.Publishing{
 		Headers: delivery.Headers, ContentType: delivery.ContentType,
 		ContentEncoding: delivery.ContentEncoding, DeliveryMode: amqp.Persistent,

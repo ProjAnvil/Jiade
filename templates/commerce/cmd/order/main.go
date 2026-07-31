@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"commerce/internal/order"
 	platformclient "commerce/internal/platform/client"
@@ -17,6 +19,8 @@ import (
 	"commerce/internal/platform/httpx"
 	"commerce/internal/platform/messaging"
 	"commerce/internal/platform/postgres"
+	"commerce/internal/platform/telemetry"
+	"github.com/prometheus/client_golang/prometheus"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -48,11 +52,26 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	observability, err := telemetry.New(processContext, telemetry.Config{
+		Service: settings.Service, Instance: settings.Instance,
+		Enabled: settings.Telemetry.Enabled, Endpoint: settings.Telemetry.Endpoint,
+		Insecure: settings.Telemetry.Insecure,
+	})
+	if err != nil {
+		slog.Warn("telemetry disabled after initialization failure", "error", err)
+		observability = telemetry.Disabled()
+	}
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = observability.Shutdown(shutdownContext)
+	}()
 	pool, err := postgres.Open(processContext, settings.Database)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
+	registry := prometheus.NewRegistry()
 
 	connection, err := amqp.Dial(settings.Broker.URL)
 	if err != nil {
@@ -112,6 +131,7 @@ func run() error {
 	relay := order.NewWorkerLifecycle(processContext, func(ctx context.Context) error {
 		return messaging.RunRelay(ctx, pool, publisher, messaging.RelayConfig{
 			BatchSize: settings.Outbox.BatchSize, PollInterval: settings.Outbox.PollInterval,
+			Service: settings.Service, Registry: registry,
 		})
 	})
 	consumer := order.NewWorkerLifecycle(processContext, func(ctx context.Context) error {
@@ -127,6 +147,7 @@ func run() error {
 		Service:  settings.Service,
 		Instance: settings.Instance,
 		Addr:     settings.HTTP.Addr,
+		Registry: registry,
 		Handler:  order.NewHandler(service),
 		Ready: order.NewRuntimeReadinessWithDependencies(
 			pool.Ping, order.CombinePublisherAvailability(publisher, retryRouter),

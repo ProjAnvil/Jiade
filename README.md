@@ -12,7 +12,7 @@ Each template is a standalone Go module that ships its own README and ARCHITECTU
 
 | Template | What it is | Docs |
 |----------|------------|------|
-| `bank` | Core banking microcosm — 7 Go services, 7 PostgreSQL databases, double-entry ledger, daily rolling balances. | [templates/bank/README.md](templates/bank/README.md) · [ARCHITECTURE.md](templates/bank/ARCHITECTURE.md) |
+| `bank` | Core banking microcosm — 7 Go services, 7 dedicated PostgreSQL databases, internal gRPC reads, RabbitMQ commands/events, Traefik gateway (:18000), double-entry ledger, daily rolling balances, **durable payment-transfer saga** (risk→hold→transfer forward, reverse-order compensation, operator admin gRPC), **full observability stack** (OTel/Jaeger/Prometheus/Grafana + 5 alerts), and **dev/prod Kubernetes overlays** (dev = stateful, prod = external state + SecretProviderClass). | [templates/bank/README.md](templates/bank/README.md) · [ARCHITECTURE.md](templates/bank/ARCHITECTURE.md) |
 | `commerce` | Commerce backend microcosm — 6 Go services, 6 PostgreSQL databases, RabbitMQ saga, Traefik gateway. | [templates/commerce/README.md](templates/commerce/README.md) · [ARCHITECTURE.md](templates/commerce/ARCHITECTURE.md) |
 
 ```bash
@@ -52,10 +52,10 @@ cd mybank
 jiade up      # docker compose up -d
 jiade seed    # go run ./cmd/seed --scale=dev --reset
 
-# 3. Probe a service healthz (ports and endpoints differ per template —
+# 3. Probe a public REST endpoint via the gateway (ports differ per template —
 #    see the template's README).
-curl localhost:18080/healthz                    # bank: core-banking
-curl localhost:18100/api/v1/products?limit=1     # commerce: Traefik gateway
+curl localhost:18000/api/v1/accounts/D0000000001  # bank: Traefik gateway
+curl localhost:18100/api/v1/products?limit=1       # commerce: Traefik gateway
 
 # 4. Tear down.
 jiade down

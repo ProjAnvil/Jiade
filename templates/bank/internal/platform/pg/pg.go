@@ -5,16 +5,18 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // Register pgx to database/sql
 )
 
 // DSN constructs a connection string from environment variables. dbName specifies which library to connect to (postgres/core_db).
 func DSN(dbName string) string {
+	host := Getenv("DB_HOST_"+strings.ToUpper(dbName), Getenv("DB_HOST", "localhost"))
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
 		Getenv("DB_USER", "bank"),
 		Getenv("DB_PASSWORD", "bank"),
-		Getenv("DB_HOST", "localhost"),
+		host,
 		Getenv("DB_PORT", "15432"),
 		dbName,
 	)

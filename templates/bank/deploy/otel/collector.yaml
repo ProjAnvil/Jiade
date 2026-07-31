@@ -1,0 +1,66 @@
+# OpenTelemetry Collector config for the bank observability overlay.
+#
+# Receivers: OTLP gRPC (4317) and HTTP (4318) from the seven Go services.
+# Processors: batch + memory_limiter to keep memory bounded.
+# Exporters: traces go to Jaeger over OTLP, metrics are exposed for the local
+# Prometheus scrape target on :8888, and logs use the debug exporter.
+# Extensions: health_check exposes :13133 for liveness probes. The collector
+# image (otel/opentelemetry-collector-contrib) is distroless and ships no
+# shell/wget, so any probe must hit this HTTP endpoint rather than run a
+# command inside the container.
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8888
+    namespace: bank
+    send_timestamps: true
+    metric_expiration: 5m
+    enable_open_metrics: true
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+
+  extensions: [health_check]
+
+  telemetry:
+    logs:
+      level: info

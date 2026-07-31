@@ -1,0 +1,69 @@
+# Alerting rules for the bank observability overlay.
+#
+# These rules encode the operational SLOs from the bank-operational-closure
+# plan:
+#   - A workflow stuck in "waiting" for more than 60 s needs attention.
+#   - Any compensation failure is page-worthy — it means an action and its
+#     instance both transitioned to compensation_failed.
+#   - An outbox entry older than 30 s means event delivery is lagging.
+#   - Consumer lag above 100 means the result-event consumer is falling behind.
+#   - A ledger invariant failure is an immediate page — the core ledger's
+#     internal consistency guarantee was violated.
+#
+# The for durations are intentional: every rule uses 1m EXCEPT the ledger
+# invariant failure, which fires immediately (for: 0m) because it represents
+# an unrecoverable data-integrity breach that cannot auto-heal.
+
+groups:
+  - name: bank-workflow-alerts
+    interval: 30s
+    rules:
+      - alert: WorkflowWaitingStuck
+        expr: max(workflow_waiting_age_seconds) > 60
+        for: 1m
+        labels:
+          severity: warning
+          team: payments
+        annotations:
+          summary: "A workflow action has been waiting longer than 60 s"
+          description: "max(workflow_waiting_age_seconds) > 60 — a timed-out waiting action has not been redispatched within the SLO window. Check the recovery scheduler."
+
+      - alert: WorkflowCompensationFailure
+        expr: sum(workflow_compensation_failures_total) > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: payments
+        annotations:
+          summary: "At least one workflow action exhausted compensation retries"
+          description: "sum(workflow_compensation_failures_total) > 0 — an action reached compensation_failed after exhausting CompensationMaxAttempts. Investigate via the admin gRPC RetryCompensation RPC."
+
+      - alert: OutboxBacklog
+        expr: max(outbox_oldest_age_seconds) > 30
+        for: 1m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Outbox relay is falling behind"
+          description: "max(outbox_oldest_age_seconds) > 30 — the oldest unpublished outbox row is older than 30 s. Check the outbox relay worker and broker connectivity."
+
+      - alert: ConsumerLagHigh
+        expr: sum(rabbitmq_consumer_lag) > 100
+        for: 1m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "RabbitMQ consumer lag exceeds 100 messages"
+          description: "sum(rabbitmq_consumer_lag) > 100 — the result-event consumer is falling behind. Check consumer health and scale if necessary."
+
+      - alert: LedgerInvariantFailure
+        expr: sum(ledger_invariant_failures_total) > 0
+        for: 0m
+        labels:
+          severity: critical
+          team: core-banking
+        annotations:
+          summary: "Core ledger invariant failure detected"
+          description: "sum(ledger_invariant_failures_total) > 0 — the ledger's internal consistency guarantee was violated. This is an unrecoverable data-integrity breach requiring immediate investigation."

@@ -325,8 +325,37 @@ gate_fulfillment_check() {
 }
 
 # ---------------------------------------------------------------------------
+gate_internal_routes_are_private() {
+  log "gate 0: internal handlers are not reachable through Traefik"
+  local sku customer address catalog_code customer_code
+  sku=$(pick_sku)
+  test -n "${sku}" || fail "no SKU returned by catalog for internal-route probe"
+  customer=$(pick_customer_id)
+  test -n "${customer}" || fail "no customer returned for internal-route probe"
+  address=$(pick_address_id "${customer}")
+  test -n "${address}" || fail "no address returned for internal-route probe"
+
+  # Both probes are successful requests when sent directly to their owning
+  # service. A 404 at the gateway therefore proves Traefik did not forward
+  # them; probing a nonexistent resource would not establish that boundary.
+  catalog_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    "${GATEWAY}/internal/v1/catalog/skus/${sku}")
+  if [[ "${catalog_code}" != "404" ]]; then
+    fail "gateway exposed catalog internal handler: status=${catalog_code}, want 404"
+  fi
+  customer_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST "${GATEWAY}/internal/v1/customer-addresses/validate" \
+    -H 'Content-Type: application/json' \
+    -d "{\"customer_id\":\"${customer}\",\"address_id\":\"${address}\"}")
+  if [[ "${customer_code}" != "404" ]]; then
+    fail "gateway exposed customer internal handler: status=${customer_code}, want 404"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 main() {
   log "smoke target: ${GATEWAY} (seed=${SEED_INT})"
+  gate_internal_routes_are_private
   gate_instance_ids
   gate_checkout_success
   gate_payment_failure

@@ -36,6 +36,9 @@ data:
   OUTBOX_BATCH_SIZE: "100"
   OUTBOX_POLL_INTERVAL: 1s
   SHUTDOWN_TIMEOUT: 25s
+  OTEL_ENABLED: "false"
+  OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+  OTEL_EXPORTER_OTLP_INSECURE: "true"
   # BROKER_URL lives in the Secret (password component).
 
 ---

@@ -31,3 +31,19 @@ CREATE TABLE IF NOT EXISTS blacklist (
     expire_date        DATE,
     status             TEXT DEFAULT 'active'
 );
+
+CREATE TABLE IF NOT EXISTS payment_authorization (
+    authorization_id TEXT PRIMARY KEY,
+    workflow_id      TEXT NOT NULL,
+    idempotency_key  TEXT NOT NULL UNIQUE,
+    customer_id      TEXT NOT NULL,
+    amount_cents     BIGINT NOT NULL,
+    currency         TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    matched_rules    JSONB NOT NULL DEFAULT '[]'::jsonb,
+    context_digest   TEXT,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_payment_authorization_workflow
+    ON payment_authorization(workflow_id);

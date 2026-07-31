@@ -11,7 +11,12 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func fixedClock() time.Time { return time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC) }
@@ -111,6 +116,105 @@ func TestRelayRecordsPublishFailureForRetry(t *testing.T) {
 	}
 	if store.published != 0 || store.failed != 1 {
 		t.Fatalf("published=%d failed=%d, want published=0 failed=1", store.published, store.failed)
+	}
+}
+
+func TestInsertOutboxPersistsPropagationCarrierInDomainTransaction(t *testing.T) {
+	original := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() { otel.SetTextMapPropagator(original) })
+
+	wantTraceID := trace.TraceID{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+	spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    wantTraceID,
+		SpanID:     trace.SpanID{0, 1, 2, 3, 4, 5, 6, 7},
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	ctx := trace.ContextWithRemoteSpanContext(context.Background(), spanContext)
+	tx := &outboxTx{}
+
+	if err := InsertOutbox(ctx, tx, testEvent()); err != nil {
+		t.Fatal(err)
+	}
+	if len(tx.args) != 9 {
+		t.Fatalf("outbox insert arguments=%d, want propagation carrier in the same insert", len(tx.args))
+	}
+	raw, ok := tx.args[8].([]byte)
+	if !ok {
+		t.Fatalf("propagation carrier type=%T, want []byte JSON", tx.args[8])
+	}
+	var carrier map[string]string
+	if err := json.Unmarshal(raw, &carrier); err != nil {
+		t.Fatalf("decode propagation carrier: %v", err)
+	}
+	if got := carrier["traceparent"]; got != "00-000102030405060708090a0b0c0d0e0f-0001020304050607-01" {
+		t.Fatalf("traceparent=%q, want persisted W3C carrier", got)
+	}
+}
+
+func TestRelayRestoresPersistedTraceContextBeforePublishing(t *testing.T) {
+	original := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() { otel.SetTextMapPropagator(original) })
+
+	store := &relayStore{claims: []outboxClaim{{
+		Event: testEvent(),
+		Propagation: propagation.MapCarrier{
+			"traceparent": "00-000102030405060708090a0b0c0d0e0f-0001020304050607-01",
+		},
+	}}}
+	var publishedTraceID trace.TraceID
+	publisher := publisherFunc(func(ctx context.Context, _ Event) error {
+		publishedTraceID = trace.SpanContextFromContext(ctx).TraceID()
+		return nil
+	})
+
+	if _, err := relayOnce(context.Background(), store, publisher, RelayConfig{BatchSize: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if want := (trace.TraceID{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}); publishedTraceID != want {
+		t.Fatalf("published trace ID=%s, want %s from durable outbox carrier", publishedTraceID, want)
+	}
+}
+
+func TestRelayEmitsOldestQueuedEventAgeAndReusesCollector(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	store := &relayStore{oldestAge: 12.5}
+	config := RelayConfig{Service: "order", Registry: registry}
+	publisher := publisherFunc(func(context.Context, Event) error { return nil })
+
+	if _, err := relayOnce(context.Background(), store, publisher, config); err != nil {
+		t.Fatal(err)
+	}
+	store.oldestAge = 3.25
+	if _, err := relayOnce(context.Background(), store, publisher, config); err != nil {
+		t.Fatal(err)
+	}
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var family *dto.MetricFamily
+	for _, candidate := range families {
+		if candidate.GetName() == "outbox_oldest_age_seconds" {
+			family = candidate
+			break
+		}
+	}
+	if family == nil || len(family.Metric) != 1 {
+		t.Fatalf("outbox_oldest_age_seconds family=%v, want one series", family)
+	}
+	if got := family.Metric[0].GetGauge().GetValue(); got != 3.25 {
+		t.Fatalf("outbox_oldest_age_seconds=%v, want updated value 3.25", got)
+	}
+	var hasService bool
+	for _, label := range family.Metric[0].Label {
+		hasService = hasService || label.GetName() == "service" && label.GetValue() == "order"
+	}
+	if !hasService {
+		t.Fatal("outbox_oldest_age_seconds missing service=order")
 	}
 }
 
@@ -224,6 +328,18 @@ func (tx *inboxTx) Exec(_ context.Context, _ string, args ...any) (pgconn.Comman
 func (tx *inboxTx) Commit(context.Context) error   { tx.committed = true; return nil }
 func (tx *inboxTx) Rollback(context.Context) error { tx.rolledBack = true; return nil }
 
+type outboxTx struct {
+	pgx.Tx
+	query string
+	args  []any
+}
+
+func (tx *outboxTx) Exec(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	tx.query = query
+	tx.args = append([]any(nil), args...)
+	return pgconn.NewCommandTag("INSERT 0 1"), nil
+}
+
 type relayStore struct {
 	claims        []outboxClaim
 	published     int
@@ -231,6 +347,7 @@ type relayStore struct {
 	failureErrors []error
 	batch         int
 	lease         time.Duration
+	oldestAge     float64
 }
 
 func (store *relayStore) Claim(_ context.Context, batch int, lease time.Duration) ([]outboxClaim, error) {
@@ -246,6 +363,9 @@ func (store *relayStore) MarkFailed(_ context.Context, _ outboxClaim, err error)
 	store.failed++
 	store.failureErrors = append(store.failureErrors, err)
 	return nil
+}
+func (store *relayStore) OldestAge(context.Context) (float64, error) {
+	return store.oldestAge, nil
 }
 
 type publisherFunc func(context.Context, Event) error

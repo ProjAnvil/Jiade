@@ -5,10 +5,20 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 
 	"bank/internal/corebanking/domain"
+	"bank/internal/corebanking/service"
+	"bank/internal/platform/messaging"
 	"bank/internal/platform/pg"
+)
+
+// Compile-time assertions: LedgerRepo satisfies the write interfaces it serves.
+var (
+	_ service.LedgerStore   = (*LedgerRepo)(nil)
+	_ service.TransferStore = (*LedgerRepo)(nil)
 )
 
 // LedgerRepo General Ledger/Double Entry Warehousing. Implements service.LedgerStore(write) + read-only GetGL.
@@ -257,4 +267,80 @@ func newTxnID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return "T" + hex.EncodeToString(b)
+}
+
+// --- TransferStore: held-transfer idempotency + reversal tracking + outbox ---
+
+// GetHeldTransferByKey returns the voucher_no recorded for an idempotency key.
+// sql.ErrNoRows is translated to service.ErrHeldTransferNotFound.
+func (r *LedgerRepo) GetHeldTransferByKey(ctx context.Context, q pg.DBTX, key string) (string, error) {
+	var voucherNo string
+	err := q.QueryRowContext(ctx,
+		`SELECT voucher_no FROM held_transfer WHERE idempotency_key=$1`, key).Scan(&voucherNo)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("repo: 按 key 查 held_transfer %q: %w", key, service.ErrHeldTransferNotFound)
+		}
+		return "", fmt.Errorf("repo: 按 key 查 held_transfer %q: %w", key, err)
+	}
+	return voucherNo, nil
+}
+
+// InsertHeldTransfer records the idempotency-key → voucher mapping. The unique
+// PK on idempotency_key is the last-line guard against concurrent duplicates.
+func (r *LedgerRepo) InsertHeldTransfer(ctx context.Context, q pg.DBTX, key, voucherNo, holdID string) error {
+	_, err := q.ExecContext(ctx,
+		`INSERT INTO held_transfer (idempotency_key, voucher_no, hold_id) VALUES ($1, $2, $3)`,
+		key, voucherNo, holdID)
+	if err != nil {
+		return fmt.Errorf("repo: 插入 held_transfer: %w", err)
+	}
+	return nil
+}
+
+// HasReversalForVoucher checks whether a reversal row exists for voucherNo.
+// The hard duplicate-reversal guard is the PK on reverses_voucher_no; this
+// soft check is a friendly early-out inside the row lock.
+func (r *LedgerRepo) HasReversalForVoucher(ctx context.Context, q pg.DBTX, voucherNo string) (bool, error) {
+	var exists bool
+	err := q.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM voucher_reversal WHERE reverses_voucher_no=$1)`, voucherNo).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("repo: 查冲正存在性: %w", err)
+	}
+	return exists, nil
+}
+
+// InsertReversal records that reversalVoucherNo reverses originalVoucherNo.
+// The PK on reverses_voucher_no makes a concurrent duplicate INSERT fail and
+// the enclosing transaction rolls back.
+func (r *LedgerRepo) InsertReversal(ctx context.Context, q pg.DBTX, reversesVoucherNo, reversalVoucherNo string) error {
+	_, err := q.ExecContext(ctx,
+		`INSERT INTO voucher_reversal (reverses_voucher_no, reversal_voucher_no) VALUES ($1, $2)`,
+		reversesVoucherNo, reversalVoucherNo)
+	if err != nil {
+		return fmt.Errorf("repo: 插入 voucher_reversal: %w", err)
+	}
+	return nil
+}
+
+// AppendOutbox inserts a messaging envelope into outbox_message in the current
+// transaction. Mirrors risk.appendOutbox and the workflow engine AppendOutbox
+// so the shared outbox_message table is populated identically.
+func (r *LedgerRepo) AppendOutbox(ctx context.Context, q pg.DBTX, env messaging.Envelope, routingKey string) error {
+	body, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("repo: marshal outbox envelope %s: %w", env.MessageID, err)
+	}
+	_, err = q.ExecContext(ctx, `
+		INSERT INTO outbox_message
+		  (message_id, message_type, schema_version, routing_key, envelope,
+		   attempts, created_at)
+		VALUES ($1, $2, $3, $4, $5, 0, CURRENT_TIMESTAMP)`,
+		env.MessageID, env.MessageType, env.SchemaVersion, routingKey, []byte(body),
+	)
+	if err != nil {
+		return fmt.Errorf("repo: insert outbox_message %s: %w", env.MessageID, err)
+	}
+	return nil
 }

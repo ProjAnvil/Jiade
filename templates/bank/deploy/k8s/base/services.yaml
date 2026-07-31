@@ -1,0 +1,193 @@
+# Service definitions for the seven bank services.
+#
+# Each service gets TWO Services:
+#   (a) a REST ClusterIP Service named `<service>` exposing port http=8080,
+#       used by the public Ingress and by REST clients;
+#   (b) a headless Service named `<service>-grpc` (clusterIP: None,
+#       publishNotReadyAddresses: false) exposing port grpc=9090, used by
+#       internal gRPC clients for DNS-based endpoint discovery. Headless +
+#       publishNotReadyAddresses=false ensures gRPC clients only dial pods
+#       that have signalled readiness.
+
+# ===================== REST ClusterIP Services =====================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: core-banking
+spec:
+  type: ClusterIP
+  selector: {app: core-banking}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customer
+spec:
+  type: ClusterIP
+  selector: {app: customer}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment
+spec:
+  type: ClusterIP
+  selector: {app: payment}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reward
+spec:
+  type: ClusterIP
+  selector: {app: reward}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: risk
+spec:
+  type: ClusterIP
+  selector: {app: risk}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loan
+spec:
+  type: ClusterIP
+  selector: {app: loan}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wealth
+spec:
+  type: ClusterIP
+  selector: {app: wealth}
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+
+# ===================== Headless gRPC Services =====================
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: core-banking-grpc
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector: {app: core-banking}
+  ports:
+    - {name: grpc, port: 9090, targetPort: grpc}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customer-grpc
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector: {app: customer}
+  ports:
+    - {name: grpc, port: 9090, targetPort: grpc}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-grpc
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector: {app: payment}
+  ports:
+    - {name: grpc, port: 9090, targetPort: grpc}
+
+# payment-admin: PROTECTED operator gRPC for the WorkflowAdminService
+# (RetryCompensation / RecordReconciliation). This Service is intentionally
+# SEPARATE from payment-grpc: the public gateway and inter-service gRPC
+# clients never target it, and a NetworkPolicy in networking.yaml restricts
+# ingress to operator/repair identities only. Headless +
+# publishNotReadyAddresses=false mirrors payment-grpc so operator tooling dials
+# only ready pods.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-admin
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector: {app: payment}
+  ports:
+    - {name: admin-grpc, port: 9091, targetPort: admin-grpc}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reward-grpc
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector: {app: reward}
+  ports:
+    - {name: grpc, port: 9090, targetPort: grpc}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: risk-grpc
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector: {app: risk}
+  ports:
+    - {name: grpc, port: 9090, targetPort: grpc}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loan-grpc
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector: {app: loan}
+  ports:
+    - {name: grpc, port: 9090, targetPort: grpc}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wealth-grpc
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector: {app: wealth}
+  ports:
+    - {name: grpc, port: 9090, targetPort: grpc}

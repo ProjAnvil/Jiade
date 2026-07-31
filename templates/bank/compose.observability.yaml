@@ -1,0 +1,173 @@
+# Observability overlay: otel collector, prometheus, grafana, jaeger.
+#
+# Bring up alongside the base file:
+#   docker compose -f compose.yaml -f compose.observability.yaml --profile observability up -d
+#
+# The overlay only adds containers and the dedicated obs network; it does not
+# change the base service definitions. The base compose.yaml already exposes
+# /metrics on each service's HTTP port (8080).
+
+name: bank
+
+networks:
+  edge:
+    name: bank-edge
+    driver: bridge
+  data:
+    name: bank-data
+    driver: bridge
+  # Dedicated observability network so prometheus/grafana can talk to each
+  # other and to the data-plane services without polluting the edge.
+  obs:
+    name: bank-obs
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  jaeger-data:
+
+services:
+  core-banking:
+    environment: &otel-service-env
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "otel-collector:4317"
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+    networks: [edge, data, obs]
+
+  customer:
+    environment: *otel-service-env
+    networks: [edge, data, obs]
+
+  payment:
+    environment: *otel-service-env
+    networks: [edge, data, obs]
+
+  reward:
+    environment: *otel-service-env
+    networks: [edge, data, obs]
+
+  risk:
+    environment: *otel-service-env
+    networks: [edge, data, obs]
+
+  loan:
+    environment: *otel-service-env
+    networks: [edge, data, obs]
+
+  wealth:
+    environment: *otel-service-env
+    networks: [edge, data, obs]
+
+  otel-collector:
+    profiles: ["observability"]
+    image: otel/opentelemetry-collector-contrib:0.108.0
+    init: true
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/collector.yaml"]
+    volumes:
+      - ./deploy/otel/collector.yaml:/etc/otelcol/collector.yaml:ro
+    networks:
+      data: {}
+      obs: {}
+    mem_reservation: 128m
+    mem_limit: 512m
+    cpus: 0.5
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    # The collector image is distroless (no shell, no wget/curl), so a
+    # container-local healthcheck cannot run. The health_check extension
+    # (enabled in collector.yaml) exposes :13133 inside the container for
+    # any external probe (e.g. another service or an orchestrator) to poll.
+    # Readiness is otherwise implied by prometheus scraping :8888.
+
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v2.54.1
+    init: true
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yaml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2h
+      - --web.listen-address=:9090
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - ./deploy/prometheus/alerts.yaml:/etc/prometheus/alerts.yaml:ro
+      - prometheus-data:/prometheus
+    networks:
+      data: {}
+      obs: {}
+    mem_reservation: 128m
+    mem_limit: 512m
+    cpus: 0.5
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9090/-/ready >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  grafana:
+    profiles: ["observability"]
+    image: grafana/grafana:11.2.0
+    init: true
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      obs: {}
+    mem_reservation: 128m
+    mem_limit: 512m
+    cpus: 0.5
+    # Grafana writes to its data dir; keep fs writable.
+    read_only: false
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  jaeger:
+    profiles: ["observability"]
+    image: jaegertracing/all-in-one:1.60
+    init: true
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      MEMORY_MAX_TRACES: 50000
+    networks:
+      data: {}
+      obs: {}
+    mem_reservation: 128m
+    mem_limit: 512m
+    cpus: 0.5
+    read_only: false
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:14269/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s

@@ -9,9 +9,13 @@ CREATE TABLE IF NOT EXISTS cust_info (
     nationality    TEXT,
     risk_level     TEXT,
     kyc_status     TEXT,
+    customer_status TEXT NOT NULL DEFAULT 'active',
+    risk_tags       TEXT[] NOT NULL DEFAULT '{}',
     create_biz_date DATE NOT NULL,
     create_ts      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE cust_info ADD COLUMN IF NOT EXISTS customer_status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE cust_info ADD COLUMN IF NOT EXISTS risk_tags TEXT[] NOT NULL DEFAULT '{}';
 
 CREATE TABLE IF NOT EXISTS cust_id_doc (
     doc_id      TEXT PRIMARY KEY,

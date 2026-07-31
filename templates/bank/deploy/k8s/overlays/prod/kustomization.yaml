@@ -1,0 +1,142 @@
+# Production overlay: delegates all stateful dependencies to external managed
+# services.
+#
+# `kubectl kustomize deploy/k8s/overlays/prod` renders the application base
+# plus eight ExternalName Services (7 PostgreSQL + 1 RabbitMQ) and a
+# SecretProviderClass contract. No StatefulSets, no PVCs, no plaintext
+# credentials — operators wire the ExternalName DNS and the secrets-manager
+# references before applying.
+#
+# The seven application Deployments are patched to consume the Kubernetes
+# Secret that the SecretProviderClass materialises (`bank-prod-secrets`) via
+# envFrom, mirroring the dev overlay's secret-injection shape.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: bank
+
+resources:
+  - ../../base
+  - external-services.yaml
+  - secret-contract.yaml
+
+# Configurable external DNS names. The defaults point at conventional
+# example.internal placeholders. To point at real managed endpoints, edit these
+# literals (or layer another overlay on top that overrides the ConfigMap). The
+# `replacements` stanza below copies each literal into the matching
+# ExternalName Service at build time.
+configMapGenerator:
+  - name: bank-external-endpoints
+    literals:
+      - CORE_BANKING_DB=core-banking-db.example.internal
+      - CUSTOMER_DB=customer-db.example.internal
+      - PAYMENT_DB=payment-db.example.internal
+      - REWARD_DB=reward-db.example.internal
+      - RISK_DB=risk-db.example.internal
+      - LOAN_DB=loan-db.example.internal
+      - WEALTH_DB=wealth-db.example.internal
+      - RABBITMQ=rabbitmq.example.internal
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+# Substitute each ExternalName Service's externalName with the corresponding
+# ConfigMap literal. Kustomize `replacements` is GA (kustomize 4.5+) and needs
+# no alpha flags; it copies source.fieldPath into every matching target.
+replacements:
+  - source:
+      kind: ConfigMap
+      name: bank-external-endpoints
+      fieldPath: data.CORE_BANKING_DB
+    targets:
+      - select: {kind: Service, name: core-banking-db}
+        fieldPaths: [spec.externalName]
+  - source:
+      kind: ConfigMap
+      name: bank-external-endpoints
+      fieldPath: data.CUSTOMER_DB
+    targets:
+      - select: {kind: Service, name: customer-db}
+        fieldPaths: [spec.externalName]
+  - source:
+      kind: ConfigMap
+      name: bank-external-endpoints
+      fieldPath: data.PAYMENT_DB
+    targets:
+      - select: {kind: Service, name: payment-db}
+        fieldPaths: [spec.externalName]
+  - source:
+      kind: ConfigMap
+      name: bank-external-endpoints
+      fieldPath: data.REWARD_DB
+    targets:
+      - select: {kind: Service, name: reward-db}
+        fieldPaths: [spec.externalName]
+  - source:
+      kind: ConfigMap
+      name: bank-external-endpoints
+      fieldPath: data.RISK_DB
+    targets:
+      - select: {kind: Service, name: risk-db}
+        fieldPaths: [spec.externalName]
+  - source:
+      kind: ConfigMap
+      name: bank-external-endpoints
+      fieldPath: data.LOAN_DB
+    targets:
+      - select: {kind: Service, name: loan-db}
+        fieldPaths: [spec.externalName]
+  - source:
+      kind: ConfigMap
+      name: bank-external-endpoints
+      fieldPath: data.WEALTH_DB
+    targets:
+      - select: {kind: Service, name: wealth-db}
+        fieldPaths: [spec.externalName]
+  - source:
+      kind: ConfigMap
+      name: bank-external-endpoints
+      fieldPath: data.RABBITMQ
+    targets:
+      - select: {kind: Service, name: rabbitmq}
+        fieldPaths: [spec.externalName]
+
+# Patch the seven application Deployments to load DB_PASSWORD, BROKER_URL, and
+# BANK_OPERATOR_TOKEN from the Secret that the SecretProviderClass above
+# materialises. The reference is by name only — no Secret resource is rendered
+# in this overlay.
+patches:
+  - target: {kind: Deployment, name: core-banking}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: {secretRef: {name: bank-prod-secrets}}
+  - target: {kind: Deployment, name: customer}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: {secretRef: {name: bank-prod-secrets}}
+  - target: {kind: Deployment, name: payment}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: {secretRef: {name: bank-prod-secrets}}
+  - target: {kind: Deployment, name: reward}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: {secretRef: {name: bank-prod-secrets}}
+  - target: {kind: Deployment, name: risk}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: {secretRef: {name: bank-prod-secrets}}
+  - target: {kind: Deployment, name: loan}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: {secretRef: {name: bank-prod-secrets}}
+  - target: {kind: Deployment, name: wealth}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/envFrom/-
+        value: {secretRef: {name: bank-prod-secrets}}

@@ -27,6 +27,25 @@ volumes:
   jaeger-data:
 
 services:
+  catalog:
+    environment: &otel-service-env
+      OTEL_ENABLED: "true"
+
+  customer:
+    environment: *otel-service-env
+
+  inventory:
+    environment: *otel-service-env
+
+  order:
+    environment: *otel-service-env
+
+  payment:
+    environment: *otel-service-env
+
+  fulfillment:
+    environment: *otel-service-env
+
   otel-collector:
     profiles: ["observability"]
     image: otel/opentelemetry-collector-contrib:0.108.0
@@ -98,6 +117,7 @@ services:
     volumes:
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana-data:/var/lib/grafana
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
     networks:
       obs: {}
     mem_reservation: 128m

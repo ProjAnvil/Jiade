@@ -14,14 +14,15 @@ import (
 var ErrInvalidConfig = errors.New("invalid configuration")
 
 type Config struct {
-	Service  string
-	Instance string
-	Database Database
-	Broker   Broker
-	HTTP     HTTP
-	Clients  Clients
-	Outbox   Outbox
-	Shutdown Shutdown
+	Service   string
+	Instance  string
+	Database  Database
+	Broker    Broker
+	HTTP      HTTP
+	Clients   Clients
+	Outbox    Outbox
+	Shutdown  Shutdown
+	Telemetry Telemetry
 }
 
 type Database struct {
@@ -65,6 +66,13 @@ type Shutdown struct {
 	Timeout time.Duration
 }
 
+// Telemetry configures OpenTelemetry trace export for a process.
+type Telemetry struct {
+	Enabled  bool
+	Endpoint string
+	Insecure bool
+}
+
 // Load returns configuration for service, rejecting invalid required or typed values.
 func Load(service string) (Config, error) {
 	if strings.TrimSpace(service) == "" {
@@ -91,6 +99,18 @@ func Load(service string) (Config, error) {
 		return Config{}, err
 	}
 	batchSize, err := intEnv("OUTBOX_BATCH_SIZE", 100, 1)
+	if err != nil {
+		return Config{}, err
+	}
+	telemetryEnabled, err := boolEnv("OTEL_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	telemetryEndpoint, err := requiredStringEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317")
+	if err != nil {
+		return Config{}, err
+	}
+	telemetryInsecure, err := boolEnv("OTEL_EXPORTER_OTLP_INSECURE", false)
 	if err != nil {
 		return Config{}, err
 	}
@@ -160,9 +180,10 @@ func Load(service string) (Config, error) {
 		Broker: Broker{URL: stringEnv("BROKER_URL", "amqp://guest:guest@localhost:5672/")},
 		HTTP: HTTP{Addr: stringEnv("HTTP_ADDR", ":"+stringEnv("PORT", "8080")), ReadHeaderTimeout: readHeader,
 			ReadTimeout: read, WriteTimeout: write, IdleTimeout: idle, RequestBodyLimit: bodyLimit},
-		Clients:  Clients{RequestTimeout: request, AttemptTimeout: attempt},
-		Outbox:   Outbox{BatchSize: batchSize, PollInterval: poll},
-		Shutdown: Shutdown{Timeout: shutdown},
+		Clients:   Clients{RequestTimeout: request, AttemptTimeout: attempt},
+		Outbox:    Outbox{BatchSize: batchSize, PollInterval: poll},
+		Shutdown:  Shutdown{Timeout: shutdown},
+		Telemetry: Telemetry{Enabled: telemetryEnabled, Endpoint: telemetryEndpoint, Insecure: telemetryInsecure},
 	}, nil
 }
 
@@ -171,6 +192,18 @@ func stringEnv(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func requiredStringEnv(name, fallback string) (string, error) {
+	value, set := os.LookupEnv(name)
+	if !set {
+		return fallback, nil
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", invalid(name, "must not be empty")
+	}
+	return value, nil
 }
 
 // defaultInstance returns a per-process identity for X-Service-Instance when
@@ -193,6 +226,18 @@ func intEnv(name string, fallback, minimum int) (int, error) {
 		return parsed, nil
 	}
 	return fallback, nil
+}
+
+func boolEnv(name string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, invalid(name, "must be a boolean")
+	}
+	return parsed, nil
 }
 
 func int64Env(name string, fallback, minimum int64) (int64, error) {

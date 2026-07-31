@@ -71,10 +71,10 @@ func TestGetCustomer_NotFound(t *testing.T) {
 	}
 }
 
-func TestGetCustAccounts(t *testing.T) {
-	h := &Handlers{Svc: service.NewCustomerService(fakeCustRepo{accts: []domain.CustAccount{{AccountNo: "D1", Ccy: "CNY", Status: "active", Role: "主"}}})}
+func TestGetCustAccountsRetainsOpenDateAndBranch(t *testing.T) {
+	h := &Handlers{Svc: service.NewCustomerService(fakeCustRepo{accts: []domain.CustAccount{{AccountNo: "D1", Ccy: "CNY", Status: "active", OpenBizDate: "2026-01-15", BranchCode: "B-9", Role: "主"}}})}
 	code, body := get(t, NewRouter(h), "/api/v1/customers/C0000001/accounts")
-	if code != 200 || !strings.Contains(body, `"account_no":"D1"`) {
+	if code != 200 || !strings.Contains(body, `"account_no":"D1"`) || !strings.Contains(body, `"open_biz_date":"2026-01-15"`) || !strings.Contains(body, `"branch_code":"B-9"`) {
 		t.Errorf("code=%d body=%s", code, body)
 	}
 }

@@ -42,7 +42,7 @@ var (
 
 	// B-1 New vocabulary library
 	Genders           = []string{"M", "F"}
-	RiskLevels        = []string{"low", "low", "low", "medium"} // 75% low
+	RiskLevels        = []string{"low", "low", "medium", "high"} // 50% low, preparation includes high-risk cases
 	CustRegions       = []string{"华东", "华北", "华南", "西南"}
 	Industries        = []string{"A", "B", "C", "F", "G", "I", "K"}
 	MCCs              = []string{"5411", "5912", "7011", "4111", "5310", "5732", "5812"}

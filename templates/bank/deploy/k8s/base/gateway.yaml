@@ -1,0 +1,93 @@
+# Public gateway: a single Ingress routing only public REST prefixes
+# (/api/v1/...) to the REST Services on port 8080.
+#
+# Hard rules mirrored from compose Traefik labels:
+#   - ONLY public /api/v1/* REST prefixes are exposed.
+#   - ONLY REST Services (port http=8080) are targeted.
+#   - /internal/* and the gRPC port 9090 are NEVER routed here.
+#
+# The ingressClassName is `traefik` to match the compose topology; overlays may
+# swap this for nginx/contour/etc.
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bank-gateway
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          # ----- core-banking: accounts, transactions, ledger, vouchers -----
+          - path: /api/v1/accounts
+            pathType: Prefix
+            backend:
+              service:
+                name: core-banking
+                port: {name: http}
+          - path: /api/v1/txns
+            pathType: Prefix
+            backend:
+              service:
+                name: core-banking
+                port: {name: http}
+          - path: /api/v1/ledger
+            pathType: Prefix
+            backend:
+              service:
+                name: core-banking
+                port: {name: http}
+          - path: /api/v1/vouchers
+            pathType: Prefix
+            backend:
+              service:
+                name: core-banking
+                port: {name: http}
+          # ----- customer -----
+          - path: /api/v1/customers
+            pathType: Prefix
+            backend:
+              service:
+                name: customer
+                port: {name: http}
+          # ----- payment: payments, merchants -----
+          - path: /api/v1/payments
+            pathType: Prefix
+            backend:
+              service:
+                name: payment
+                port: {name: http}
+          - path: /api/v1/merchants
+            pathType: Prefix
+            backend:
+              service:
+                name: payment
+                port: {name: http}
+          # ----- reward -----
+          - path: /api/v1/reward
+            pathType: Prefix
+            backend:
+              service:
+                name: reward
+                port: {name: http}
+          # ----- risk -----
+          - path: /api/v1/risk
+            pathType: Prefix
+            backend:
+              service:
+                name: risk
+                port: {name: http}
+          # ----- loan -----
+          - path: /api/v1/loan
+            pathType: Prefix
+            backend:
+              service:
+                name: loan
+                port: {name: http}
+          # ----- wealth -----
+          - path: /api/v1/wealth
+            pathType: Prefix
+            backend:
+              service:
+                name: wealth
+                port: {name: http}

@@ -1,27 +1,25 @@
-// Package repo is the data access layer of wealth service: this library SQL + customer HTTP API.
+// Package repo is the data access layer of wealth service: this library SQL + customer gRPC query.
 package repo
 
 import (
+	"bank/internal/platform/serviceclient"
+	"bank/internal/wealth/domain"
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-
-	"bank/internal/platform/serviceclient"
-	"bank/internal/wealth/domain"
 )
 
 // WealthRepo wealth storage. This library only queries wealth_*.
 type WealthRepo struct {
 	db       *sql.DB
-	customer *serviceclient.Client
+	customer serviceclient.CustomerReader
 }
 
 // NewWealthRepo Constructs WealthRepo.
-func NewWealthRepo(db *sql.DB) *WealthRepo {
+func NewWealthRepo(db *sql.DB, customer serviceclient.CustomerReader) *WealthRepo {
 	return &WealthRepo{
 		db:       db,
-		customer: serviceclient.New(getenv("CUSTOMER_URL", "http://localhost:18081")),
+		customer: customer,
 	}
 }
 
@@ -193,14 +191,11 @@ func (r *WealthRepo) GetHoldingProfile(ctx context.Context, holdingID string) (d
 	if err != nil {
 		return domain.WealthProfile{}, fmt.Errorf("repo: 解析持仓市值: %w", err)
 	}
-	var customer struct {
-		Name     string `json:"name"`
-		CustType string `json:"cust_type"`
-	}
-	if err := r.customer.Get(ctx, "/api/v1/customers/"+serviceclient.EscapePath(p.CustID), &customer); err != nil {
+	customer, err := r.customer.GetCustomer(ctx, p.CustID, serviceclient.RequestID(ctx))
+	if err != nil {
 		return domain.WealthProfile{}, fmt.Errorf("repo: 从 customer 查客户 %s: %w", p.CustID, err)
 	}
-	p.Share, p.CurrentValue, p.CustName, p.CustType = share.String, m, customer.Name, customer.CustType
+	p.Share, p.CurrentValue, p.CustName, p.CustType = share.String, m, customer.Name, customer.CustomerType
 	return p, nil
 }
 
@@ -220,11 +215,4 @@ func scanHolding(scan func(dest ...any) error) (domain.WealthHolding, error) {
 	}
 	h.Share = share.String
 	return h, nil
-}
-
-func getenv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
 }

@@ -8,8 +8,17 @@ import (
 	"testing"
 
 	"bank/internal/platform/pg"
+	"bank/internal/platform/serviceclient"
 	"bank/internal/wealth/repo"
 )
+
+type deterministicCustomerReader struct{}
+
+var _ serviceclient.CustomerReader = deterministicCustomerReader{}
+
+func (deterministicCustomerReader) GetCustomer(_ context.Context, customerID, _ string) (serviceclient.Customer, error) {
+	return serviceclient.Customer{CustomerID: customerID, Name: "测试客户", CustomerType: "个人", KYCStatus: "passed", Status: "active"}, nil
+}
 
 func setupWealthDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -26,7 +35,7 @@ func setupWealthDB(t *testing.T) *sql.DB {
 func TestWealthRepo_ListProducts(t *testing.T) {
 	db := setupWealthDB(t)
 	defer db.Close()
-	prods, err := repo.NewWealthRepo(db).ListProducts(context.Background())
+	prods, err := repo.NewWealthRepo(db, deterministicCustomerReader{}).ListProducts(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +48,7 @@ func TestWealthRepo_Lists(t *testing.T) {
 	db := setupWealthDB(t)
 	defer db.Close()
 	ctx := context.Background()
-	r := repo.NewWealthRepo(db)
+	r := repo.NewWealthRepo(db, deterministicCustomerReader{})
 	if _, err := r.ListNav(ctx, "", "", ""); err != nil {
 		t.Fatalf("ListNav 失败: %v", err)
 	}
@@ -57,7 +66,7 @@ func TestWealthRepo_Lists(t *testing.T) {
 func TestWealthRepo_GetHoldingProfile_NotFound(t *testing.T) {
 	db := setupWealthDB(t)
 	defer db.Close()
-	_, err := repo.NewWealthRepo(db).GetHoldingProfile(context.Background(), "WP-HD-NOPE")
+	_, err := repo.NewWealthRepo(db, deterministicCustomerReader{}).GetHoldingProfile(context.Background(), "WP-HD-NOPE")
 	if err == nil {
 		t.Error("不存在的持仓应返回错误")
 	}

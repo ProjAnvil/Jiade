@@ -1,0 +1,920 @@
+package workflow
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"bank/internal/platform/messaging"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+)
+
+// Direction values persisted on ActionRecord; mirrored from the DB CHECK
+// constraint ck_workflow_action_direction. Unexported until a later task
+// surfaces compensation direction to callers.
+const (
+	directionForward      = "forward"
+	directionCompensation = "compensation"
+)
+
+// workflowTracerName is the OpenTelemetry tracer name for workflow spans.
+const workflowTracerName = "bank.workflow"
+
+// tracer returns the workflow tracer from the global provider. Tests install an
+// in-memory exporter as the global provider; production wiring installs the
+// real OTLP exporter via the telemetry package.
+func (e *Engine) tracer() trace.Tracer {
+	return otel.GetTracerProvider().Tracer(workflowTracerName)
+}
+
+// Engine is the durable workflow orchestrator. It advances Instances through
+// a Definition's ordered Actions by preparing an immutable context, emitting
+// the first dispatch command, and — in later tasks — applying result events
+// and compensations. All state changes go through the Store.
+//
+// Engine values are safe for concurrent use: they hold no mutable state of
+// their own, and all per-instance state is guarded by the Store's
+// WithInstance lock.
+type Engine struct {
+	store    Store
+	registry *Registry
+	config   EngineConfig
+	// metrics, if non-nil, records Prometheus observations at every state
+	// transition. Nil is safe: every (*Metrics) recording method is a no-op
+	// on a nil receiver, so Engines constructed without SetMetrics (the
+	// Tasks 1-7 default) incur no metric overhead and need no rewriting.
+	metrics *Metrics
+}
+
+// SetMetrics wires a Metrics collector into the Engine. Pass a *Metrics built
+// via NewMetrics; pass nil to disable metric recording (the default). The
+// Engine does not take ownership of the Metrics value's lifecycle — callers
+// must keep the underlying Registerer alive for as long as the Engine records.
+//
+// SetMetrics is intended for the production wiring (or tests asserting metric
+// values). Existing Tasks 1-7 tests never call it, so their Engines default to
+// a nil (no-op) Metrics and remain unchanged.
+func (e *Engine) SetMetrics(m *Metrics) { e.metrics = m }
+
+// NewEngine wires a Store, a populated Registry, and an EngineConfig into an
+// Engine. Zero-valued EngineConfig fields yield the documented defaults:
+//
+//   - ExecuteMaxAttempts      = 3
+//   - CompensationMaxAttempts = 5
+//   - OperationalDeadline     = 2 * time.Minute
+//   - Now                     = time.Now
+//
+// Explicit non-zero values are preserved, so callers may override any subset.
+// A nil Now falls back to time.Now (a zero func() time.Time value is nil in
+// Go, so the standard zero check covers it).
+func NewEngine(store Store, registry *Registry, config EngineConfig) *Engine {
+	if config.ExecuteMaxAttempts <= 0 {
+		config.ExecuteMaxAttempts = 3
+	}
+	if config.CompensationMaxAttempts <= 0 {
+		config.CompensationMaxAttempts = 5
+	}
+	if config.OperationalDeadline <= 0 {
+		config.OperationalDeadline = 2 * time.Minute
+	}
+	if config.Now == nil {
+		config.Now = time.Now
+	}
+	return &Engine{store: store, registry: registry, config: config}
+}
+
+// Start validates that a Definition is registered for (req.Type, req.Version)
+// and asks the Store to persist a new Instance in StatusPreparing. The
+// returned Instance is a snapshot at creation time; callers proceed by
+// invoking Prepare to drive the first action.
+//
+// Start does not call Definition.Prepare; the immutable context is computed
+// later, in Prepare, outside any transaction.
+func (e *Engine) Start(ctx context.Context, req StartRequest) (Instance, error) {
+	if _, ok := e.registry.Get(req.Type, req.Version); !ok {
+		return Instance{}, fmt.Errorf("%w: type=%q version=%d", ErrDefinitionNotFound, req.Type, req.Version)
+	}
+	inst, err := e.store.Create(ctx, req)
+	if err != nil {
+		return Instance{}, err
+	}
+	// Record the initial preparing gauge contribution only on a successful
+	// Create; a failed Create leaves the gauge untouched.
+	e.metrics.enterStatus(StatusPreparing)
+	return inst, nil
+}
+
+// Prepare runs the Definition's Prepare outside any transaction to obtain the
+// immutable preparedContext, then atomically transitions the Instance from
+// StatusPreparing to StatusRunning: it locks the instance, verifies it is
+// still preparing (idempotent — if already advanced, returns nil), saves the
+// preparedContext, runs the first Action's Execute, persists the Instance
+// (Status=running, CurrentAction=0, Revision++), persists the first
+// ActionRecord (Status=waiting_result, Direction=forward, Attempt=1), and
+// AppendOutbox-es the first dispatch command — all inside the one Store
+// transaction.
+//
+// If the Definition's Prepare returns an error (business validation failure),
+// the Instance is transitioned to StatusRejected with LastError and
+// LastErrorClass=BusinessRejected recorded, and Engine.Prepare returns nil:
+// rejection is a workflow outcome, not a system error. System errors (Store
+// failure, Action.Execute failure) are returned to the caller for retry.
+//
+// Because the Instance is re-checked inside the transaction, Prepare is safe
+// to invoke more than once: a duplicate call on an already-running or
+// already-rejected instance returns nil without side effects.
+func (e *Engine) Prepare(ctx context.Context, id string) error {
+	header, err := e.readHeader(ctx, id)
+	if err != nil {
+		return err
+	}
+	// Idempotent short-circuit: another worker already advanced it.
+	if header.Status != StatusPreparing {
+		return nil
+	}
+
+	// Open a workflow.prepare span carrying the brief-mandated attributes so
+	// the preparation phase is traceable end-to-end. The span wraps both
+	// Definition.Prepare and the first-action dispatch so the execute/wait
+	// spans descend from it.
+	ctx, prepareSpan := e.tracer().Start(ctx, "workflow.prepare",
+		trace.WithAttributes(
+			attribute.String("workflow.id", header.ID),
+			attribute.String("workflow.type", header.Type),
+		),
+	)
+	defer prepareSpan.End()
+
+	def, ok := e.registry.Get(header.Type, header.Version)
+	if !ok {
+		return fmt.Errorf("%w: type=%q version=%d", ErrDefinitionNotFound, header.Type, header.Version)
+	}
+
+	preparedContext, prepareErr := def.Prepare(ctx, header.Input)
+	if prepareErr != nil {
+		return e.rejectInstance(ctx, id, prepareErr)
+	}
+
+	// Defensive guard: a definition whose Actions() is empty cannot advance.
+	// The Registry permits zero-action definitions today; the Engine rejects
+	// them here (after Prepare has succeeded) rather than panicking on
+	// actions[0] in dispatchFirstAction.
+	if len(def.Actions()) == 0 {
+		return fmt.Errorf("workflow definition %q v%d has no actions", def.Type(), def.Version())
+	}
+
+	return e.dispatchFirstAction(ctx, id, def, preparedContext)
+}
+
+// readHeader is a lightweight WithInstance read that returns a snapshot of
+// the Instance used to look up the Definition and drive Definition.Prepare
+// outside any transaction. It is the only way to learn (Type, Version, Input)
+// given just an instance id, because the Store interface exposes no separate
+// read method.
+func (e *Engine) readHeader(ctx context.Context, id string) (Instance, error) {
+	var header Instance
+	if err := e.store.WithInstance(ctx, id, func(tx Tx) error {
+		header = *tx.Instance()
+		return nil
+	}); err != nil {
+		return Instance{}, fmt.Errorf("load instance %q: %w", id, err)
+	}
+	return header, nil
+}
+
+// rejectInstance transitions an Instance from StatusPreparing to
+// StatusRejected, recording the business error. Idempotent: if the instance
+// is no longer preparing (race or duplicate), it is left untouched.
+func (e *Engine) rejectInstance(ctx context.Context, id string, prepareErr error) error {
+	var transitioned bool
+	err := e.store.WithInstance(ctx, id, func(tx Tx) error {
+		current := tx.Instance()
+		if current.Status != StatusPreparing {
+			return nil
+		}
+		inst := *current
+		inst.Status = StatusRejected
+		inst.LastError = prepareErr.Error()
+		inst.LastErrorClass = BusinessRejected
+		inst.Revision++
+		transitioned = true
+		return tx.SaveInstance(inst)
+	})
+	if err == nil && transitioned {
+		e.metrics.changeStatus(StatusPreparing, StatusRejected)
+	}
+	return err
+}
+
+// dispatchFirstAction performs the real StatusPreparing → StatusRunning
+// transition: saves the immutable preparedContext, builds the first Action's
+// dispatch via Action.Execute, persists the instance and the first
+// ActionRecord, and AppendOutbox-es the dispatch command — all inside the
+// Store transaction. Idempotent via the StatusPreparing re-check.
+func (e *Engine) dispatchFirstAction(ctx context.Context, id string, def Definition, preparedContext []byte) error {
+	var transitioned bool
+	err := e.store.WithInstance(ctx, id, func(tx Tx) error {
+		current := tx.Instance()
+		// Idempotent: if another worker advanced the instance between our
+		// readHeader and this lock, leave it alone.
+		if current.Status != StatusPreparing {
+			return nil
+		}
+
+		inst := *current
+		inst.PreparedContext = append(json.RawMessage(nil), preparedContext...)
+		inst.Status = StatusRunning
+		inst.CurrentAction = 0
+
+		now := e.config.Now()
+		inst.OperationalDeadline = now.Add(e.config.OperationalDeadline)
+		inst.Revision++
+		transitioned = true
+
+		if err := tx.SaveInstance(inst); err != nil {
+			return fmt.Errorf("save instance: %w", err)
+		}
+
+		return e.persistActionDispatch(tx, inst, def, ctx)
+	})
+	if err == nil && transitioned {
+		e.metrics.changeStatus(StatusPreparing, StatusRunning)
+	}
+	return err
+}
+
+// persistActionDispatch executes the action at inst.CurrentAction, persists its
+// ActionRecord (Status=waiting_result, Direction=forward, Attempt=1), and
+// appends the dispatch command to the outbox. The caller MUST have already
+// saved the Instance with the correct CurrentAction via tx.SaveInstance. This
+// is the shared dispatch path for the first action (Prepare) and subsequent
+// actions (ApplyResult advancement).
+func (e *Engine) persistActionDispatch(tx Tx, inst Instance, def Definition, ctx context.Context) error {
+	actions := def.Actions()
+	idx := inst.CurrentAction
+	action := actions[idx]
+
+	// Open a workflow.action.execute span around the action's Execute call.
+	// The command.id attribute is stamped after the CommandID is generated so
+	// the span carries the same transport identity as the dispatched command.
+	executeCtx, executeSpan := e.tracer().Start(ctx, "workflow.action.execute",
+		trace.WithAttributes(
+			attribute.String("workflow.id", inst.ID),
+			attribute.String("workflow.type", inst.Type),
+			attribute.String("workflow.action", action.Name()),
+			attribute.String("workflow.direction", directionForward),
+		),
+	)
+	defer executeSpan.End()
+
+	view := View{Instance: inst, Action: ActionRecord{Index: idx, Name: action.Name()}}
+	start := e.config.Now()
+	dispatch, err := action.Execute(executeCtx, view)
+	took := e.config.Now().Sub(start)
+	// Record dispatch metrics regardless of the error: an Execute that failed
+	// still consumed a dispatch attempt and is operationally interesting. The
+	// surrounding Tx rolls back on error, but the metric observation persists
+	// — operators want to see failed dispatches too.
+	e.metrics.observeAction(action.Name(), directionForward, took)
+	if err != nil {
+		executeSpan.RecordError(err)
+		// Propagate to caller for retry; the Tx rolls back.
+		return fmt.Errorf("action %q Execute: %w", action.Name(), err)
+	}
+
+	now := e.config.Now()
+	idempotencyKey := dispatch.IdempotencyKey
+	if idempotencyKey == "" {
+		idempotencyKey = fmt.Sprintf("%s:%s:%d", inst.ID, action.Name(), 1)
+	}
+	commandID := newUUID()
+	executeSpan.SetAttributes(attribute.String("command.id", commandID))
+
+	actionRec := ActionRecord{
+		Index:               idx,
+		Name:                action.Name(),
+		Status:              ActionWaitingResult,
+		Direction:           directionForward,
+		Attempt:             1,
+		IdempotencyKey:      idempotencyKey,
+		CommandID:           commandID,
+		DeadlineAt:          deadlineAt(now, dispatch.Deadline),
+		AcceptedResultTypes: dispatch.AcceptedResultTypes,
+	}
+	if err := tx.SaveAction(actionRec); err != nil {
+		return fmt.Errorf("save action %q: %w", action.Name(), err)
+	}
+
+	// Mark the transition into the waiting-for-result phase with a
+	// workflow.action.wait span carrying the same identity attributes.
+	_, waitSpan := e.tracer().Start(ctx, "workflow.action.wait",
+		trace.WithAttributes(
+			attribute.String("workflow.id", inst.ID),
+			attribute.String("workflow.type", inst.Type),
+			attribute.String("workflow.action", action.Name()),
+			attribute.String("workflow.direction", directionForward),
+			attribute.String("command.id", commandID),
+		),
+	)
+	waitSpan.End()
+
+	env := buildCommandEnvelope(inst, action.Name(), actionRec, dispatch, e.config.Now)
+	if err := tx.AppendOutbox(env, dispatch.RoutingKey); err != nil {
+		return fmt.Errorf("append outbox for %q: %w", action.Name(), err)
+	}
+	return nil
+}
+
+// resultConsumer is the Inbox consumer name used by ApplyResult to deduplicate
+// result event deliveries.
+const resultConsumer = "workflow"
+
+// ApplyResult consumes a result Envelope, applies it to the current action
+// exactly once (Inbox dedup + row lock), and advances or compensates the
+// workflow — the event-driven resume path complementing Engine.Start/Prepare.
+// All work happens inside one Store.WithInstance transaction so concurrent
+// duplicate deliveries are serialized by the row lock and deduplicated by the
+// Inbox insert.
+//
+// ApplyResult is the SINGLE entry point for both forward results and
+// compensation results: compensation commands emit result events through the
+// same messaging consumer, so routing is by Instance state —
+//
+//   - StatusRunning      → forward-result path (applyForwardResult)
+//   - StatusCompensating → compensation-result path (applyCompensationResult)
+//
+// Any other Instance status yields ErrInvalidMessage. This is the documented,
+// testable routing mechanism: no envelope-direction or command-id heuristic is
+// needed because the Instance can only be in one phase at a time.
+//
+// Flow (all inside the per-instance Tx):
+//  1. InsertInbox FIRST. If the event was already processed (duplicate), return
+//     nil — idempotent, no re-advance.
+//  2. Defensive workflow-ID check.
+//  3. Route by Instance status to the forward or compensation handler.
+func (e *Engine) ApplyResult(ctx context.Context, env messaging.Envelope) error {
+	return e.store.WithInstance(ctx, env.WorkflowID, func(tx Tx) error {
+		// 1. Inbox dedup FIRST. If already processed, this is an idempotent
+		// no-op — return nil without re-advancing.
+		inserted, err := tx.InsertInbox(resultConsumer, env)
+		if err != nil {
+			return fmt.Errorf("insert inbox: %w", err)
+		}
+		if !inserted {
+			return nil
+		}
+
+		current := tx.Instance()
+
+		// 2. Defensive: envelope workflow must match the locked instance.
+		if env.WorkflowID != current.ID {
+			return fmt.Errorf("%w: envelope workflow %q != instance %q",
+				ErrInvalidMessage, env.WorkflowID, current.ID)
+		}
+
+		// 3. Route by Instance status to the forward or compensation handler.
+		switch current.Status {
+		case StatusRunning:
+			return e.applyForwardResult(tx, current, env, ctx)
+		case StatusCompensating:
+			return e.applyCompensationResult(tx, current, env, ctx)
+		default:
+			return fmt.Errorf("%w: instance %q status %q, want %q or %q",
+				ErrInvalidMessage, current.ID, current.Status,
+				StatusRunning, StatusCompensating)
+		}
+	})
+}
+
+// applyForwardResult handles a result envelope for an Instance in
+// StatusRunning. It validates the envelope against the current action, calls
+// Action.ApplyResult, and either advances to the next action (success),
+// triggers reverse compensation (terminal failure), or leaves the action
+// failed for Task 6 recovery (transient failure).
+func (e *Engine) applyForwardResult(tx Tx, current *Instance, env messaging.Envelope, ctx context.Context) error {
+	// Validate the current action record.
+	actionIdx := current.CurrentAction
+	if actionIdx < 0 || actionIdx >= len(current.Actions) {
+		return fmt.Errorf("%w: current action index %d out of range (have %d actions)",
+			ErrInvalidMessage, actionIdx, len(current.Actions))
+	}
+	actionRec := current.Actions[actionIdx]
+
+	if env.ActionName != actionRec.Name {
+		return fmt.Errorf("%w: envelope action %q != current action %q",
+			ErrInvalidMessage, env.ActionName, actionRec.Name)
+	}
+	if env.CommandID != actionRec.CommandID {
+		return fmt.Errorf("%w: envelope command_id %q != current command_id %q",
+			ErrInvalidMessage, env.CommandID, actionRec.CommandID)
+	}
+	if !containsString(actionRec.AcceptedResultTypes, env.MessageType) {
+		return fmt.Errorf("%w: message type %q not in accepted types %v",
+			ErrInvalidMessage, env.MessageType, actionRec.AcceptedResultTypes)
+	}
+	if actionRec.Status != ActionWaitingResult {
+		return fmt.Errorf("%w: action %q status %q, want %q",
+			ErrInvalidMessage, actionRec.Name, actionRec.Status, ActionWaitingResult)
+	}
+
+	// Look up the Definition + Action interface for this step.
+	def, ok := e.registry.Get(current.Type, current.Version)
+	if !ok {
+		return fmt.Errorf("%w: type=%q version=%d",
+			ErrDefinitionNotFound, current.Type, current.Version)
+	}
+	defActions := def.Actions()
+	if actionIdx >= len(defActions) {
+		return fmt.Errorf("%w: action index %d exceeds definition actions (%d)",
+			ErrInvalidMessage, actionIdx, len(defActions))
+	}
+	action := defActions[actionIdx]
+
+	// Apply the result event to the action.
+	view := View{Instance: *current, Action: actionRec}
+	outcome, err := action.ApplyResult(ctx, view, env)
+	if err != nil {
+		return fmt.Errorf("action %q ApplyResult: %w", actionRec.Name, err)
+	}
+
+	inst := *current
+
+	// Handle failure outcome.
+	if !outcome.Succeeded {
+		// Record the failure on the action record regardless of class.
+		actionRec.Status = ActionFailed
+		actionRec.LastErrorClass = outcome.Class
+		actionRec.LastError = outcome.Message
+		actionRec.ResultEventID = env.MessageID
+		if err := tx.SaveAction(actionRec); err != nil {
+			return fmt.Errorf("save failed action %q: %w", actionRec.Name, err)
+		}
+
+		// Terminal execution failures trigger reverse compensation.
+		// Transient failures and unknown outcomes (timeouts) are left for
+		// Task 6's recovery path: the action stays failed and the instance
+		// stays running so a later task can re-dispatch or escalate.
+		if isTerminalExecutionFailure(outcome.Class) {
+			return e.beginCompensation(tx, inst, def, ctx)
+		}
+		// Transient: record state, leave instance running for Task 6.
+		inst.Revision++
+		return tx.SaveInstance(inst)
+	}
+
+	// Success: record output and mark action succeeded.
+	actionRec.Status = ActionSucceeded
+	actionRec.Output = append(json.RawMessage(nil), outcome.Output...)
+	actionRec.ResultEventID = env.MessageID
+	if err := tx.SaveAction(actionRec); err != nil {
+		return fmt.Errorf("save succeeded action %q: %w", actionRec.Name, err)
+	}
+
+	// Advance: dispatch the next action, or mark the instance succeeded.
+	if actionIdx+1 < len(defActions) {
+		inst.CurrentAction = actionIdx + 1
+		inst.Revision++
+		if err := tx.SaveInstance(inst); err != nil {
+			return fmt.Errorf("save instance: %w", err)
+		}
+		return e.persistActionDispatch(tx, inst, def, ctx)
+	}
+
+	// Last action succeeded — workflow is done.
+	inst.Status = StatusSucceeded
+	inst.Revision++
+	if err := tx.SaveInstance(inst); err != nil {
+		return fmt.Errorf("save instance: %w", err)
+	}
+	e.metrics.changeStatus(StatusRunning, StatusSucceeded)
+	return nil
+}
+
+// isTerminalExecutionFailure reports whether an ErrorClass from a failed
+// forward ApplyResult outcome is terminal — meaning the action cannot succeed
+// on retry and the engine must reverse (compensate) the workflow.
+//
+// Terminal classes (trigger compensation):
+//   - BusinessRejected: the domain has rejected the operation; retrying the
+//     same command will not change the outcome.
+//   - InvariantViolation: a precondition or invariant was violated; this is a
+//     logic-level rejection, not a transient infra fault.
+//
+// Non-terminal classes (left for Task 6 recovery, instance stays running):
+//   - TransientFailure: a downstream/broker fault that may resolve on retry.
+//   - UnknownOutcome: a timeout/no-answer that recovery can re-dispatch.
+//   - InvalidMessage: structural rejection handled earlier by the engine.
+func isTerminalExecutionFailure(class ErrorClass) bool {
+	switch class {
+	case BusinessRejected, InvariantViolation:
+		return true
+	default:
+		return false
+	}
+}
+
+// beginCompensation transitions an Instance from running to compensating and
+// dispatches the FIRST compensation command — for the last succeeded Action
+// before the failed current action (compensation walks in REVERSE order). The
+// caller has already persisted the failed ActionRecord; this function only
+// mutates Instance state and the newly-targeted compensation ActionRecord.
+//
+// If no prior action succeeded (e.g. a 1-step workflow whose only action
+// failed), there is nothing to undo and the instance jumps straight to
+// StatusCompensated.
+func (e *Engine) beginCompensation(tx Tx, inst Instance, def Definition, ctx context.Context) error {
+	inst.Status = StatusCompensating
+	target := lastSucceededBefore(inst, inst.CurrentAction)
+	if target < 0 {
+		// Nothing to undo.
+		inst.Status = StatusCompensated
+		inst.Revision++
+		if err := tx.SaveInstance(inst); err != nil {
+			return fmt.Errorf("save instance: %w", err)
+		}
+		e.metrics.changeStatus(StatusRunning, StatusCompensated)
+		return nil
+	}
+	inst.CurrentAction = target
+	inst.Revision++
+	if err := tx.SaveInstance(inst); err != nil {
+		return fmt.Errorf("save instance: %w", err)
+	}
+	e.metrics.changeStatus(StatusRunning, StatusCompensating)
+	return e.persistCompensationDispatch(tx, inst, def, target, 1, ctx)
+}
+
+// lastSucceededBefore returns the index of the most-recent Action whose Status
+// is ActionSucceeded and whose Index is strictly less than before, or -1 if
+// none exists. Used to walk the compensation stack in reverse order.
+func lastSucceededBefore(inst Instance, before int) int {
+	for i := before - 1; i >= 0; i-- {
+		if i < len(inst.Actions) && inst.Actions[i].Status == ActionSucceeded {
+			return i
+		}
+	}
+	return -1
+}
+
+// persistCompensationDispatch builds and persists a compensation command for
+// the action at idx: calls Action.Compensate, saves the ActionRecord as
+// ActionCompensating with Direction=compensation, and AppendOutbox-es the
+// compensation command. The compensation IdempotencyKey is STABLE across
+// retry attempts (semantic identity); the CommandID is fresh on each dispatch
+// (transport identity). The caller MUST have already set inst.CurrentAction
+// and saved the Instance.
+func (e *Engine) persistCompensationDispatch(tx Tx, inst Instance, def Definition, idx, attempt int, ctx context.Context) error {
+	actions := def.Actions()
+	action := actions[idx]
+
+	// Open a workflow.action.compensate span around the action's Compensate
+	// call, with workflow.direction=compensation. The command.id attribute is
+	// stamped after the fresh CommandID is generated.
+	compensateCtx, compensateSpan := e.tracer().Start(ctx, "workflow.action.compensate",
+		trace.WithAttributes(
+			attribute.String("workflow.id", inst.ID),
+			attribute.String("workflow.type", inst.Type),
+			attribute.String("workflow.action", action.Name()),
+			attribute.String("workflow.direction", directionCompensation),
+		),
+	)
+	defer compensateSpan.End()
+
+	// View carries the CURRENT action record (still succeeded from the forward
+	// pass) so Compensate can read the forward Output to construct the undo.
+	view := View{Instance: inst, Action: inst.Actions[idx]}
+	start := e.config.Now()
+	dispatch, err := action.Compensate(compensateCtx, view)
+	took := e.config.Now().Sub(start)
+	// Record dispatch metrics regardless of the error — a failed Compensate is
+	// still a dispatch attempt the engine acted on, and the surrounding Tx
+	// rolls back leaving instance state untouched but the metric persistent.
+	e.metrics.observeAction(action.Name(), directionCompensation, took)
+	e.metrics.observeCompensationDispatch(action.Name())
+	if err != nil {
+		compensateSpan.RecordError(err)
+		return fmt.Errorf("action %q Compensate: %w", action.Name(), err)
+	}
+
+	now := e.config.Now()
+	idempotencyKey := dispatch.IdempotencyKey
+	if idempotencyKey == "" {
+		// Stable semantic key: same across compensation retries of this action.
+		idempotencyKey = fmt.Sprintf("%s:%s:compensate", inst.ID, action.Name())
+	}
+	commandID := newUUID()
+	compensateSpan.SetAttributes(attribute.String("command.id", commandID))
+
+	oldRec := inst.Actions[idx]
+	actionRec := ActionRecord{
+		Index:               idx,
+		Name:                action.Name(),
+		Status:              ActionCompensating,
+		Direction:           directionCompensation,
+		Attempt:             attempt,
+		IdempotencyKey:      idempotencyKey,
+		CommandID:           commandID,
+		DeadlineAt:          deadlineAt(now, dispatch.Deadline),
+		AcceptedResultTypes: dispatch.AcceptedResultTypes,
+		// Preserve forward provenance for audit and for Compensate on retry.
+		Output:        append(json.RawMessage(nil), oldRec.Output...),
+		ResultEventID: oldRec.ResultEventID,
+	}
+	if err := tx.SaveAction(actionRec); err != nil {
+		return fmt.Errorf("save compensation action %q: %w", action.Name(), err)
+	}
+
+	env := buildCompensationEnvelope(inst, action.Name(), actionRec, dispatch, e.config.Now)
+	if err := tx.AppendOutbox(env, dispatch.RoutingKey); err != nil {
+		return fmt.Errorf("append outbox for compensation %q: %w", action.Name(), err)
+	}
+	return nil
+}
+
+// applyCompensationResult handles a compensation-result envelope for an
+// Instance in StatusCompensating. It validates the envelope against the
+// current action (which is in ActionCompensating), calls
+// Action.ApplyCompensationResult, and either walks to the previous succeeded
+// action (compensation success), retries the same action (transient failure,
+// stable idempotency key), or marks compensation_failed after
+// CompensationMaxAttempts transient failures.
+func (e *Engine) applyCompensationResult(tx Tx, current *Instance, env messaging.Envelope, ctx context.Context) error {
+	actionIdx := current.CurrentAction
+	if actionIdx < 0 || actionIdx >= len(current.Actions) {
+		return fmt.Errorf("%w: current action index %d out of range (have %d actions)",
+			ErrInvalidMessage, actionIdx, len(current.Actions))
+	}
+	actionRec := current.Actions[actionIdx]
+
+	if env.ActionName != actionRec.Name {
+		return fmt.Errorf("%w: envelope action %q != current action %q",
+			ErrInvalidMessage, env.ActionName, actionRec.Name)
+	}
+	if env.CommandID != actionRec.CommandID {
+		return fmt.Errorf("%w: envelope command_id %q != current command_id %q",
+			ErrInvalidMessage, env.CommandID, actionRec.CommandID)
+	}
+	if !containsString(actionRec.AcceptedResultTypes, env.MessageType) {
+		return fmt.Errorf("%w: message type %q not in accepted types %v",
+			ErrInvalidMessage, env.MessageType, actionRec.AcceptedResultTypes)
+	}
+	if actionRec.Status != ActionCompensating {
+		return fmt.Errorf("%w: action %q status %q, want %q",
+			ErrInvalidMessage, actionRec.Name, actionRec.Status, ActionCompensating)
+	}
+
+	def, ok := e.registry.Get(current.Type, current.Version)
+	if !ok {
+		return fmt.Errorf("%w: type=%q version=%d",
+			ErrDefinitionNotFound, current.Type, current.Version)
+	}
+	defActions := def.Actions()
+	if actionIdx >= len(defActions) {
+		return fmt.Errorf("%w: action index %d exceeds definition actions (%d)",
+			ErrInvalidMessage, actionIdx, len(defActions))
+	}
+	action := defActions[actionIdx]
+
+	view := View{Instance: *current, Action: actionRec}
+	outcome, err := action.ApplyCompensationResult(ctx, view, env)
+	if err != nil {
+		return fmt.Errorf("action %q ApplyCompensationResult: %w", actionRec.Name, err)
+	}
+
+	inst := *current
+
+	// Transient compensation failure: retry same semantic idempotency key.
+	if !outcome.Succeeded {
+		if actionRec.Attempt >= e.config.CompensationMaxAttempts {
+			// Exhausted: mark action and instance compensation_failed.
+			// CurrentAction is preserved so the operator can see which step
+			// could not be undone. This is also where the deferred
+			// workflow_compensation_failures_total counter fires.
+			actionRec.Status = ActionCompensationFailed
+			actionRec.LastErrorClass = outcome.Class
+			actionRec.LastError = outcome.Message
+			actionRec.ResultEventID = env.MessageID
+			if err := tx.SaveAction(actionRec); err != nil {
+				return fmt.Errorf("save compensation_failed action %q: %w", actionRec.Name, err)
+			}
+			inst.Status = StatusCompensationFailed
+			inst.LastErrorClass = outcome.Class
+			inst.LastError = outcome.Message
+			inst.Revision++
+			if err := tx.SaveInstance(inst); err != nil {
+				return fmt.Errorf("save instance: %w", err)
+			}
+			e.metrics.changeStatus(StatusCompensating, StatusCompensationFailed)
+			e.metrics.recordCompensationFailure(actionRec.Name)
+			return nil
+		}
+		// Retry: same idempotency key, fresh CommandID, attempt+1.
+		return e.persistCompensationDispatch(tx, inst, def, actionIdx, actionRec.Attempt+1, ctx)
+	}
+
+	// Compensation success: mark action compensated.
+	actionRec.Status = ActionCompensated
+	actionRec.LastErrorClass = ""
+	actionRec.LastError = ""
+	actionRec.ResultEventID = env.MessageID
+	if err := tx.SaveAction(actionRec); err != nil {
+		return fmt.Errorf("save compensated action %q: %w", actionRec.Name, err)
+	}
+
+	// Walk to the previous succeeded action, or finish.
+	target := lastSucceededBefore(inst, actionIdx)
+	if target < 0 {
+		inst.Status = StatusCompensated
+		inst.Revision++
+		if err := tx.SaveInstance(inst); err != nil {
+			return fmt.Errorf("save instance: %w", err)
+		}
+		e.metrics.changeStatus(StatusCompensating, StatusCompensated)
+		return nil
+	}
+	inst.CurrentAction = target
+	inst.Revision++
+	if err := tx.SaveInstance(inst); err != nil {
+		return fmt.Errorf("save instance: %w", err)
+	}
+	return e.persistCompensationDispatch(tx, inst, def, target, 1, ctx)
+}
+
+// buildCompensationEnvelope assembles the messaging.Envelope for a compensation
+// dispatch command. The envelope's MessageType is the dispatch RoutingKey —
+// i.e. the DOMAIN routing key the Action's Compensate returns (e.g.
+// "risk.void-payment-authorization.v1", "core.release-hold.v1"). This matches
+// the consumers' switch env.MessageType arms, which route on the same domain
+// keys whether the command is forward or compensation: each compensation
+// command has its own dedicated domain key (void vs authorize, release vs
+// place, reverse vs post), so the consumer never needs a separate
+// "compensation." prefix to tell undo commands apart from forward commands.
+func buildCompensationEnvelope(inst Instance, actionName string, action ActionRecord, dispatch Dispatch, now func() time.Time) messaging.Envelope {
+	messageType := dispatch.RoutingKey
+	env := messaging.NewEnvelope(messageType, envelopeCorrelationID(inst), dispatch.Payload, now)
+	env.WorkflowID = inst.ID
+	env.ActionName = actionName
+	env.CommandID = action.CommandID
+	env.IdempotencyKey = action.IdempotencyKey
+	return env
+}
+
+// containsString reports whether list contains s. Used for AcceptedResultTypes
+// membership checks.
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// envelopeCorrelationID returns the correlation identifier stamped onto an
+// outbound command envelope. It prefers Instance.CorrelationID (propagated from
+// StartRequest at creation time) so downstream saga participants and closure
+// tracing can correlate work back to the originating request; when that field
+// is empty it falls back to the workflow instance id, preserving the
+// pre-CorrelationID behaviour for callers that never set one.
+func envelopeCorrelationID(inst Instance) string {
+	if inst.CorrelationID != "" {
+		return inst.CorrelationID
+	}
+	return inst.ID
+}
+
+// buildCommandEnvelope assembles the messaging.Envelope for the dispatch
+// command emitted by an action. The envelope's MessageType is the dispatch
+// RoutingKey — i.e. the DOMAIN routing key the Action's Execute returns (e.g.
+// "risk.authorize-payment.v1", "core.place-hold.v1"). This is the key the
+// downstream consumers' switch env.MessageType arms match on, so a command
+// reaches its handler instead of falling through to the consumer's
+// emitFailure/default branch. The envelope correlation id is
+// Instance.CorrelationID when non-empty, falling back to the workflow instance
+// id for backward compatibility with callers that pre-date the CorrelationID
+// field.
+func buildCommandEnvelope(inst Instance, actionName string, action ActionRecord, dispatch Dispatch, now func() time.Time) messaging.Envelope {
+	messageType := dispatch.RoutingKey
+	env := messaging.NewEnvelope(messageType, envelopeCorrelationID(inst), dispatch.Payload, now)
+	env.WorkflowID = inst.ID
+	env.ActionName = actionName
+	env.CommandID = action.CommandID
+	env.IdempotencyKey = action.IdempotencyKey
+	return env
+}
+
+// Redispatch re-emits the command for an instance whose current action is
+// waiting for a result and has exceeded its DeadlineAt (a waiting-action
+// timeout). The re-dispatched envelope carries a NEW MessageID (the transport
+// identity changes so the message can traverse the broker again) but the SAME
+// CommandID and IdempotencyKey as the original dispatch — so the recipient
+// deduplicates the command if it was already processed.
+//
+// Redispatch is idempotent and safe to call speculatively: if the instance is
+// not in StatusRunning, the current action is not ActionWaitingResult, or the
+// deadline has not yet passed, it returns nil without side effects.
+//
+// The action's DeadlineAt is pushed forward by the action's configured
+// Deadline duration (from Dispatch) so the next timeout window starts fresh;
+// this prevents the recovery loop from re-dispatching the same command on
+// every poll cycle. Revision is bumped to signal the state change.
+func (e *Engine) Redispatch(ctx context.Context, id string) error {
+	return e.store.WithInstance(ctx, id, func(tx Tx) error {
+		current := tx.Instance()
+		if current.Status != StatusRunning {
+			return nil
+		}
+		actionIdx := current.CurrentAction
+		if actionIdx < 0 || actionIdx >= len(current.Actions) {
+			return nil
+		}
+		actionRec := current.Actions[actionIdx]
+		if actionRec.Status != ActionWaitingResult {
+			return nil
+		}
+		now := e.config.Now()
+		if actionRec.DeadlineAt.IsZero() || !now.After(actionRec.DeadlineAt) {
+			return nil
+		}
+
+		def, ok := e.registry.Get(current.Type, current.Version)
+		if !ok {
+			return fmt.Errorf("%w: type=%q version=%d", ErrDefinitionNotFound, current.Type, current.Version)
+		}
+		defActions := def.Actions()
+		if actionIdx >= len(defActions) {
+			return fmt.Errorf("%w: action index %d exceeds definition actions (%d)",
+				ErrInvalidMessage, actionIdx, len(defActions))
+		}
+		action := defActions[actionIdx]
+
+		// Record the waiting age of this timed-out action BEFORE re-dispatch:
+		// operators use this gauge to spot chronically stuck workflows. The
+		// value is now - DeadlineAt (how long past the deadline the action has
+		// been waiting).
+		e.metrics.recordWaitingAge(now.Sub(actionRec.DeadlineAt).Seconds())
+
+		view := View{Instance: *current, Action: actionRec}
+		start := e.config.Now()
+		dispatch, err := action.Execute(ctx, view)
+		took := e.config.Now().Sub(start)
+		// A re-dispatch is still a dispatch attempt — record duration and bump
+		// the attempt counter regardless of the error outcome.
+		e.metrics.observeAction(actionRec.Name, directionForward, took)
+		if err != nil {
+			return fmt.Errorf("action %q Execute on redispatch: %w", actionRec.Name, err)
+		}
+
+		// Push the deadline forward so the next timeout window starts fresh.
+		actionRec.DeadlineAt = deadlineAt(now, dispatch.Deadline)
+		if err := tx.SaveAction(actionRec); err != nil {
+			return fmt.Errorf("save action %q on redispatch: %w", actionRec.Name, err)
+		}
+
+		inst := *current
+		inst.Revision++
+		if err := tx.SaveInstance(inst); err != nil {
+			return fmt.Errorf("save instance on redispatch: %w", err)
+		}
+
+		// buildCommandEnvelope calls NewEnvelope which generates a fresh
+		// MessageID; the CommandID and IdempotencyKey come from the existing
+		// ActionRecord and are therefore STABLE across re-dispatches.
+		env := buildCommandEnvelope(inst, actionRec.Name, actionRec, dispatch, e.config.Now)
+		if err := tx.AppendOutbox(env, dispatch.RoutingKey); err != nil {
+			return fmt.Errorf("append outbox for redispatch %q: %w", actionRec.Name, err)
+		}
+		return nil
+	})
+}
+
+// deadlineAt returns the absolute deadline for an action given its dispatch
+// duration; a zero duration yields the start time.
+func deadlineAt(now time.Time, duration time.Duration) time.Time {
+	if duration <= 0 {
+		return now
+	}
+	return now.Add(duration)
+}
+
+// newUUID generates a v4 UUID string. It mirrors messaging.newMessageID; a
+// later refactor may export a shared UUID helper from the messaging or a
+// dedicated id package. Keep self-contained here to avoid a cross-package
+// change in this task.
+func newUUID() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		// crypto/rand failure is a process-level catastrophe; surface as panic
+		// rather than silently producing a duplicate or empty id.
+		panic(fmt.Errorf("generate command UUID: %w", err))
+	}
+	raw[6] = raw[6]&0x0f | 0x40 // version 4
+	raw[8] = raw[8]&0x3f | 0x80 // variant 10
+	s := hex.EncodeToString(raw[:])
+	return s[0:8] + "-" + s[8:12] + "-" + s[12:16] + "-" + s[16:20] + "-" + s[20:32]
+}

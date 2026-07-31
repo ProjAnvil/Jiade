@@ -10,6 +10,7 @@ jobs:
         with:
           go-version: '1.22'
       - run: go generate ./internal/template
+      - run: git diff --exit-code -- internal/template/templates.tar
       - run: go build ./...
       - run: go test ./...
 
@@ -20,7 +21,70 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-      - run: cd templates/bank && go build ./... && go test ./...
+      - uses: azure/setup-kubectl@v4
+      - run: cd templates/bank && go build ./...
+      - run: cd templates/bank && go test ./...
+      - run: cd templates/bank && go test -race ./internal/platform/...
+      - run: cd templates/bank && make config-check observability-check
+      - run: kubectl kustomize templates/bank/deploy/k8s/overlays/dev >/tmp/bank-dev.yaml
+      - run: kubectl kustomize templates/bank/deploy/k8s/overlays/prod >/tmp/bank-prod.yaml
+      - run: cd templates/bank && make proto && git diff --exit-code -- gen
+
+  bank-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Start bank
+        run: cd templates/bank && make up
+      - name: Smoke
+        run: cd templates/bank && make smoke
+      - name: Observability trace
+        run: cd templates/bank && make observability && make trace-smoke
+      - name: Capture logs
+        if: failure()
+        run: cd templates/bank && docker compose -f compose.yaml -f compose.observability.yaml logs --no-color
+      - name: Cleanup
+        if: always()
+        run: cd templates/bank && docker compose -f compose.yaml -f compose.observability.yaml down --volumes --remove-orphans
+
+  commerce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - uses: azure/setup-kubectl@v4
+      - run: cd templates/commerce && go build ./...
+      - run: cd templates/commerce && go test ./...
+      - run: cd templates/commerce && go test -race ./internal/platform/...
+      - run: cd templates/commerce && make config-check
+      - run: kubectl kustomize templates/commerce/deploy/k8s >/tmp/commerce-k8s.yaml
+
+  commerce-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Start commerce
+        run: |
+          cd templates/commerce
+          make up CUSTOMER_REPLICAS=1 INVENTORY_REPLICAS=1 ORDER_REPLICAS=1 PAYMENT_REPLICAS=1 FULFILLMENT_REPLICAS=1
+      - name: Smoke
+        run: cd templates/commerce && make smoke
+      - name: Observability trace
+        run: cd templates/commerce && make observability && make trace-smoke
+      - name: Capture logs
+        if: failure()
+        run: cd templates/commerce && docker compose -f compose.yaml -f compose.observability.yaml logs --no-color
+      - name: Cleanup
+        if: always()
+        run: cd templates/commerce && docker compose -f compose.yaml -f compose.observability.yaml down --volumes --remove-orphans
 
   e2e:
     runs-on: ubuntu-latest

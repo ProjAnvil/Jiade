@@ -44,15 +44,28 @@ func runSeed(ctx context.Context, cfg fixtures.Config, reset bool) error {
 	for i, d := range allDBs {
 		names[i] = d.name
 	}
-	log.Println("[seed] 1/9 建 7 库")
-	if err := ensureDBs(ctx, reset, names); err != nil {
-		return fmt.Errorf("建库: %w（请先 make up）", err)
+	if os.Getenv("DEDICATED_DATABASES") != "true" {
+		log.Println("[seed] 1/9 建 7 库")
+		if err := ensureDBs(ctx, reset, names); err != nil {
+			return fmt.Errorf("建库: %w（请先 make up）", err)
+		}
+	} else {
+		log.Println("[seed] 1/9 使用已初始化的专属数据库")
 	}
 	log.Println("[seed] 2/9 建 7 库表")
 	for _, d := range allDBs {
 		db, err := pg.Open(d.name)
 		if err != nil {
 			return err
+		}
+		shared, err := os.ReadFile("db/migrations/shared.sql")
+		if err != nil {
+			db.Close()
+			return fmt.Errorf("读 shared.sql: %w（在工程根目录运行）", err)
+		}
+		if err := migrate.Run(ctx, db, string(shared)); err != nil {
+			db.Close()
+			return fmt.Errorf("建共享消息表 %s: %w", d.name, err)
 		}
 		ddl, err := os.ReadFile(d.sql)
 		if err != nil {

@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // ErrBodyNotReplayable reports that a retry-eligible request needs multiple
@@ -65,6 +67,12 @@ func New(config Config) *Client {
 	if config.HTTPClient == nil {
 		config.HTTPClient = http.DefaultClient
 	}
+	transport := config.HTTPClient.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	httpClient := *config.HTTPClient
+	httpClient.Transport = otelhttp.NewTransport(transport)
 	if config.TotalTimeout <= 0 {
 		config.TotalTimeout = defaultTotalTimeout
 	}
@@ -93,7 +101,7 @@ func New(config Config) *Client {
 		config.Sleep = sleep
 	}
 	return &Client{
-		httpClient:     config.HTTPClient,
+		httpClient:     &httpClient,
 		totalTimeout:   config.TotalTimeout,
 		attemptTimeout: config.AttemptTimeout,
 		baseBackoff:    config.BaseBackoff,

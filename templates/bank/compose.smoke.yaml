@@ -1,0 +1,25 @@
+# Smoke-test overlay: enables deterministic failure injection so the
+# smoke suite can drive the saga into each failure + recovery path.
+#
+# Usage (applied by test/smoke.sh before the gates run):
+#   docker compose -f compose.yaml -f compose.smoke.yaml up -d --no-deps \
+#     --force-recreate payment core-banking risk
+#
+# The overlay only adds the BANK_TEST_FAILURES_ENABLED environment
+# variable to the three services whose consumers (or, for payment, whose
+# HTTP starter) consult the testfail package. Production stacks never
+# set this variable, so the smoke branches are inert in any deployment
+# that does not layer this file.
+
+name: bank
+
+services:
+  payment:
+    environment:
+      BANK_TEST_FAILURES_ENABLED: "true"
+  core-banking:
+    environment:
+      BANK_TEST_FAILURES_ENABLED: "true"
+  risk:
+    environment:
+      BANK_TEST_FAILURES_ENABLED: "true"

@@ -1,29 +1,27 @@
-// Package repo is the data access layer of the payment service: SQL of this library + HTTP API of other microservices.
+// Package repo is the data access layer of the payment service: SQL of this library + gRPC queries of other microservices.
 package repo
 
 import (
+	"bank/internal/payment/domain"
+	"bank/internal/platform/serviceclient"
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-
-	"bank/internal/payment/domain"
-	"bank/internal/platform/serviceclient"
 )
 
 // PaymentRepo payment repository. This library only queries transfer_txn/merchant.
 type PaymentRepo struct {
 	db       *sql.DB
-	core     *serviceclient.Client
-	customer *serviceclient.Client
+	core     serviceclient.AccountReader
+	customer serviceclient.CustomerReader
 }
 
 // NewPaymentRepo constructs PaymentRepo.
-func NewPaymentRepo(db *sql.DB) *PaymentRepo {
+func NewPaymentRepo(db *sql.DB, core serviceclient.AccountReader, customer serviceclient.CustomerReader) *PaymentRepo {
 	return &PaymentRepo{
 		db:       db,
-		core:     serviceclient.New(getenv("CORE_BANKING_URL", "http://localhost:18080")),
-		customer: serviceclient.New(getenv("CUSTOMER_URL", "http://localhost:18081")),
+		core:     core,
+		customer: customer,
 	}
 }
 
@@ -87,16 +85,12 @@ func (r *PaymentRepo) GetTransferParties(ctx context.Context, txnID string) (dom
 }
 
 func (r *PaymentRepo) customerNameForAccount(ctx context.Context, accountNo string) (string, error) {
-	var account struct {
-		CustID string `json:"cust_id"`
-	}
-	if err := r.core.Get(ctx, "/api/v1/accounts/"+serviceclient.EscapePath(accountNo), &account); err != nil {
+	account, err := r.core.GetAccount(ctx, accountNo, serviceclient.RequestID(ctx))
+	if err != nil {
 		return "", err
 	}
-	var customer struct {
-		Name string `json:"name"`
-	}
-	if err := r.customer.Get(ctx, "/api/v1/customers/"+serviceclient.EscapePath(account.CustID), &customer); err != nil {
+	customer, err := r.customer.GetCustomer(ctx, account.CustomerID, serviceclient.RequestID(ctx))
+	if err != nil {
 		return "", err
 	}
 	return customer.Name, nil
@@ -150,11 +144,4 @@ func scanTransfer(scan func(dest ...any) error) (domain.Transfer, error) {
 	t.Amount, t.Fee = amt, f
 	t.Channel, t.CounterBank, t.Summary = channel.String, counter.String, summary.String
 	return t, nil
-}
-
-func getenv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
 }

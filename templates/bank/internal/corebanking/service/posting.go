@@ -36,3 +36,11 @@ func BuildEntries(action domain.Action, acct domain.DemandAccount, counterparty 
 		return nil, fmt.Errorf("posting: 未知 action %q", action)
 	}
 }
+
+// BuildHeldTransferEntries builds the balanced debit/credit entries for a held
+// transfer: debit the held (from) account and credit the counterparty (to).
+// It is a thin wrapper around BuildEntries(ActionTransfer) that makes the
+// held-transfer call site self-documenting.
+func BuildHeldTransferEntries(from, to domain.DemandAccount, amount domain.Money) ([]domain.Entry, error) {
+	return BuildEntries(domain.ActionTransfer, from, &to, amount)
+}
