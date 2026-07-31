@@ -38,7 +38,7 @@ body=$(printf '{"payer_customer_id":"%s","payer_account_no":"%s","payee_account_
   "${PAYER_CUSTOMER_ID:-C0000001}" \
   "${PAYER_ACCOUNT_NO:-A000000001}" \
   "${PAYEE_ACCOUNT_NO:-A000000002}")
-if ! curl -fsS \
+if ! curl -fsS --retry 15 --retry-delay 1 --retry-connrefused \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: ${idem_key}" \
   -H "X-Request-ID: ${request_id}" \

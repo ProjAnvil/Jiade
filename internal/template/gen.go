@@ -1,10 +1,12 @@
 package template
 
-// go:generate packages all built-in templates into templates.tar.
-// The working directory is the package directory (internal/template/), so -C points to ../../templates.
-// After changing a template, you must re-`go generate ./internal/template`.
+// gen.go holds the generate directive that packs all built-in templates
+// into templates.tar.  The working directory is the package directory
+// (internal/template/), so pack.go resolves ../../templates relative to
+// here.  After changing a template, you must re-`go generate ./internal/template`.
 //
-// COPYFILE_DISABLE=1 prevents macOS bsdtar from embedding com.apple.* extended
-// attributes (e.g. com.apple.provenance) as extra archive entries, which would
-// inflate the file count and break TestTemplateArchiveMatchesTemplateSources.
-//go:generate env COPYFILE_DISABLE=1 tar -C ../../templates -cf templates.tar bank commerce
+// pack.go replaces the previous `tar -cf` invocation, which produced
+// different output on macOS (bsdtar) and Linux (GNU tar). The Go-based
+// packer is fully deterministic (fixed mtime/uid/gid/mode, sorted entries).
+//
+//go:generate go run pack.go

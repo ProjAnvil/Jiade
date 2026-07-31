@@ -39,7 +39,10 @@ integration-test:
 	go test -tags=integration -p 1 ./...
 
 observability: ## Bring up the otel/prometheus/grafana/jaeger overlay.
-	$(COMPOSE) $(COMPOSE_OBS) --profile observability up -d --wait
+	$(COMPOSE) $(COMPOSE_OBS) --profile observability up -d
+	@# --wait removed: it races with one-shot migrate containers
+	@# (restart: "no") on CI runners.  trace-smoke retries its first
+	@# request so services have time to settle.
 
 observability-down: ## Remove the observability overlay containers only.
 	$(COMPOSE) $(COMPOSE_OBS) --profile observability down --remove-orphans
