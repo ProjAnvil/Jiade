@@ -882,13 +882,20 @@ func deliverCompensation(t *testing.T, engine *Engine, store *memoryStore, workf
 // compensationDispatchOrder scans the outbox and returns the ActionNames of
 // compensation command envelopes, in dispatch (append) order. Non-compensation
 // envelopes are skipped.
+//
+// Discriminator: a command envelope's MessageType now equals its Dispatch
+// RoutingKey (see buildCommandEnvelope/buildCompensationEnvelope). The test
+// fixtures (compDispatch / fwdDispatch) use the conventions "<name>.cmd" for
+// forward and "<name>.compensate.cmd" for compensation, so the suffix
+// ".compensate.cmd" identifies compensation envelopes without relying on a
+// transport-level prefix.
 func compensationDispatchOrder(t *testing.T, store *memoryStore) []string {
 	t.Helper()
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	var order []string
 	for _, e := range store.outbox {
-		if strings.HasPrefix(e.env.MessageType, "compensation.") {
+		if strings.HasSuffix(e.env.MessageType, ".compensate.cmd") {
 			order = append(order, e.env.ActionName)
 		}
 	}

@@ -746,11 +746,16 @@ func (e *Engine) applyCompensationResult(tx Tx, current *Instance, env messaging
 }
 
 // buildCompensationEnvelope assembles the messaging.Envelope for a compensation
-// dispatch command. Mirrors buildCommandEnvelope but uses the
-// "compensation.<action_name>" message-type prefix so consumers can distinguish
-// undo commands from forward commands at the transport layer.
+// dispatch command. The envelope's MessageType is the dispatch RoutingKey —
+// i.e. the DOMAIN routing key the Action's Compensate returns (e.g.
+// "risk.void-payment-authorization.v1", "core.release-hold.v1"). This matches
+// the consumers' switch env.MessageType arms, which route on the same domain
+// keys whether the command is forward or compensation: each compensation
+// command has its own dedicated domain key (void vs authorize, release vs
+// place, reverse vs post), so the consumer never needs a separate
+// "compensation." prefix to tell undo commands apart from forward commands.
 func buildCompensationEnvelope(inst Instance, actionName string, action ActionRecord, dispatch Dispatch, now func() time.Time) messaging.Envelope {
-	messageType := "compensation." + actionName
+	messageType := dispatch.RoutingKey
 	env := messaging.NewEnvelope(messageType, envelopeCorrelationID(inst), dispatch.Payload, now)
 	env.WorkflowID = inst.ID
 	env.ActionName = actionName
@@ -784,14 +789,17 @@ func envelopeCorrelationID(inst Instance) string {
 }
 
 // buildCommandEnvelope assembles the messaging.Envelope for the dispatch
-// command emitted by an action. The engine uses a "command.<action_name>"
-// message type convention (domain-specific message types can be added to
-// Dispatch in a later task if needed). The envelope correlation id is
+// command emitted by an action. The envelope's MessageType is the dispatch
+// RoutingKey — i.e. the DOMAIN routing key the Action's Execute returns (e.g.
+// "risk.authorize-payment.v1", "core.place-hold.v1"). This is the key the
+// downstream consumers' switch env.MessageType arms match on, so a command
+// reaches its handler instead of falling through to the consumer's
+// emitFailure/default branch. The envelope correlation id is
 // Instance.CorrelationID when non-empty, falling back to the workflow instance
 // id for backward compatibility with callers that pre-date the CorrelationID
 // field.
 func buildCommandEnvelope(inst Instance, actionName string, action ActionRecord, dispatch Dispatch, now func() time.Time) messaging.Envelope {
-	messageType := "command." + actionName
+	messageType := dispatch.RoutingKey
 	env := messaging.NewEnvelope(messageType, envelopeCorrelationID(inst), dispatch.Payload, now)
 	env.WorkflowID = inst.ID
 	env.ActionName = actionName
