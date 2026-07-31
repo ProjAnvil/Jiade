@@ -26,6 +26,7 @@ import (
 	"bank/internal/platform/pg"
 	"bank/internal/platform/runx"
 	"bank/internal/platform/serviceclient"
+	"bank/internal/platform/telemetry"
 	"bank/internal/reward"
 	"bank/internal/reward/api"
 	"bank/internal/reward/repo"
@@ -41,6 +42,19 @@ func main() {
 func run() error {
 	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Initialise OpenTelemetry tracing early so the otelgrpc/otelhttp
+	// instrumentation installed in Task 2 exports spans via the global
+	// TracerProvider. OTel init failure MUST NOT block startup: on error we
+	// fall back to a NoOp provider so the process keeps serving traffic.
+	telemetryProvider := initTelemetry(signalCtx, "reward", getenv("INSTANCE_ID", "reward-1"))
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := telemetryProvider.Shutdown(shutdownCtx); err != nil {
+			log.Printf("reward telemetry shutdown: %v", err)
+		}
+		cancel()
+	}()
 
 	dbName := getenv("DB_NAME", "reward_db")
 	db, err := pg.Open(dbName)
@@ -135,4 +149,26 @@ func getenv(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// initTelemetry configures the global OpenTelemetry TracerProvider from the
+// OTEL_* env vars set by compose.observability.yaml. provider.New /
+// provider.Disabled install the provider globally (otel.SetTracerProvider +
+// otel.SetTextMapPropagator), so the otelgrpc/otelhttp instrumentation
+// installed in Task 2 picks it up automatically. On init failure it installs a
+// NoOp provider so OTel problems never block startup.
+func initTelemetry(ctx context.Context, service, instance string) *telemetry.Provider {
+	cfg := telemetry.Config{
+		Service:  service,
+		Instance: instance,
+		Endpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		Enabled:  os.Getenv("OTEL_ENABLED") == "true",
+		Insecure: os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "true",
+	}
+	provider, err := telemetry.New(ctx, cfg)
+	if err != nil {
+		log.Printf("%s: telemetry init 失败，降级到 NoOp provider: %v", service, err)
+		return telemetry.Disabled()
+	}
+	return provider
 }

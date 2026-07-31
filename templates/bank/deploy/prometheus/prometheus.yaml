@@ -33,11 +33,13 @@ scrape_configs:
         port: 8080
         refresh_interval: 15s
     metrics_path: /metrics
+    # dns_sd_configs resolves the queried DNS name to an IP before filling
+    # __address__, so a regex on __address__ can never recover the service
+    # name. __meta_dns_name holds the original queried name (e.g. "payment"),
+    # which IS the service label — no regex or replacement needed.
     relabel_configs:
-      - source_labels: [__address__]
+      - source_labels: [__meta_dns_name]
         target_label: service
-        regex: '^([a-z\-]+):.*'
-        replacement: '${1}'
 
   - job_name: bank-otel-collector
     static_configs:
