@@ -52,6 +52,7 @@ import (
 	"bank/internal/platform/runx"
 	"bank/internal/platform/serviceclient"
 	"bank/internal/platform/telemetry"
+	"bank/internal/platform/testfail"
 	"bank/internal/platform/workflow"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -314,6 +315,17 @@ type paymentWorkflowAPI struct {
 // workflow id and the marshalled PrepareInput.
 func (a *paymentWorkflowAPI) Start(ctx context.Context, req api.StartWorkflowRequest) (api.StartWorkflowResponse, error) {
 	workflowID := "wf-" + a.newUUID()
+
+	// Test-only smoke gate: when BANK_TEST_FAILURES_ENABLED is set and the
+	// Idempotency-Key carries one of the well-known smoke prefixes, the
+	// workflow_id is derived from the key so the prefix propagates to
+	// downstream consumers (which match it to inject the corresponding
+	// failure). The smoke prefixes can never collide with a hex UUID, so
+	// no server-generated workflow_id is affected. Inert in production
+	// (testfail.Enabled() is false when the env var is unset).
+	if smokeID, ok := testfail.WorkflowIDForSmoke(req.IdempotencyKey); ok {
+		workflowID = smokeID
+	}
 
 	// Build the engine's PrepareInput from the REST request. PaymentID mirrors
 	// the workflow id so downstream services can correlate the payment with the

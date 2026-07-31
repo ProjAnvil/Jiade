@@ -37,6 +37,7 @@ import (
 	"bank/internal/corebanking/service"
 	"bank/internal/platform/messaging"
 	"bank/internal/platform/pg"
+	"bank/internal/platform/testfail"
 	"bank/internal/platform/workflow"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -186,6 +187,16 @@ func (c *Consumer) handlePlaceHold(ctx context.Context, q pg.DBTX, env messaging
 		return c.emitFailure(ctx, q, env, EventHoldFailed, RouteHoldFailed,
 			workflow.InvalidMessage, fmt.Sprintf("decode %s payload: %v", env.MessageType, err))
 	}
+
+	// Test-only smoke gate: smoke-insuff workflows report an
+	// insufficient-available-balance failure without touching the ledger,
+	// so the saga classifies it as business_rejected (terminal) and
+	// compensates by voiding the authorization. Inert in production.
+	if testfail.IsInsuff(env.WorkflowID) {
+		return c.emitFailure(ctx, q, env, EventHoldFailed, RouteHoldFailed,
+			workflow.BusinessRejected, "smoke: insufficient available balance")
+	}
+
 	hold, err := c.holds.PlaceHold(ctx, domain.PlaceHoldInput{
 		IdempotencyKey: payloadIdempotencyKey(env, payload.IdempotencyKey),
 		AccountNo:      payload.AccountNo,
@@ -209,6 +220,16 @@ func (c *Consumer) handleReleaseHold(ctx context.Context, q pg.DBTX, env messagi
 		return c.emitFailure(ctx, q, env, EventHoldReleaseFailed, RouteHoldReleaseFailed,
 			workflow.InvalidMessage, fmt.Sprintf("decode %s payload: %v", env.MessageType, err))
 	}
+
+	// Test-only smoke gate: smoke-compfail workflows report a transient
+	// release-hold failure on every compensation attempt. The saga retries
+	// the compensation up to CompensationMaxAttempts (default 5) and then
+	// transitions the instance to compensation_failed. Inert in production.
+	if testfail.IsCompFail(env.WorkflowID) {
+		return c.emitFailure(ctx, q, env, EventHoldReleaseFailed, RouteHoldReleaseFailed,
+			workflow.TransientFailure, "smoke: release-hold compensation failed")
+	}
+
 	hold, err := c.holds.ReleaseHold(ctx, payload.HoldID, payloadIdempotencyKey(env, payload.IdempotencyKey))
 	if err != nil {
 		return c.handleServiceError(ctx, q, env, err, EventHoldReleaseFailed, RouteHoldReleaseFailed)
@@ -227,6 +248,17 @@ func (c *Consumer) handlePostHeldTransfer(ctx context.Context, q pg.DBTX, env me
 		return c.emitFailure(ctx, q, env, EventTransferFailed, RouteTransferFailed,
 			workflow.InvalidMessage, fmt.Sprintf("decode %s payload: %v", env.MessageType, err))
 	}
+
+	// Test-only smoke gate: smoke-transient workflows report a terminal
+	// business_rejected transfer failure (representing a transient ledger
+	// fault that the saga cannot retry past) so the engine triggers
+	// compensation and releases the previously placed hold. The saga ends
+	// in compensated with the hold released. Inert in production.
+	if testfail.IsTransient(env.WorkflowID) {
+		return c.emitFailure(ctx, q, env, EventTransferFailed, RouteTransferFailed,
+			workflow.BusinessRejected, "smoke: transfer posting failed (transient)")
+	}
+
 	_, err := c.transfers.PostHeldTransfer(ctx, service.PostHeldTransfer{
 		IdempotencyKey: payloadIdempotencyKey(env, payload.IdempotencyKey),
 		HoldID:         payload.HoldID,

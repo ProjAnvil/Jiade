@@ -7,7 +7,7 @@ COMPOSE_OBS   := -f compose.yaml -f compose.observability.yaml
 GATEWAY ?= http://localhost:18000
 
 .PHONY: up down seed scale config-check topology-test test integration-test proto
-.PHONY: observability observability-down trace-smoke observability-check
+.PHONY: observability observability-down smoke trace-smoke observability-check
 
 proto:
 	docker run --rm -v "$(CURDIR):/workspace" -w /workspace bufbuild/buf:1.47.2 generate
@@ -44,8 +44,11 @@ observability: ## Bring up the otel/prometheus/grafana/jaeger overlay.
 observability-down: ## Remove the observability overlay containers only.
 	$(COMPOSE) $(COMPOSE_OBS) --profile observability down --remove-orphans
 
-trace-smoke: ## Verify a payment request trace reaches Jaeger.
+trace-smoke: ## Verify a payment request trace reaches Jaeger with REST+gRPC+messaging+workflow spans.
 	GATEWAY=$(GATEWAY) bash test/trace-smoke.sh
+
+smoke: ## Run the 10 bank payment saga smoke gates (requires the stack up).
+	GATEWAY=$(GATEWAY) bash test/smoke.sh
 
 observability-check: ## Validate dashboard JSON and Prometheus config.
 	jq empty deploy/grafana/dashboards/*.json

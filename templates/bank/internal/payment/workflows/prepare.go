@@ -185,10 +185,19 @@ func validateCustomer(c serviceclient.Customer) error {
 	if c.Status != "active" {
 		return ErrCustomerInactive
 	}
-	if c.KYCStatus != "verified" {
+	if !kycVerified(c.KYCStatus) {
 		return ErrKYCNotVerified
 	}
 	return nil
+}
+
+// kycVerified reports whether the KYC status permits a payment. The bank
+// seed fixtures use "passed" (legacy locale spelling) and the customer
+// gRPC may also return "verified"; both are accepted, mirroring the risk
+// domain's kycActive helper so a seeded customer can actually clear the
+// Preparation gate.
+func kycVerified(status string) bool {
+	return status == "verified" || status == "passed"
 }
 
 // validateAccount rejects closed, frozen, or otherwise non-active accounts.

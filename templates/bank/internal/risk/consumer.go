@@ -16,6 +16,7 @@ import (
 
 	"bank/internal/platform/messaging"
 	"bank/internal/platform/pg"
+	"bank/internal/platform/testfail"
 	"bank/internal/platform/workflow"
 	"bank/internal/risk/service"
 
@@ -122,6 +123,21 @@ func (c *Consumer) handleAuthorize(ctx context.Context, q pg.DBTX, env messaging
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		return fmt.Errorf("decode %s payload: %w", env.MessageType, err)
 	}
+
+	// Test-only smoke gate: when BANK_TEST_FAILURES_ENABLED is set and the
+	// workflow_id carries the smoke-reject prefix, emit a
+	// risk.payment-rejected.v1 result event without persisting an
+	// authorization row. The saga treats the rejection as terminal and
+	// compensates (no prior succeeded action → the instance ends
+	// compensated). Inert in production; see testfail docs.
+	if testfail.IsReject(env.WorkflowID) {
+		rejectedEnv, err := buildSmokeRejectEnvelope(env, payload, c.now())
+		if err != nil {
+			return err
+		}
+		return c.outbox.AppendOutbox(ctx, q, rejectedEnv, RoutePaymentRejected)
+	}
+
 	cmd := service.AuthorizeCommand{
 		AuthorizationID: payload.AuthorizationID,
 		WorkflowID:      env.WorkflowID,
@@ -197,6 +213,26 @@ func payloadIdempotencyKey(env messaging.Envelope, fromPayload string) string {
 // ---------------------------------------------------------------------------
 // Result event builders.
 // ---------------------------------------------------------------------------
+
+// buildSmokeRejectEnvelope constructs a risk.payment-rejected.v1 result
+// envelope for the smoke-reject gate. It mirrors the wire shape produced by
+// buildAuthorizeResultEnvelope so the saga engine's AuthorizeRisk.ApplyResult
+// accepts it via the resultRiskRejected branch. The matched_rules marker
+// "SMOKE-INJECTED" makes the rejection auditable as test-injected.
+func buildSmokeRejectEnvelope(cmdEnv messaging.Envelope, payload authorizePaymentPayload, now time.Time) (messaging.Envelope, error) {
+	body, err := json.Marshal(authorizeResultPayload{
+		AuthorizationID: payload.AuthorizationID,
+		WorkflowID:      cmdEnv.WorkflowID,
+		CustomerID:      payload.CustomerID,
+		AmountCents:     payload.AmountCents,
+		Currency:        payload.Currency,
+		MatchedRules:    []string{"SMOKE-INJECTED"},
+	})
+	if err != nil {
+		return messaging.Envelope{}, fmt.Errorf("marshal smoke-reject payload: %w", err)
+	}
+	return makeResultEnvelope(cmdEnv, service.AuthorizeEventRejected, body, now), nil
+}
 
 // buildAuthorizeResultEnvelope constructs the result envelope and routing key
 // for an authorize command outcome.
