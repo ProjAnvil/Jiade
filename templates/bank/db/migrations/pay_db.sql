@@ -179,3 +179,28 @@ CREATE TABLE IF NOT EXISTS payment_intent (
 
 CREATE INDEX IF NOT EXISTS idx_payment_intent_workflow ON payment_intent(workflow_id);
 CREATE INDEX IF NOT EXISTS idx_payment_intent_status ON payment_intent(status);
+
+CREATE TABLE IF NOT EXISTS workflow_operator_audit (
+    audit_id          BIGSERIAL PRIMARY KEY,
+    workflow_id       TEXT NOT NULL,
+    operator          TEXT NOT NULL,
+    action            TEXT NOT NULL,
+    external_reference TEXT NOT NULL,
+    reason            TEXT,
+    previous_state    TEXT NOT NULL,
+    new_state         TEXT NOT NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_operator_audit_workflow
+    ON workflow_operator_audit(workflow_id, created_at);
+
+CREATE OR REPLACE FUNCTION workflow_operator_audit_reject_mutation() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'workflow_operator_audit is immutable: % operation not permitted', TG_OP;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS workflow_operator_audit_no_update ON workflow_operator_audit;
+CREATE TRIGGER workflow_operator_audit_no_update
+    BEFORE UPDATE OR DELETE ON workflow_operator_audit
+    FOR EACH ROW EXECUTE FUNCTION workflow_operator_audit_reject_mutation();

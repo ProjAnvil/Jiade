@@ -134,6 +134,11 @@ spec:
           ports:
             - {name: http, containerPort: 8080}
             - {name: grpc, containerPort: 9090}
+            # PROTECTED operator admin gRPC (port 9091). Restricted by the
+            # NetworkPolicy in networking.yaml; never routed by the public
+            # gateway. The BANK_OPERATOR_TOKEN credential is injected by an
+            # overlay via a Secret env source (never committed).
+            - {name: admin-grpc, containerPort: 9091}
           envFrom:
             - configMapRef: {name: bank-config}
           env:

@@ -125,6 +125,25 @@ spec:
   ports:
     - {name: grpc, port: 9090, targetPort: grpc}
 
+# payment-admin: PROTECTED operator gRPC for the WorkflowAdminService
+# (RetryCompensation / RecordReconciliation). This Service is intentionally
+# SEPARATE from payment-grpc: the public gateway and inter-service gRPC
+# clients never target it, and a NetworkPolicy in networking.yaml restricts
+# ingress to operator/repair identities only. Headless +
+# publishNotReadyAddresses=false mirrors payment-grpc so operator tooling dials
+# only ready pods.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-admin
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector: {app: payment}
+  ports:
+    - {name: admin-grpc, port: 9091, targetPort: admin-grpc}
+
 ---
 apiVersion: v1
 kind: Service

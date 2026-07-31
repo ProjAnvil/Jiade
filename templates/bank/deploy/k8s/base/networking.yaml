@@ -1,0 +1,45 @@
+# NetworkPolicy restricting access to the PROTECTED operator admin gRPC port.
+#
+# The WorkflowAdminService exposed on payment pods at port 9091
+# (RetryCompensation / RecordReconciliation) recovers stuck compensations and
+# records operator-driven reconciliations. Even though every RPC is gated by
+# an x-bank-operator-token compared in constant time, defence in depth
+# requires that ONLY the operator/repair identities that hold the token can
+# even REACH the port. A pod-selected NetworkPolicy is the Kubernetes-native
+# way to enforce that.
+#
+# payment-admin-ingress denies ALL ingress on the admin-grpc port EXCEPT from
+# pods labelled role=bank-operator (an operator/repair identity deployed by an
+# overlay). All other sources — the public gateway, internal services,
+# arbitrary namespaces — cannot even open a TCP connection to :9091 on
+# payment pods. Because Kubernetes NetworkPolicy is allow-list based, the
+# single ingress rule below is sufficient: the absence of any other allow
+# rule for port 9091 IS the deny.
+#
+# This is intentionally separate from any future default-allow inter-service
+# NetworkPolicy: an overlay that opens inter-service mesh traffic must NOT
+# accidentally widen admin-grpc ingress. Overlays in higher environments may
+# TIGHTEN the podSelector / namespaceSelector further (e.g. require both
+# role=bank-operator AND a trusted namespace).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: payment-admin-ingress
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: payment
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow ONLY pods labelled role=bank-operator to reach the admin-grpc port.
+    # The port number matches the containerPort declared in apps.yaml. Every
+    # other source is denied by the absence of any other allow rule.
+    - from:
+        - podSelector:
+            matchLabels:
+              role: bank-operator
+      ports:
+        - protocol: TCP
+          port: 9091

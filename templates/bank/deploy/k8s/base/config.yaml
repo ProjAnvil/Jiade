@@ -12,6 +12,14 @@ data:
   # HTTP / gRPC listen addresses (container ports 8080 / 9090).
   HTTP_ADDR: ":8080"
   GRPC_ADDR: ":9090"
+  # PROTECTED operator admin gRPC (payment only): a SEPARATE listener for the
+  # WorkflowAdminService surface (RetryCompensation / RecordReconciliation).
+  # MUST NOT be exposed on the public gateway; a NetworkPolicy in
+  # deploy/k8s/base/networking.yaml restricts ingress on this port to
+  # operator/repair identities only. The BANK_OPERATOR_TOKEN credential that
+  # authorizes operations is a SECRET and is NOT carried here — overlays inject
+  # it via a Secret env source.
+  ADMIN_GRPC_ADDR: ":9091"
 
   # PostgreSQL connection defaults (non-secret). Host and database name are
   # per-service and set on each Deployment.

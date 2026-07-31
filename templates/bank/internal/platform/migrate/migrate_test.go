@@ -24,6 +24,43 @@ func TestSplitStatements_Empty(t *testing.T) {
 	}
 }
 
+// TestSplitStatements_DollarQuotedBodyKeepsInternalSemicolons locks in the
+// PL/pgSQL handling: a function/trigger body wrapped in $$ ... $$ (or a tagged
+// $body$ ... $body$) may contain semicolons that must NOT split the statement.
+func TestSplitStatements_DollarQuotedBodyKeepsInternalSemicolons(t *testing.T) {
+	ddl := `CREATE TABLE a(x int);
+CREATE OR REPLACE FUNCTION immut() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'immutable: %', TG_OP;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER immut_no_update BEFORE UPDATE ON a FOR EACH ROW EXECUTE FUNCTION immut();`
+	stmts := SplitStatements(ddl)
+	if len(stmts) != 3 {
+		t.Fatalf("want 3 statements, got %d: %#v", len(stmts), stmts)
+	}
+	for _, s := range stmts {
+		if !isSupportedSchemaStatement(s) {
+			t.Errorf("non-DDL statement after split: %q", s)
+		}
+	}
+	// The CREATE FUNCTION statement must include its full body, including the
+	// inner "END;" and the closing "$$ LANGUAGE plpgsql".
+	if !strings.Contains(stmts[1], "END;") || !strings.Contains(stmts[1], "$$ LANGUAGE plpgsql") {
+		t.Errorf("CREATE FUNCTION split lost body content: %q", stmts[1])
+	}
+	// A tagged dollar quote ($body$) must round-trip too.
+	tagged := `CREATE FUNCTION t() RETURNS void AS $body$
+BEGIN
+    PERFORM 1;
+END;
+$body$ LANGUAGE plpgsql;`
+	got := SplitStatements(tagged)
+	if len(got) != 1 {
+		t.Fatalf("tagged dollar quote: want 1 statement, got %d: %#v", len(got), got)
+	}
+}
+
 func TestSupportedSchemaStatement(t *testing.T) {
 	tests := []struct {
 		statement string
@@ -31,6 +68,7 @@ func TestSupportedSchemaStatement(t *testing.T) {
 	}{
 		{"CREATE TABLE customer(id text)", true},
 		{"ALTER TABLE customer ADD COLUMN status text", true},
+		{"DROP TRIGGER IF EXISTS immut_no_update ON workflow_operator_audit", true},
 		{"INSERT INTO customer(id) VALUES ('C1')", false},
 		{"", false},
 	}
@@ -47,7 +85,7 @@ func isSupportedSchemaStatement(statement string) bool {
 		return false
 	}
 	switch strings.ToUpper(fields[0]) {
-	case "CREATE", "ALTER":
+	case "CREATE", "ALTER", "DROP":
 		return true
 	default:
 		return false

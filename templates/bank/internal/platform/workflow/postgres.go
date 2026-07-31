@@ -95,16 +95,16 @@ func (s *PostgresStore) loadInstanceRow(ctx context.Context, q pg.DBTX, id strin
 // committed state outside any Store transaction).
 func scanInstanceRowPG(s pgRowScanner) (Instance, error) {
 	var (
-		inst             Instance
-		input            []byte
-		preparedCtx      []byte
-		leaseOwner       sql.NullString
-		leaseUntil       sql.NullTime
-		nextWakeup       sql.NullTime
-		operational      sql.NullTime
-		lastErrorClass   sql.NullString
-		lastError        sql.NullString
-		correlationID    sql.NullString
+		inst           Instance
+		input          []byte
+		preparedCtx    []byte
+		leaseOwner     sql.NullString
+		leaseUntil     sql.NullTime
+		nextWakeup     sql.NullTime
+		operational    sql.NullTime
+		lastErrorClass sql.NullString
+		lastError      sql.NullString
+		correlationID  sql.NullString
 	)
 	if err := s.Scan(
 		&inst.ID, &inst.Type, &inst.Version, &inst.Status, &input, &preparedCtx,
@@ -144,17 +144,17 @@ func scanInstanceRowPG(s pgRowScanner) (Instance, error) {
 // scanActionRowPG populates an ActionRecord from a single workflow_action row.
 func scanActionRowPG(s pgRowScanner) (ActionRecord, error) {
 	var (
-		rec            ActionRecord
-		status         string
-		direction      string
-		idemKey        string
-		commandID      sql.NullString
-		resultID       sql.NullString
-		deadlineAt     sql.NullTime
-		output         []byte
-		errClass       sql.NullString
-		errMsg         sql.NullString
-		acceptedTypes  []byte // nullable jsonb; NULL → nil slice
+		rec           ActionRecord
+		status        string
+		direction     string
+		idemKey       string
+		commandID     sql.NullString
+		resultID      sql.NullString
+		deadlineAt    sql.NullTime
+		output        []byte
+		errClass      sql.NullString
+		errMsg        sql.NullString
+		acceptedTypes []byte // nullable jsonb; NULL → nil slice
 	)
 	if err := s.Scan(
 		&rec.Index, &rec.Name, &status, &direction, &rec.Attempt, &idemKey,
@@ -283,6 +283,34 @@ func (s *PostgresStore) WithInstance(ctx context.Context, id string, fn func(Tx)
 	// harmless no-op); the discarded error is intentional. We don't need a
 	// separate "committed" flag.
 	defer func() { _ = tx.Rollback() }()
+	if err = s.runInstanceLocked(ctx, tx, id, fn); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx for %q: %w", id, err)
+	}
+	return nil
+}
+
+// WithInstanceTx runs fn against the instance identified by id, locked within
+// the caller-supplied *sql.Tx. Unlike WithInstance it does NOT commit — the
+// caller owns the transaction (typically via pg.RunInTx) and is responsible for
+// commit/rollback. This lets a caller persist its own rows (e.g. an immutable
+// operator-audit row) atomically with the instance state change: either both
+// commit or both roll back.
+//
+// The caller's *sql.Tx must still be open. loadInstanceRow acquires the row
+// lock (SELECT ... FOR UPDATE) within that tx, so concurrent WithInstance /
+// WithInstanceTx callers on the same instance serialize as usual.
+func (s *PostgresStore) WithInstanceTx(ctx context.Context, tx *sql.Tx, id string, fn func(Tx) error) error {
+	return s.runInstanceLocked(ctx, tx, id, fn)
+}
+
+// runInstanceLocked is the shared lock-and-run body used by both WithInstance
+// (which owns its tx) and WithInstanceTx (which borrows the caller's tx). It
+// loads the instance row with a FOR UPDATE lock, wraps it in a pgTx, and runs
+// fn. It neither begins nor commits a transaction.
+func (s *PostgresStore) runInstanceLocked(ctx context.Context, tx *sql.Tx, id string, fn func(Tx) error) error {
 	inst, err := s.loadInstanceRow(ctx, tx, id)
 	if err != nil {
 		return err
@@ -291,13 +319,7 @@ func (s *PostgresStore) WithInstance(ctx context.Context, id string, fn func(Tx)
 	// transparently. The pointer is stable for the lifetime of fn so
 	// read-your-writes works as the Tx contract requires.
 	pTx := &pgTx{store: s, tx: tx, inst: &inst, loadedRevision: inst.Revision}
-	if err = fn(pTx); err != nil {
-		return err
-	}
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("commit tx for %q: %w", id, err)
-	}
-	return nil
+	return fn(pTx)
 }
 
 // pgTx is the per-instance transactional unit handed to Engine code inside

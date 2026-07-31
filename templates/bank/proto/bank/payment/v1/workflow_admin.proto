@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package bank.payment.v1;
+
+option go_package = "bank/gen/bank/payment/v1;paymentv1";
+
+// WorkflowAdminService is the PROTECTED operator gRPC surface for recovering
+// stuck payment compensations. It MUST NOT be exposed on the public gateway;
+// access is restricted by NetworkPolicy and an x-bank-operator-token metadata
+// credential verified in constant time by the server.
+service WorkflowAdminService {
+  // RetryCompensation re-dispatches the compensation command for an instance
+  // stuck in compensation_failed. It is the operator-driven recovery path for
+  // a compensation that exhausted its automatic retries.
+  rpc RetryCompensation(RetryCompensationRequest) returns (WorkflowStatus);
+
+  // RecordReconciliation resolves a stuck compensation action with an
+  // immutable external reconciliation reference AFTER validating the current
+  // core-banking state. A compensation can be resolved ONLY through this RPC:
+  // it requires a non-empty external reference plus a current-state validation
+  // (funds hold released / reversal voucher + balance reconciliation).
+  rpc RecordReconciliation(RecordReconciliationRequest) returns (WorkflowStatus);
+}
+
+message RetryCompensationRequest {
+  string workflow_id = 1;
+  string reason = 2;
+}
+
+message RecordReconciliationRequest {
+  string workflow_id = 1;
+  string action_name = 2;
+  string external_reference = 3;
+  string reason = 4;
+}
+
+message WorkflowStatus {
+  string workflow_id = 1;
+  string status = 2;
+  string current_action = 3;
+}

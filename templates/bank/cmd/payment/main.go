@@ -27,8 +27,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -36,7 +38,9 @@ import (
 
 	corev1 "bank/gen/bank/core/v1"
 	customerv1 "bank/gen/bank/customer/v1"
+	paymentv1 "bank/gen/bank/payment/v1"
 	"bank/internal/payment"
+	"bank/internal/payment/admin"
 	"bank/internal/payment/api"
 	"bank/internal/payment/repo"
 	"bank/internal/payment/service"
@@ -50,6 +54,7 @@ import (
 	"bank/internal/platform/workflow"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"google.golang.org/grpc"
 )
 
 func main() {
@@ -111,16 +116,16 @@ func run() error {
 	starter := payment.NewWorkflowStarter(db, intentRepo, wfStore, time.Now)
 	completionOutbox := payment.NewPgCompletionOutbox(db)
 	workflowAPI := &paymentWorkflowAPI{
-		starter:    starter,
-		intents:    intentRepo,
-		wfStore:    wfStore,
-		engine:     engine,
-		newUUID:    newWorkflowUUID,
+		starter: starter,
+		intents: intentRepo,
+		wfStore: wfStore,
+		engine:  engine,
+		newUUID: newWorkflowUUID,
 	}
 
 	// --- HTTP handlers: read-only service + workflow REST API ---
 	handlers := &api.Handlers{
-		Svc:      service.NewPaymentService(repo.NewPaymentRepo(db, accountReader, customerReader)),
+		Svc:       service.NewPaymentService(repo.NewPaymentRepo(db, accountReader, customerReader)),
 		Workflows: workflowAPI,
 	}
 	httpAddr := getenv("HTTP_ADDR", ":8080")
@@ -166,6 +171,38 @@ func run() error {
 	}
 	relay := payment.NewOutboxRelay(db, relayPublisher)
 
+	// --- PROTECTED operator admin gRPC (Task 3: protected compensation ops) ---
+	// The admin surface exposes RetryCompensation and RecordReconciliation
+	// behind a constant-time token check and an immutable audit row. It MUST
+	// NOT be exposed on the public gateway: it binds to its OWN listener
+	// (ADMIN_GRPC_ADDR, default :9091) and is restricted by a NetworkPolicy in
+	// deploy/k8s/base. The token travels in the x-bank-operator-token metadata
+	// key; an empty token FAILS CLOSED so a misconfigured deployment cannot
+	// accidentally authenticate an operator action.
+	adminToken := getenv("BANK_OPERATOR_TOKEN", "")
+	instanceReader := admin.NewPgInstanceReader(wfStore)
+	reconciler := admin.NewActionReconciler(instanceReader, notConfiguredCoreBankingInspector{})
+	adminGateway := admin.NewPgGateway(db, wfStore, engine)
+	adminServer := admin.NewServer(admin.Config{
+		TokenVerifier: admin.NewTokenVerifier(adminToken),
+		Gateway:       adminGateway,
+		Reconciler:    reconciler,
+	})
+	adminGRPC := grpcx.NewServer(grpcx.ServerConfig{
+		Ready: func(ctx context.Context) error { return db.PingContext(ctx) },
+	})
+	paymentv1.RegisterWorkflowAdminServiceServer(adminGRPC, adminServer)
+	adminAddr := getenv("ADMIN_GRPC_ADDR", ":9091")
+	adminListener, err := net.Listen("tcp", adminAddr)
+	if err != nil {
+		return fmt.Errorf("payment admin gRPC 监听 %s 失败: %w", adminAddr, err)
+	}
+	if adminToken == "" {
+		// Fail closed at startup: a misconfigured token rejects every RPC, but
+		// log the misconfiguration so operators can see the surface is inert.
+		log.Printf("WARNING: BANK_OPERATOR_TOKEN 未配置 — admin gRPC 将拒绝所有操作")
+	}
+
 	// Workers: each runs under the signal context via runx.Serve. If any one
 	// exits, runx.Serve cancels the context so the others and HTTP shut down.
 	workers := []runx.Worker{
@@ -182,10 +219,56 @@ func run() error {
 		runx.WorkerFunc(func(ctx context.Context) error {
 			return recovery.Run(ctx)
 		}),
+		// Protected admin gRPC: serves RetryCompensation + RecordReconciliation
+		// on a separate port. On shutdown it drains in-flight RPCs (up to the
+		// shutdown budget) before forcing Stop so a long-running reconciliation
+		// cannot hang process termination.
+		runx.WorkerFunc(func(ctx context.Context) error {
+			serveErr := make(chan error, 1)
+			go func() { serveErr <- adminGRPC.Serve(adminListener) }()
+			select {
+			case <-ctx.Done():
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				grpcx.Shutdown(shutdownCtx, adminGRPC)
+				cancel()
+				return nil
+			case err := <-serveErr:
+				if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+					return fmt.Errorf("admin gRPC: %w", err)
+				}
+				return nil
+			}
+		}),
 	}
 
-	log.Printf("payment HTTP 监听 %s (db=%s), 结果队列=%s", httpAddr, dbName, resultQueue)
+	log.Printf("payment HTTP 监听 %s (db=%s), 结果队列=%s, admin gRPC 监听 %s",
+		httpAddr, dbName, resultQueue, adminAddr)
 	return runx.Serve(signalCtx, srv, nil, 5*time.Second, workers...)
+}
+
+// notConfiguredCoreBankingInspector is a fail-closed placeholder for the
+// production CoreBankingInspector. Each method returns a descriptive error so
+// the admin service's RecordReconciliation RPC refuses to mark any
+// compensation resolved until the bank wires a real inspector against its
+// core-banking query APIs (the inspector depends on query RPCs the
+// core-banking template does not yet expose). The reconciler maps any non-nil
+// error to FailedPrecondition.
+//
+// RetryCompensation does NOT consult the inspector and is fully operational
+// today; only RecordReconciliation's external-state validation is gated on a
+// real inspector.
+type notConfiguredCoreBankingInspector struct{}
+
+func (notConfiguredCoreBankingInspector) HoldReleased(context.Context, string) error {
+	return errors.New("core-banking inspector not configured: hold-released check unavailable; wire a real CoreBankingInspector before recording reconciliations")
+}
+
+func (notConfiguredCoreBankingInspector) ReversalVoucherExists(context.Context, string) error {
+	return errors.New("core-banking inspector not configured: reversal-voucher check unavailable; wire a real CoreBankingInspector before recording reconciliations")
+}
+
+func (notConfiguredCoreBankingInspector) BalancesReconcile(context.Context, string) error {
+	return errors.New("core-banking inspector not configured: balance-reconciliation check unavailable; wire a real CoreBankingInspector before recording reconciliations")
 }
 
 // ---------------------------------------------------------------------------

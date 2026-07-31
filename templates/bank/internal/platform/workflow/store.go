@@ -32,6 +32,12 @@ var (
 	// not registered in the Registry. This prevents a worker from silently
 	// abandoning instances whose definitions it cannot resolve at startup.
 	ErrDefinitionUnavailable = errors.New("workflow definition unavailable for non-terminal instance")
+	// ErrInvalidCompensationState is returned by the operator-driven
+	// compensation operations (RetryCompensation, ResolveCompensation) when the
+	// instance or target action is not in the state the operation requires
+	// (e.g. the instance is not compensation_failed, or the named action is not
+	// compensation_failed/compensating). Callers map it to FailedPrecondition.
+	ErrInvalidCompensationState = errors.New("workflow instance is not in a resolvable compensation state")
 )
 
 // Store is the persistence boundary the Engine uses to create workflow
