@@ -11,6 +11,7 @@ set -u
 cd "$(dirname "$0")/.."
 
 GNS=${GNS:-http://localhost:18080}
+GATEWAY=${GATEWAY:-http://localhost:18070}
 DCN01=${DCN01:-http://localhost:18081}
 DCN02=${DCN02:-http://localhost:18082}
 DCN03=${DCN03:-http://localhost:18083}
@@ -62,17 +63,17 @@ wait_url() { # <url> <limit_sec>
 
 echo "== Gate 1: DCN 内转账（本地事务）=="
 b1=$(balance $DCN01 1001); b2=$(balance $DCN01 1002)
-curl -sf -X POST "$DCN01/transfer" -H 'Content-Type: application/json' \
+curl -sf -X POST "$GATEWAY/dcn/transfer" -H 'Content-Type: application/json' \
   -d '{"fromId":1001,"toId":1002,"amount":"100.00"}' >/dev/null \
-  && pass "本地转账请求成功" || fail "本地转账请求失败"
+  && pass "本地转账请求成功（经网关）" || fail "本地转账请求失败（经网关）"
 assert_delta "$b1" "$(balance $DCN01 1001)" 100 "1001 扣款 100"
 assert_delta "$b2" "$(balance $DCN01 1002)" -100 "1002 入账 100"
 
 echo "== Gate 2: 跨 DCN 转账（RMB 总事务）=="
 b1=$(balance $DCN01 1001); b2=$(balance $DCN02 2001)
-curl -sf -X POST "$DCN01/transfer" -H 'Content-Type: application/json' \
+curl -sf -X POST "$GATEWAY/dcn/transfer" -H 'Content-Type: application/json' \
   -d '{"fromId":1001,"toId":2001,"amount":"50.00"}' >/dev/null \
-  && pass "跨 DCN 转账请求成功" || fail "跨 DCN 转账请求失败"
+  && pass "跨 DCN 转账请求成功（经网关）" || fail "跨 DCN 转账请求失败（经网关）"
 assert_delta "$b1" "$(balance $DCN01 1001)" 50 "1001 扣款 50"
 assert_delta "$b2" "$(balance $DCN02 2001)" -50 "2001 入账 50"
 

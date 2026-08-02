@@ -99,6 +99,13 @@ services:
       REDIS_ADDR: gns-redis:6379
     ports: ["18080:8080"]
     networks: [global-net]
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.gns.rule: PathPrefix(`/gns`)
+      traefik.http.routers.gns.entrypoints: web
+      traefik.http.routers.gns.middlewares: gns-strip
+      traefik.http.middlewares.gns-strip.stripprefix.prefixes: /gns
+      traefik.http.services.gns.loadbalancer.server.port: "8080"
     depends_on:
       gns-db:
         condition: service_healthy
@@ -118,6 +125,13 @@ services:
       TX_TIMEOUT_SECONDS: "5"
     ports: ["18090:8080"]
     networks: [global-net]
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.rmb.rule: PathPrefix(`/rmb`)
+      traefik.http.routers.rmb.entrypoints: web
+      traefik.http.routers.rmb.middlewares: rmb-strip
+      traefik.http.middlewares.rmb-strip.stripprefix.prefixes: /rmb
+      traefik.http.services.rmb.loadbalancer.server.port: "8080"
     depends_on:
       rmb-db:
         condition: service_healthy
@@ -137,6 +151,13 @@ services:
       GNS_ENDPOINT: http://gns:8080
     ports: ["18091:8080"]
     networks: [global-net]
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.adm.rule: PathPrefix(`/adm`)
+      traefik.http.routers.adm.entrypoints: web
+      traefik.http.routers.adm.middlewares: adm-strip
+      traefik.http.middlewares.adm-strip.stripprefix.prefixes: /adm
+      traefik.http.services.adm.loadbalancer.server.port: "8080"
     depends_on:
       adm-db:
         condition: service_healthy
@@ -170,11 +191,35 @@ services:
       GNS_ENDPOINT: http://gns:8080
     ports: ["18092:8080"]
     networks: [global-net]
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.batch.rule: PathPrefix(`/batch`)
+      traefik.http.routers.batch.entrypoints: web
+      traefik.http.routers.batch.middlewares: batch-strip
+      traefik.http.middlewares.batch-strip.stripprefix.prefixes: /batch
+      traefik.http.services.batch.loadbalancer.server.port: "8080"
     depends_on:
       batch-db:
         condition: service_healthy
       gns:
         condition: service_started
+
+  traefik:
+    image: traefik:v3.1
+    container_name: dcn-traefik
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=dcn-global
+      - --entrypoints.web.address=:80
+      - --api.insecure=true
+    ports:
+      - "18070:80"    # 统一入口
+      - "18071:8080"  # dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [global-net]
 
   # ============ IDC 1（idc1）：dcn01 + dcn03 主库 ============
   dcn01-db:
@@ -219,6 +264,13 @@ services:
       RATE_LIMIT_RPS: "200"
     ports: ["18081:8080"]
     networks: [idc1, global-net]
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.dcn.rule: PathPrefix(`/dcn`)
+      traefik.http.routers.dcn.entrypoints: web
+      traefik.http.routers.dcn.middlewares: dcn-strip
+      traefik.http.middlewares.dcn-strip.stripprefix.prefixes: /dcn
+      traefik.http.services.dcn.loadbalancer.server.port: "8080"
     depends_on:
       dcn01-db:
         condition: service_healthy
@@ -245,6 +297,13 @@ services:
       RATE_LIMIT_RPS: "200"
     ports: ["18083:8080"]
     networks: [idc1, global-net]
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.dcn.rule: PathPrefix(`/dcn`)
+      traefik.http.routers.dcn.entrypoints: web
+      traefik.http.routers.dcn.middlewares: dcn-strip
+      traefik.http.middlewares.dcn-strip.stripprefix.prefixes: /dcn
+      traefik.http.services.dcn.loadbalancer.server.port: "8080"
     depends_on:
       dcn03-db:
         condition: service_healthy
@@ -285,6 +344,13 @@ services:
       RATE_LIMIT_RPS: "200"
     ports: ["18082:8080"]
     networks: [idc2, global-net]
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.dcn.rule: PathPrefix(`/dcn`)
+      traefik.http.routers.dcn.entrypoints: web
+      traefik.http.routers.dcn.middlewares: dcn-strip
+      traefik.http.middlewares.dcn-strip.stripprefix.prefixes: /dcn
+      traefik.http.services.dcn.loadbalancer.server.port: "8080"
     depends_on:
       dcn02-db:
         condition: service_healthy
@@ -327,6 +393,13 @@ services:
       RATE_LIMIT_RPS: "200"
     ports: ["18084:8080"]
     networks: [idc2, global-net]
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.dcn.rule: PathPrefix(`/dcn`)
+      traefik.http.routers.dcn.entrypoints: web
+      traefik.http.routers.dcn.middlewares: dcn-strip
+      traefik.http.middlewares.dcn-strip.stripprefix.prefixes: /dcn
+      traefik.http.services.dcn.loadbalancer.server.port: "8080"
     depends_on:
       dcn04-db:
         condition: service_healthy
