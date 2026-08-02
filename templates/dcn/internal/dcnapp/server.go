@@ -36,7 +36,7 @@ func NewServer(dcn string, db *sql.DB, gns, rmb string, mqc *mq.Conn, rps float6
 	return &Server{dcn: dcn, db: db, gns: gns, rmb: rmb, mqc: mqc, rps: rps, rate: rate, hc: newHTTPClient()}
 }
 
-// Handler 返回带限流与 metrics 的路由；/metrics 与 /healthz 一样不受限流约束。
+// Handler 返回带限流与 metrics 的路由；/metrics 经 metrics.Mount 挂载在限流器之外。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {

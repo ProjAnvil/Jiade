@@ -1,6 +1,7 @@
 package dcnapp
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -14,7 +15,7 @@ import (
 var bizDateRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
 // InterestFor 计算单账户日终利息：余额×日利率，2 位小数 half-even 取舍
-// （shopspring/decimal RoundBank：恰好 5 时向偶数位取舍，如 0.0015→0.00、0.0025→0.00）。
+// （shopspring/decimal RoundBank：恰好 5 时向偶数位取舍，如 0.005→0.00、0.015→0.02）。
 func InterestFor(balance, rate decimal.Decimal) decimal.Decimal {
 	return balance.Mul(rate).RoundBank(2)
 }
@@ -60,6 +61,10 @@ func (s *Server) handleInterestBatch(w http.ResponseWriter, r *http.Request) {
 		list = append(list, a)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		httpx.Error(w, 500, err.Error())
+		return
+	}
 
 	total := decimal.Zero
 	count := 0
@@ -81,7 +86,7 @@ func (s *Server) handleInterestBatch(w http.ResponseWriter, r *http.Request) {
 		moveErr := applyMovement(tx, txID, a.id, "CREDIT", interest)
 		if moveErr != nil {
 			tx.Rollback()
-			if moveErr == errDuplicate {
+			if errors.Is(moveErr, errDuplicate) {
 				continue // 重跑幂等：已入账的跳过
 			}
 			httpx.Error(w, 500, moveErr.Error())

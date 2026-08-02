@@ -89,9 +89,9 @@ func (c *fakeConn) Query(string, []driver.Value) (driver.Rows, error) { return &
 
 type fakeRows struct{}
 
-func (r *fakeRows) Columns() []string          { return []string{"status"} }
-func (r *fakeRows) Close() error               { return nil }
-func (r *fakeRows) Next([]driver.Value) error  { return io.EOF }
+func (r *fakeRows) Columns() []string         { return []string{"status"} }
+func (r *fakeRows) Close() error              { return nil }
+func (r *fakeRows) Next([]driver.Value) error { return io.EOF }
 
 type fakeResult struct{}
 

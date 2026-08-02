@@ -10,9 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/shopspring/decimal"
 
 	"dcn/internal/platform/httpx"
 	"dcn/internal/platform/metrics"
@@ -140,12 +143,17 @@ func (s *Server) handleCreateInterest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var status string
-	err := s.db.QueryRow(`SELECT status FROM batch_job WHERE biz_date = ?`, req.BizDate).Scan(&status)
+	var stale bool
+	err := s.db.QueryRow(
+		`SELECT status, created_at < NOW() - INTERVAL 10 MINUTE FROM batch_job WHERE biz_date = ?`,
+		req.BizDate).Scan(&status, &stale)
 	switch {
-	case err == nil && status != "FAILED":
-		s.respondJob(w, req.BizDate) // RUNNING/SUCCEEDED：幂等返回当前状态
+	case err == nil && status != "FAILED" && !(status == "RUNNING" && stale):
+		s.respondJob(w, req.BizDate) // RUNNING（未过期）/SUCCEEDED：幂等返回当前状态
 		return
-	case err == nil: // FAILED：允许重试，仅重跑失败单元（成功单元靠 journal 幂等兜底）
+	case err == nil:
+		// FAILED 允许重试，仅重跑失败单元（成功单元靠 journal 幂等兜底）；
+		// 过期 RUNNING 视为僵尸任务（进程中途崩溃或 finishJob 落库失败），允许重跑。
 		if _, err := s.db.Exec(
 			`UPDATE batch_job SET status = 'RUNNING', finished_at = NULL WHERE biz_date = ?`,
 			req.BizDate); err != nil {
@@ -171,10 +179,18 @@ func (s *Server) handleCreateInterest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	results := s.runOnUnits(r.Context(), req.BizDate, units)
-	total := "0"
 	failed := false
-	var sum float64
+	sum := decimal.Zero
 	for _, res := range results {
+		if res.Err == nil {
+			f, err := decimal.NewFromString(res.Interest)
+			if err != nil {
+				// 分单元利息解析失败按该单元 FAILED 处理，走既有失败路径
+				res.Err = fmt.Errorf("parse unit interest %q: %w", res.Interest, err)
+			} else {
+				sum = sum.Add(f)
+			}
+		}
 		st, errStr := "DONE", ""
 		if res.Err != nil {
 			st, errStr = "FAILED", res.Err.Error()
@@ -191,13 +207,8 @@ func (s *Server) handleCreateInterest(w http.ResponseWriter, r *http.Request) {
 			httpx.Error(w, 500, err.Error())
 			return
 		}
-		if res.Err == nil {
-			var f float64
-			fmt.Sscanf(res.Interest, "%f", &f)
-			sum += f
-		}
 	}
-	total = fmt.Sprintf("%.2f", sum)
+	total := sum.StringFixedBank(2)
 	if failed {
 		s.finishJob(req.BizDate, "FAILED", total)
 	} else {
@@ -207,9 +218,13 @@ func (s *Server) handleCreateInterest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) finishJob(bizDate, status, total string) {
-	_, _ = s.db.Exec(
+	if _, err := s.db.Exec(
 		`UPDATE batch_job SET status = ?, total_interest = ?, finished_at = NOW() WHERE biz_date = ?`,
-		status, total, bizDate)
+		status, total, bizDate); err != nil {
+		// 终态落库失败不返回错误（调用方已无响应路径），但必须可见：
+		// 漏记会留下僵尸 RUNNING，只能靠 10 分钟过期重试兜底。
+		log.Printf("finishJob %s -> %s: %v", bizDate, status, err)
+	}
 }
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
@@ -253,6 +268,10 @@ func (s *Server) respondJob(w http.ResponseWriter, bizDate string) {
 			return
 		}
 		units = append(units, u)
+	}
+	if err := rows.Err(); err != nil {
+		httpx.Error(w, 500, err.Error())
+		return
 	}
 	httpx.JSON(w, 200, map[string]any{
 		"bizDate": bizDate, "type": "INTEREST", "status": status,

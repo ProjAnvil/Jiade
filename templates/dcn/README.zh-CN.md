@@ -49,7 +49,11 @@ flowchart TB
         adm --> mq
         batch --> batchdb
         batch --> gns
-        traefik -->|"/gns/* /rmb/* /adm/* /batch/* /dcn/*"| gns
+        traefik -->|"/gns/*"| gns
+        traefik -->|"/rmb/*"| rmb
+        traefik -->|"/adm/*"| adm
+        traefik -->|"/batch/*"| batch
+        traefik -->|"/dcn/*"| dcn01app & dcn02app & dcn03app & dcn04app
     end
     subgraph obs["观测栈"]
         prom["prometheus"]

@@ -140,7 +140,7 @@ sequenceDiagram
     AD-->>C: {consistent:true, admTotal, dcnTotal, perDcn}
 ```
 
-失败语义：任一单元调用失败 → 任务置 `FAILED`（已记成功单元的利息仍计入 total，靠 journal 幂等兜底）；`FAILED` 允许重试，重试覆盖分单元结果；`RUNNING/SUCCEEDED` 重复触发直接幂等返回。批量调度只做「触发 + 归集」，不参与单元内事务。
+失败语义：任一单元调用失败 → 任务置 `FAILED`（已记成功单元的利息仍计入 total，靠 journal 幂等兜底）；`FAILED` 允许重试，重试覆盖分单元结果；`RUNNING/SUCCEEDED` 重复触发直接幂等返回；`RUNNING` 超过 10 分钟视为僵尸任务，重新 POST 同 bizDate 会重跑。批量调度只做「触发 + 归集」，不参与单元内事务。
 
 ## 4. 事务协调状态机
 

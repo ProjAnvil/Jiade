@@ -35,11 +35,11 @@ func personName(r *rand.Rand) string {
 }
 
 // initialBalance 每单元前 2 户固定 1000.00（verify/README 依赖），其余 100–100000 随机。
-func initialBalance(r *rand.Rand, seg, i int) string {
+func initialBalance(r *rand.Rand, i int) string {
 	if i < 2 {
 		return "1000.00"
 	}
-	cents := 10000 + r.Int63n(9990000) // 100.00 ~ 100000.00（单位：分）
+	cents := 10000 + r.Int63n(9990001) // 100.00 ~ 100000.00（单位：分）
 	return fmt.Sprintf("%.2f", float64(cents)/100)
 }
 
@@ -66,7 +66,7 @@ func main() {
 		r := rand.New(rand.NewSource(int64(seg))) // 每单元确定性
 		for i := 0; i < n; i++ {
 			name := personName(r)
-			bal := initialBalance(r, seg, i)
+			bal := initialBalance(r, i)
 			body, _ := json.Marshal(map[string]string{
 				"name":        name,
 				"initBalance": bal,

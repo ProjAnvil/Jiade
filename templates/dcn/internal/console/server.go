@@ -72,6 +72,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.docker.Get("http://docker/containers/json?all=1")
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
 		http.Error(w, `{"error":"docker unreachable"}`, 502)
 		return
 	}
@@ -84,6 +85,7 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) proxy(w http.ResponseWriter, target string) {
 	resp, err := s.hc.Get(target)
 	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
 		http.Error(w, `{"error":"upstream unreachable"}`, 502)
 		return
 	}

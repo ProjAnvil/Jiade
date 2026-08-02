@@ -375,6 +375,7 @@ func (c *Coordinator) advance(txID string) error {
 					if err := tx.Commit(); err != nil {
 						return err
 					}
+					// 指标口径为到达终态次数：迟到回执再补偿路径会使同一 tx 的 COMPENSATED 计两次
 					metrics.IncTx("FAILED")
 					return nil
 				}
@@ -388,6 +389,7 @@ func (c *Coordinator) advance(txID string) error {
 			if err := tx.Commit(); err != nil {
 				return err
 			}
+			// 指标口径为到达终态次数：迟到回执再补偿路径会使同一 tx 的 COMPENSATED 计两次
 			metrics.IncTx("COMPENSATED")
 			return nil
 		}
@@ -400,6 +402,7 @@ func (c *Coordinator) advance(txID string) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		// 指标口径为到达终态次数：迟到回执再补偿路径会使同一 tx 的 COMPENSATED 计两次
 		metrics.IncTx("COMPENSATED")
 		return nil
 	}
@@ -414,6 +417,7 @@ func (c *Coordinator) advance(txID string) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	// 指标口径为到达终态次数：迟到回执再补偿路径会使同一 tx 的 COMPENSATED 计两次
 	metrics.IncTx("COMMITTED")
 	return nil
 }
