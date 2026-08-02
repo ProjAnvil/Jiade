@@ -25,15 +25,18 @@ const httpWaitWindow = 10 * time.Second
 
 // Coordinator 是 RMB 事务协调服务。
 type Coordinator struct {
-	db       *sql.DB
-	mqc      *mq.Conn
-	timeout  time.Duration
-	attempts sync.Map // 补偿步骤重试计数："txID:stepNo" -> int
+	db        *sql.DB
+	mqc       *mq.Conn
+	timeout   time.Duration
+	attempts  sync.Map                                      // 补偿步骤重试计数："txID:stepNo" -> int
+	publishFn func(exchange, key string, body []byte) error // 默认可注入，测试替身
 }
 
 // NewCoordinator 构造协调服务；timeout 为子事务超时（超时即补偿）。
 func NewCoordinator(db *sql.DB, mqc *mq.Conn, timeout time.Duration) *Coordinator {
-	return &Coordinator{db: db, mqc: mqc, timeout: timeout}
+	coord := &Coordinator{db: db, mqc: mqc, timeout: timeout}
+	coord.publishFn = mqc.Publish
+	return coord
 }
 
 // Handler 返回 HTTP 路由。
@@ -178,6 +181,9 @@ func (c *Coordinator) register(req txRequest) (string, string, error) {
 // publishPending 把 PENDING 步骤按 payload 原样投递到各自 DCN 队列。
 // DCN 端以 journal 唯一键幂等，重复投递安全。
 func (c *Coordinator) publishPending(txID string) {
+	if c.publishFn == nil {
+		return // 单测未注入时不投递
+	}
 	rows, err := c.db.Query(
 		`SELECT step_no, dcn, payload FROM tx_step_log WHERE tx_id = ? AND status = 'PENDING'`, txID)
 	if err != nil {
@@ -198,7 +204,7 @@ func (c *Coordinator) publishPending(txID string) {
 	}
 	rows.Close()
 	for _, p := range list {
-		if err := c.mqc.Publish("rmb.steps", "step."+p.dcn, []byte(p.payload)); err != nil {
+		if err := c.publishFn("rmb.steps", "step."+p.dcn, []byte(p.payload)); err != nil {
 			log.Printf("tx %s step %d: publish failed: %v", txID, p.stepNo, err)
 		}
 	}
