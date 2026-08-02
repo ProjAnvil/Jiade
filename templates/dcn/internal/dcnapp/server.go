@@ -29,11 +29,14 @@ type Server struct {
 	rps  float64
 	rate decimal.Decimal
 	hc   *http.Client
+
+	publishFn func(exchange, key string, body []byte) error // 默认 mqc.Publish，测试可注入
 }
 
 // NewServer 构造 DCN 应用；rate 为日终结息日利率。
 func NewServer(dcn string, db *sql.DB, gns, rmb string, mqc *mq.Conn, rps float64, rate decimal.Decimal) *Server {
-	return &Server{dcn: dcn, db: db, gns: gns, rmb: rmb, mqc: mqc, rps: rps, rate: rate, hc: newHTTPClient()}
+	return &Server{dcn: dcn, db: db, gns: gns, rmb: rmb, mqc: mqc, rps: rps, rate: rate, hc: newHTTPClient(),
+		publishFn: mqc.Publish}
 }
 
 // Handler 返回带限流与 metrics 的路由；/metrics 经 metrics.Mount 挂载在限流器之外。
@@ -129,7 +132,10 @@ func (s *Server) publishEvent(txID string, accountID int, dir string, amt decima
 	evt, _ := json.Marshal(contracts.BalanceEvent{
 		TxID: txID, AccountID: accountID, DCN: s.dcn, Direction: dir, Amount: amt.String(),
 	})
-	if err := s.mqc.Publish("adm.events", "", evt); err != nil {
+	if s.publishFn == nil {
+		return // 单测未注入时不发布
+	}
+	if err := s.publishFn("adm.events", "", evt); err != nil {
 		log.Printf("adm event publish failed (tolerable): %v", err)
 	}
 }

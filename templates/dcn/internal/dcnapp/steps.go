@@ -51,7 +51,10 @@ func (s *Server) handleStep(body []byte) error {
 	receipt, _ := json.Marshal(contracts.Receipt{
 		TxID: msg.TxID, StepNo: msg.StepNo, DCN: s.dcn, Status: status, Reason: reason,
 	})
-	if err := s.mqc.Publish("", "rmb.receipts", receipt); err != nil {
+	if s.publishFn == nil {
+		return nil // 单测未注入时不发布，视为成功避免 requeue 语义干扰测试
+	}
+	if err := s.publishFn("", "rmb.receipts", receipt); err != nil {
 		return err // 回执失败也重投（applyStep 幂等，重投安全）
 	}
 	return nil
