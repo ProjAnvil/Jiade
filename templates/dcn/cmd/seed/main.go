@@ -74,6 +74,7 @@ func resetAll() {
 		envOr("SEED_DSN_DCN01", "root:dcn123@tcp(127.0.0.1:13306)/dcn01_db"): {"journal", "account"},
 		envOr("SEED_DSN_DCN02", "root:dcn123@tcp(127.0.0.1:13307)/dcn02_db"): {"journal", "account"},
 		envOr("SEED_DSN_DCN03", "root:dcn123@tcp(127.0.0.1:13308)/dcn03_db"): {"journal", "account"},
+		envOr("SEED_DSN_BATCH", "root:dcn123@tcp(127.0.0.1:13313)/batch_db"): {"batch_unit_result", "batch_job"},
 	}
 	for dsn, tables := range dbs {
 		db, err := sql.Open("mysql", dsn)

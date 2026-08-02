@@ -145,6 +145,37 @@ services:
       gns:
         condition: service_started
 
+  batch-db:
+    <<: *mysql-common
+    container_name: batch-db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dcn123}
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: batch_db
+    volumes:
+      - ./db/init/batch:/docker-entrypoint-initdb.d:ro
+      - batch-db-data:/var/lib/mysql
+    ports: ["13313:3306"]
+    networks: [global-net]
+
+  batch-scheduler:
+    <<: *app-health
+    container_name: batch-scheduler
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args: { SERVICE: batch-scheduler }
+    environment:
+      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(batch-db:3306)/batch_db?parseTime=true
+      GNS_ENDPOINT: http://gns:8080
+    ports: ["18092:8080"]
+    networks: [global-net]
+    depends_on:
+      batch-db:
+        condition: service_healthy
+      gns:
+        condition: service_started
+
   # ============ IDC 1（idc1）：dcn01 + dcn03 主库 ============
   dcn01-db:
     <<: *mysql-common
@@ -318,6 +349,7 @@ volumes:
   gns-db-data:
   rmb-db-data:
   adm-db-data:
+  batch-db-data:
   rabbitmq-data:
   dcn01-db-data:
   dcn02-db-data:
