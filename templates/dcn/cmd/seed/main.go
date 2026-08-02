@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"time"
@@ -24,6 +25,24 @@ var (
 	reset = flag.Bool("reset", false, "clear all business data before seeding")
 )
 
+var surnames = []string{"赵", "钱", "孙", "李", "周", "吴", "郑", "王", "冯", "陈", "褚", "卫", "蒋", "沈", "韩", "杨"}
+
+var givenNames = []string{"伟", "芳", "娜", "敏", "静", "磊", "军", "洋", "勇", "艳", "杰", "娟", "涛", "明", "超", "秀兰", "霞", "平", "刚", "桂英"}
+
+// personName 用词汇表拼中文姓名。
+func personName(r *rand.Rand) string {
+	return surnames[r.Intn(len(surnames))] + givenNames[r.Intn(len(givenNames))]
+}
+
+// initialBalance 每单元前 2 户固定 1000.00（verify/README 依赖），其余 100–100000 随机。
+func initialBalance(r *rand.Rand, seg, i int) string {
+	if i < 2 {
+		return "1000.00"
+	}
+	cents := 10000 + r.Int63n(9990000) // 100.00 ~ 100000.00（单位：分）
+	return fmt.Sprintf("%.2f", float64(cents)/100)
+}
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -33,7 +52,7 @@ func envOr(key, def string) string {
 
 func main() {
 	flag.Parse()
-	counts := map[string]int{"dev": 2, "full": 50}
+	counts := map[string]int{"dev": 50, "full": 2000}
 	n, ok := counts[*scale]
 	if !ok {
 		log.Fatalf("unknown scale %q (want dev|full)", *scale)
@@ -44,10 +63,13 @@ func main() {
 	gns := envOr("GNS_ENDPOINT", "http://localhost:18080")
 	hc := &http.Client{Timeout: 10 * time.Second}
 	for _, seg := range []int{1000, 2000, 3000} {
+		r := rand.New(rand.NewSource(int64(seg))) // 每单元确定性
 		for i := 0; i < n; i++ {
+			name := personName(r)
+			bal := initialBalance(r, seg, i)
 			body, _ := json.Marshal(map[string]string{
-				"name":        fmt.Sprintf("User-%d-%d", seg, i),
-				"initBalance": "1000.00",
+				"name":        name,
+				"initBalance": bal,
 				"requestId":   fmt.Sprintf("seed-%s-%d-%d", *scale, seg, i), // 幂等键
 			})
 			resp, err := hc.Post(gns+"/accounts", "application/json", bytes.NewReader(body))
