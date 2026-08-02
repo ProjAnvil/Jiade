@@ -15,6 +15,7 @@ import (
 
 	"dcn/internal/contracts"
 	"dcn/internal/platform/httpx"
+	"dcn/internal/platform/metrics"
 	"dcn/internal/platform/mq"
 	"dcn/internal/platform/mysqlx"
 	"dcn/internal/platform/runx"
@@ -41,8 +42,8 @@ func (c *Coordinator) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, 200, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("POST /transactions", c.handleCreate)
-	mux.HandleFunc("GET /transactions/{txId}", c.handleGet)
+	metrics.Handle(mux, "rmb-coordinator", "POST /transactions", http.HandlerFunc(c.handleCreate))
+	metrics.Handle(mux, "rmb-coordinator", "GET /transactions/{txId}", http.HandlerFunc(c.handleGet))
 	return mux
 }
 
@@ -371,7 +372,11 @@ func (c *Coordinator) advance(txID string) error {
 						return nil
 					}
 					c.transition(tx, txID, "PROCESSING", "FAILED")
-					return tx.Commit()
+					if err := tx.Commit(); err != nil {
+						return err
+					}
+					metrics.IncTx("FAILED")
+					return nil
 				}
 			}
 			for _, st := range compSteps {
@@ -380,7 +385,11 @@ func (c *Coordinator) advance(txID string) error {
 				}
 			}
 			c.transition(tx, txID, "PROCESSING", "COMPENSATED")
-			return tx.Commit()
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+			metrics.IncTx("COMPENSATED")
+			return nil
 		}
 		// 3) 零 DONE 原始步骤：还有 PENDING 则等待（超时器会收场）；
 		// 全部 FAILED 且无需补偿 → 空补偿直接终态 COMPENSATED。
@@ -388,7 +397,11 @@ func (c *Coordinator) advance(txID string) error {
 			return nil
 		}
 		c.transition(tx, txID, "PROCESSING", "COMPENSATED")
-		return tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		metrics.IncTx("COMPENSATED")
+		return nil
 	}
 
 	// 无失败：全部 DONE → COMMITTED
@@ -398,7 +411,11 @@ func (c *Coordinator) advance(txID string) error {
 		}
 	}
 	c.transition(tx, txID, "PROCESSING", "COMMITTED")
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	metrics.IncTx("COMMITTED")
+	return nil
 }
 
 // retryCompensate 对失败的补偿步骤重置为 PENDING（最多 3 次）；返回 (是否已重置可重投, 错误)。

@@ -16,6 +16,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"dcn/internal/platform/httpx"
+	"dcn/internal/platform/metrics"
 	"dcn/internal/platform/mysqlx"
 )
 
@@ -33,16 +34,16 @@ func NewServer(db *sql.DB, cache *redis.Client) *Server {
 	return &Server{db: db, cache: cache, hc: &http.Client{Timeout: 5 * time.Second}}
 }
 
-// Handler 返回路由表。
+// Handler 返回路由表；业务路由经 metrics.Handle 注册以带 RED 指标。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, 200, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("GET /locate", s.handleLocate)
-	mux.HandleFunc("POST /accounts", s.handleOpenAccount)
-	mux.HandleFunc("GET /routes", s.handleListRoutes)
-	mux.HandleFunc("POST /routes", s.handleAddRoute)
+	metrics.Handle(mux, "gns", "GET /locate", http.HandlerFunc(s.handleLocate))
+	metrics.Handle(mux, "gns", "POST /accounts", http.HandlerFunc(s.handleOpenAccount))
+	metrics.Handle(mux, "gns", "GET /routes", http.HandlerFunc(s.handleListRoutes))
+	metrics.Handle(mux, "gns", "POST /routes", http.HandlerFunc(s.handleAddRoute))
 	return mux
 }
 

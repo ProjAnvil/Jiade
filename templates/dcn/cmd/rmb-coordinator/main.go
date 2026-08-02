@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"time"
 
+	"dcn/internal/platform/metrics"
 	"dcn/internal/platform/mq"
 	"dcn/internal/platform/mysqlx"
 	"dcn/internal/platform/runx"
@@ -19,5 +20,5 @@ func main() {
 	}
 	coord := rmb.NewCoordinator(db, mqc, time.Duration(secs)*time.Second)
 	coord.Run()
-	runx.Serve(":"+runx.Env("PORT", "8080"), coord.Handler())
+	runx.Serve(":"+runx.Env("PORT", "8080"), metrics.Mount(coord.Handler()))
 }

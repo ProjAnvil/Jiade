@@ -13,6 +13,7 @@ import (
 
 	"dcn/internal/contracts"
 	"dcn/internal/platform/httpx"
+	"dcn/internal/platform/metrics"
 	"dcn/internal/platform/mq"
 	"dcn/internal/platform/mysqlx"
 )
@@ -35,8 +36,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, 200, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("GET /report/summary", s.handleSummary)
-	mux.HandleFunc("GET /reconcile", s.handleReconcile)
+	metrics.Handle(mux, "adm", "GET /report/summary", http.HandlerFunc(s.handleSummary))
+	metrics.Handle(mux, "adm", "GET /reconcile", http.HandlerFunc(s.handleReconcile))
 	return mux
 }
 

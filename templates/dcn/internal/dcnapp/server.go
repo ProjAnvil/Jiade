@@ -13,6 +13,7 @@ import (
 
 	"dcn/internal/contracts"
 	"dcn/internal/platform/httpx"
+	"dcn/internal/platform/metrics"
 	"dcn/internal/platform/mq"
 	"dcn/internal/platform/mysqlx"
 	"dcn/internal/platform/ratelimit"
@@ -34,17 +35,17 @@ func NewServer(dcn string, db *sql.DB, gns, rmb string, mqc *mq.Conn, rps float6
 	return &Server{dcn: dcn, db: db, gns: gns, rmb: rmb, mqc: mqc, rps: rps, hc: newHTTPClient()}
 }
 
-// Handler 返回带限流中间件的路由。
+// Handler 返回带限流与 metrics 的路由；/metrics 与 /healthz 一样不受限流约束。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, 200, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("POST /accounts", s.handleCreateAccount)
-	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
-	mux.HandleFunc("GET /internal/balance-sum", s.handleBalanceSum)
-	mux.HandleFunc("POST /transfer", s.handleTransfer)
-	return ratelimit.New(s.rps).Middleware(mux)
+	metrics.Handle(mux, s.dcn, "POST /accounts", http.HandlerFunc(s.handleCreateAccount))
+	metrics.Handle(mux, s.dcn, "GET /accounts/{id}/balance", http.HandlerFunc(s.handleBalance))
+	metrics.Handle(mux, s.dcn, "GET /internal/balance-sum", http.HandlerFunc(s.handleBalanceSum))
+	metrics.Handle(mux, s.dcn, "POST /transfer", http.HandlerFunc(s.handleTransfer))
+	return metrics.Mount(ratelimit.New(s.rps).Middleware(mux))
 }
 
 // DeclareAndConsume 声明本单元的 RMB 队列并启动子事务消费。
