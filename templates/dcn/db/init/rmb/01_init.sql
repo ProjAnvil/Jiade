@@ -1,0 +1,18 @@
+-- RMB 事务协调库
+CREATE TABLE tx_log (
+  tx_id      VARCHAR(64) PRIMARY KEY,
+  type       VARCHAR(32) NOT NULL,
+  status     VARCHAR(16) NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+CREATE TABLE tx_step_log (
+  tx_id   VARCHAR(64) NOT NULL,
+  step_no INT NOT NULL,
+  dcn     VARCHAR(16) NOT NULL,
+  action  VARCHAR(32) NOT NULL,
+  status  VARCHAR(16) NOT NULL,
+  payload TEXT NOT NULL,
+  PRIMARY KEY (tx_id, step_no)
+);

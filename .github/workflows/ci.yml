@@ -87,6 +87,35 @@ jobs:
         if: always()
         run: cd templates/commerce && docker compose -f compose.yaml -f compose.observability.yaml down --volumes --remove-orphans
 
+  dcn:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - run: cd templates/dcn && go build ./...
+      - run: cd templates/dcn && go test ./...
+      - run: cd templates/dcn && make topology-test
+
+  dcn-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Start dcn
+        run: cd templates/dcn && make up && make seed
+      - name: Verify
+        run: cd templates/dcn && make verify
+      - name: Capture logs
+        if: failure()
+        run: cd templates/dcn && docker compose --profile expansion logs --no-color
+      - name: Cleanup
+        if: always()
+        run: cd templates/dcn && docker compose --profile expansion down --volumes --remove-orphans
+
   e2e:
     runs-on: ubuntu-latest
     steps:

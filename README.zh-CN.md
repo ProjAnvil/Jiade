@@ -14,9 +14,10 @@
 |------|--------|------|
 | `bank` | 银行核心系统缩影——7 个 Go 服务、7 个独立 PostgreSQL 库、内部 gRPC 读取、RabbitMQ 命令/事件、Traefik 网关（:18000）、复式记账总账、逐日滚存余额、**durable 支付 saga**（风控→冻结→过账 forward，逆序补偿，运营者 admin gRPC）、**全栈可观测性**（OTel/Jaeger/Prometheus/Grafana + 5 告警）、**dev/prod Kubernetes overlay**（dev = 状态化，prod = 外部状态 + SecretProviderClass）。 | [中文](templates/bank/README.zh-CN.md) · [English](templates/bank/README.md) · [ARCHITECTURE.md](templates/bank/ARCHITECTURE.md) |
 | `commerce` | 电商后端缩影——6 个 Go 服务、6 个 PostgreSQL 库、RabbitMQ saga、Traefik 网关。 | [中文](templates/commerce/README.zh-CN.md) · [English](templates/commerce/README.md) · [ARCHITECTURE.md](templates/commerce/ARCHITECTURE.md) |
+| `dcn` | DCN 单元化架构仿真——GNS 全局路由（Redis+MySQL）、RMB 可靠消息总线与事务协调（RabbitMQ）、跨 2 个仿真 IDC 的 3 个自包含 DCN 单元、ADM 全局汇总核对、7 项验收用例（爆炸半径、崩溃恢复、幂等、在线扩容）。 | [中文](templates/dcn/README.zh-CN.md) · [English](templates/dcn/README.md) · [ARCHITECTURE.md](templates/dcn/ARCHITECTURE.md) |
 
 ```bash
-jiade init --template <bank|commerce> --dir ./myproj
+jiade init --template <bank|commerce|dcn> --dir ./myproj
 cd myproj && make up
 ```
 
@@ -77,6 +78,7 @@ internal/template/   内嵌模板 registry（tar 方案）
 internal/docker/     docker/compose/daemon 探测
 templates/bank/      bank 模板——独立 Go module（`module bank`）
 templates/commerce/  commerce 模板——独立 Go module（`module commerce`）
+templates/dcn/       dcn 模板——独立 Go module（`module dcn`）
 docs/superpowers/    设计 spec 与实施计划
 ```
 

@@ -1,7 +1,7 @@
 //go:build ignore
 
 // pack generates a deterministic templates.tar archive from the
-// templates/bank and templates/commerce directories.
+// templates/bank, templates/commerce and templates/dcn directories.
 //
 // Determinism is achieved by sorting entries by path and using fixed
 // metadata (mtime=Unix epoch, uid=0, gid=0, uniform mode 0644). This
@@ -45,8 +45,9 @@ func main() {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		// Only pack the bank and commerce subdirectories.
-		if !strings.HasPrefix(rel, "bank/") && !strings.HasPrefix(rel, "commerce/") {
+		// Only pack the bank, commerce and dcn subdirectories.
+		if !strings.HasPrefix(rel, "bank/") && !strings.HasPrefix(rel, "commerce/") &&
+			!strings.HasPrefix(rel, "dcn/") {
 			return nil
 		}
 		paths = append(paths, rel)
