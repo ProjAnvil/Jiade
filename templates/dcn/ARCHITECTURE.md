@@ -106,6 +106,42 @@ sequenceDiagram
     AD-->>C: {consistent, admTotal, dcnTotal, perDcn}
 ```
 
+### 3.4 日终批量时序（结息）
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant T as traefik
+    participant B as batch-scheduler
+    participant DB as batch-db
+    participant G as GNS
+    participant D1 as dcn01-app
+    participant D2 as dcn02-app(各单元并发)
+    participant Q as RabbitMQ(adm.events)
+    participant AD as ADM
+    C->>T: POST /batch/jobs/interest {bizDate}
+    T->>B: 前缀路由 /batch/*
+    B->>DB: batch_job 幂等登记（bizDate 已存在且非 FAILED → 直接返回当前结果）
+    B->>G: GET /routes（取 ACTIVE 单元，扩容后含 dcn04）
+    G-->>B: dcn01…dcn04 endpoints
+    par 并发调度各单元（单点失败记 FAILED 不中断）
+        B->>D1: POST /internal/batch/interest {bizDate}
+        D1->>D1: 逐账户独立本地事务结息：余额×日利率 half-even 取舍；journal 幂等键 interest-<bizDate>-<accountId>，重跑自动跳过
+        D1->>Q: 逐笔发布余额变更事件（ADM 镜像随之更新）
+        D1-->>B: {accounts, totalInterest}
+        B->>D2: POST /internal/batch/interest {bizDate}
+        D2-->>B: {accounts, totalInterest}
+    end
+    B->>DB: batch_unit_result 分单元落库；batch_job = SUCCEEDED(totalInterest=Σ分单元)
+    B-->>C: {status, totalInterest, units[]}
+    Note over C,AD: 核对：ADM 镜像 vs 各单元实时余额
+    C->>AD: GET /reconcile
+    AD->>D1: GET /internal/balance-sum（经 GNS /routes 枚举 ACTIVE 单元）
+    AD-->>C: {consistent:true, admTotal, dcnTotal, perDcn}
+```
+
+失败语义：任一单元调用失败 → 任务置 `FAILED`（已记成功单元的利息仍计入 total，靠 journal 幂等兜底）；`FAILED` 允许重试，重试覆盖分单元结果；`RUNNING/SUCCEEDED` 重复触发直接幂等返回。批量调度只做「触发 + 归集」，不参与单元内事务。
+
 ## 4. 事务协调状态机
 
 总事务（tx_log.status）四态迁移：
@@ -161,9 +197,18 @@ RMB 子事务消息全链路 at-least-once，幂等由各端唯一键兜底；AD
 
 完整 DDL 见 `db/init/`（`gns/`、`rmb/`、`dcn/`、`adm/` 各一份 `01_init.sql`）。
 
-## 7. 故障与扩容用例（verify 七关）
+## 7. 观测体系
 
-`make verify`（`test/verify.sh`）七关，任一失败整体退出 1：
+仿真生产的「统一监控平台」，仅覆盖指标（metrics），不含告警、日志聚合与链路追踪：
+
+- **RED 埋点**：所有 Go 服务（dcn-app、gns、rmb-coordinator、adm、batch-scheduler、console）的业务路由经 `internal/platform/metrics` 的 `metrics.Handle` 包装，输出 `http_requests_total`（labels: service/route/code）与 `http_request_duration_seconds` 直方图；`/metrics` 与 `/healthz` 一样不受限流约束。
+- **Prometheus 自动发现**：`docker_sd_configs` + 容器 label（`prometheus.scrape` / `prometheus.port`）驱动抓取，新增容器只需打 label 即自动纳入；MySQL 拓扑固定，经 mysqld-exporter `/probe` 静态枚举七库（dcn01/02/03、gns、rmb、adm、batch——mysqld-exporter 需同时挂三个网络才能触达各库）；另有 redis-exporter、rabbitmq prometheus 插件（:15692）、traefik `--metrics.prometheus`（:8082）。
+- **Grafana**：provisioning 自动装配 Prometheus datasource 与 RED 仪表盘（uid `dcn-red`，「DCN Services (RED)」；`$service` 变量下钻单服务，面板含 RPS / 5xx 错误率 / P99 延迟 / RMB 事务终态）；匿名 Viewer 免登录，端口 13000。
+- **console 观测台**（18099）：内嵌单页——拓扑视图、容器状态墙（Docker Engine API，只读挂载 socket）、各服务 RPS 曲线（经 `/api/query` 代理 Prometheus HTTP API）。
+
+## 8. 故障与扩容用例（verify 八关）
+
+`make verify`（`test/verify.sh`）八关，任一失败整体退出 1：
 
 | # | 用例 | 操作 | 预期 |
 |---|------|------|------|
@@ -174,5 +219,6 @@ RMB 子事务消息全链路 at-least-once，幂等由各端唯一键兜底；AD
 | 5 | 幂等 | 用 `docker exec dcn-rabbitmq rabbitmqadmin publish` 向 `rmb.steps.dcn01` 重投一条已完成的 DEBIT 子事务消息 | 余额无重复变动（journal 唯一键兜底） |
 | 6 | 在线扩容 | `docker compose --profile expansion up -d --build dcn04-db dcn04-app` → `POST /routes` 注册 dcn04（4000–4999） | 新开户落入 4xxx；4001→1001 跨新旧单元转账 COMMITTED |
 | 7 | ADM 汇总 | 等待 3s 汇总延迟 | `/report/summary` 账户数/总余额正确；`/reconcile` 返回 consistent=true |
+| 8 | 日终批量 | 经网关 `POST /batch/jobs/interest {bizDate: 当天}` | 任务 SUCCEEDED；分单元利息合计 = 调度器归集值；四单元（含 gate 6 扩容的 dcn04）余额合计增加 = 利息总额；同 bizDate 重复触发幂等（总额与余额均不变）；批量后 `/reconcile` 仍 consistent=true |
 
 辅助：`make topology-test`（`test/topology.sh`）用 `docker compose config --format json` + jq 静态断言三网络存在、各 DB 仅接入所属 IDC 网络、DCN 应用双网卡、dcn04 在 expansion profile。

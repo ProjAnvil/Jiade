@@ -7,6 +7,7 @@
 # gate 5  子事务幂等（重复投递）
 # gate 6  在线扩容（dcn04）
 # gate 7  ADM 全局汇总与核对
+# gate 8  日终批量（结息 + 幂等重跑 + ADM 核对）
 set -u
 cd "$(dirname "$0")/.."
 
@@ -166,6 +167,42 @@ accs=$(echo "$sum" | jq -r '.accounts')
 rec=$(curl -sf "$ADM/reconcile")
 [ "$(echo "$rec" | jq -r '.consistent')" = "true" ] \
   && pass "ADM 汇总与各 DCN 实时余额核对一致" || fail "核对不一致: $rec"
+
+echo "== Gate 8: 日终批量（结息 + 幂等 + 核对）=="
+# 注意：gate 6 已将 dcn04 扩容为 ACTIVE 单元，结息批量会调度到 dcn04，
+# 故本关 pre/post 余额合计按四单元（dcn01–04）计。
+BIZDATE=$(date +%F)
+pre1=$(curl -sf "$DCN01/internal/balance-sum" | jq -r '.balanceSum')
+pre2=$(curl -sf "$DCN02/internal/balance-sum" | jq -r '.balanceSum')
+pre3=$(curl -sf "$DCN03/internal/balance-sum" | jq -r '.balanceSum')
+pre4=$(curl -sf "$DCN04/internal/balance-sum" | jq -r '.balanceSum')
+job=$(curl -sf -X POST "$GATEWAY/batch/jobs/interest" -H 'Content-Type: application/json' \
+  -d "{\"bizDate\":\"$BIZDATE\"}")
+[ "$(echo "$job" | jq -r '.status')" = "SUCCEEDED" ] \
+  && pass "结息批量执行成功 (SUCCEEDED)" || fail "结息批量失败: $job"
+interest=$(echo "$job" | jq -r '.totalInterest')
+unitsum=$(echo "$job" | jq -r '[.units[].interest | tonumber] | add | . * 100 | round / 100 | tostring')
+assert_equal "$unitsum" "$interest" "分单元利息合计 = 调度器归集值"
+# 四单元余额合计增加 = 利息总额
+post1=$(curl -sf "$DCN01/internal/balance-sum" | jq -r '.balanceSum')
+post2=$(curl -sf "$DCN02/internal/balance-sum" | jq -r '.balanceSum')
+post3=$(curl -sf "$DCN03/internal/balance-sum" | jq -r '.balanceSum')
+post4=$(curl -sf "$DCN04/internal/balance-sum" | jq -r '.balanceSum')
+pre_total=$(jq -nr --arg a "$pre1" --arg b "$pre2" --arg c "$pre3" --arg d "$pre4" \
+  '($a|tonumber)+($b|tonumber)+($c|tonumber)+($d|tonumber) | tostring')
+post_total=$(jq -nr --arg a "$post1" --arg b "$post2" --arg c "$post3" --arg d "$post4" \
+  '($a|tonumber)+($b|tonumber)+($c|tonumber)+($d|tonumber) | tostring')
+assert_delta "$post_total" "$pre_total" "$interest" "四单元余额合计增加 = 利息总额"
+# 幂等：同一 bizDate 重复触发不重跑，余额不再变
+job2=$(curl -sf -X POST "$GATEWAY/batch/jobs/interest" -H 'Content-Type: application/json' \
+  -d "{\"bizDate\":\"$BIZDATE\"}")
+[ "$(echo "$job2" | jq -r '.totalInterest')" = "$interest" ] \
+  && pass "重复触发幂等（总额不变）" || fail "重复触发结果漂移: $job2"
+assert_equal "$post_total" "$(jq -nr --arg a "$(curl -sf "$DCN01/internal/balance-sum" | jq -r '.balanceSum')" --arg b "$(curl -sf "$DCN02/internal/balance-sum" | jq -r '.balanceSum')" --arg c "$(curl -sf "$DCN03/internal/balance-sum" | jq -r '.balanceSum')" --arg d "$(curl -sf "$DCN04/internal/balance-sum" | jq -r '.balanceSum')" '($a|tonumber)+($b|tonumber)+($c|tonumber)+($d|tonumber) | tostring')" "重复触发后余额无二次入账"
+sleep 3
+rec=$(curl -sf "$ADM/reconcile")
+[ "$(echo "$rec" | jq -r '.consistent')" = "true" ] \
+  && pass "批量后 ADM 核对一致" || fail "批量后核对不一致: $rec"
 
 echo
 if [ "$FAILED" -ne 0 ]; then

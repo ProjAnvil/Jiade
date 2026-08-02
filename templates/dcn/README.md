@@ -12,6 +12,7 @@ Three docker networks simulate two IDCs and a global zone. DCN applications are 
 
 ```mermaid
 flowchart TB
+    client["client / browser"]
     subgraph idc1["idc1"]
         dcn01app["dcn01-app"]
         dcn01db[("dcn01-db")]
@@ -29,6 +30,7 @@ flowchart TB
         dcn04app --> dcn04db
     end
     subgraph globalnet["global-net"]
+        traefik["traefik (unified entry :18070)"]
         gns["gns"]
         gnsdb[("gns-db")]
         redis[("gns-redis")]
@@ -37,13 +39,28 @@ flowchart TB
         rmbdb[("rmb-db")]
         adm["adm"]
         admdb[("adm-db")]
+        batch["batch-scheduler"]
+        batchdb[("batch-db")]
         gns --> gnsdb
         gns --> redis
         rmb --> rmbdb
         rmb <--> mq
         adm --> admdb
         adm --> mq
+        batch --> batchdb
+        batch --> gns
+        traefik -->|"/gns/* /rmb/* /adm/* /batch/* /dcn/*"| gns
     end
+    subgraph obs["observability"]
+        prom["prometheus"]
+        grafana["grafana (RED dashboard)"]
+        console["console (status wall)"]
+        prom --> grafana
+        prom --> console
+    end
+    client --> traefik
+    client --> grafana
+    client --> console
     dcn01app <--> gns
     dcn02app <--> gns
     dcn03app <--> gns
@@ -56,7 +73,12 @@ flowchart TB
     dcn02app --> rmb
     dcn03app --> rmb
     dcn04app --> rmb
+    batch -.->|"day-end batch: POST /internal/batch/interest"| dcn01app
+    batch -.-> dcn02app
+    batch -.-> dcn03app
+    batch -.-> dcn04app
     adm --> gns
+    prom -.->|"docker_sd scrape (label-driven)"| traefik
 ```
 
 ## Components
@@ -67,10 +89,13 @@ flowchart TB
 | **GNS** (Global Name Service) | Global "account → DCN" routing: `/locate` (Redis-cached), account opening with segment allocation, segment table management (`/routes`) for online expansion |
 | **RMB** (reliable message bus + coordinator) | The only legal cross-DCN channel; registers global transactions, dispatches sub-transactions via RabbitMQ, collects receipts, and drives reverse-order compensation on failure/timeout |
 | **ADM** (administration zone) | Consumes account-change events, deduplicates them, maintains a global balance mirror, and exposes `/report/summary` and `/reconcile` |
+| **batch-scheduler** | Day-end batch scheduling (currently interest accrual only): reads ACTIVE units from GNS, calls each unit's `/internal/batch/interest` concurrently, aggregates per-unit results, and reruns idempotently by `bizDate` |
+| **traefik** | Unified access layer: path-prefix routing (`/gns/*`, `/rmb/*`, `/adm/*`, `/batch/*`, `/dcn/*`) to the backend services; dashboard on port 18071 |
+| **console** | Observability wall (topology view + container status + RPS curves) backed by the Prometheus HTTP API and the Docker Engine API (read-only) |
 
 ## Segment routing
 
-Account IDs are allocated starting at `segStart + 1` (the first account of segment 1000–1999 is 1001). `make seed` (dev scale) creates accounts 1001/1002, 2001/2002, 3001/3002 with 1000.00 each.
+Account IDs are allocated starting at `segStart + 1` (the first account of segment 1000–1999 is 1001). `make seed` (dev scale) opens 50 accounts per unit via GNS: the first two of each unit (1001/1002, 2001/2002, 3001/3002) start with 1000.00, the rest get deterministic pseudo-random balances between 100.00 and 100000.00. `make seed-full` opens 2000 per unit.
 
 | Segment | DCN | Primary DB IDC |
 |---------|-----|----------------|
@@ -81,11 +106,19 @@ Account IDs are allocated starting at `segStart + 1` (the first account of segme
 
 ## Quickstart
 
+Prerequisites: Docker (Docker Desktop with ≥ 4 GB memory recommended — the full base stack runs 22 containers, 24 after expansion) and Go (for `seed` and the test scripts).
+
 ```bash
 make up && make seed && make verify
 ```
 
-`make up` builds and starts the full topology (base three units; dcn04 stays off under the `expansion` profile). `make seed` opens the dev accounts via GNS. `make verify` runs the 7-gate acceptance suite (local transfer, cross-DCN transfer, blast radius, coordinator crash recovery, idempotency, online expansion, ADM aggregation). Other targets: `make down`, `make seed-full`, `make topology-test`, `make smoke`.
+`make up` builds and starts the full topology (base three units; dcn04 stays off under the `expansion` profile). `make seed` opens the dev accounts via GNS. `make verify` runs the 8-gate acceptance suite (local transfer, cross-DCN transfer, blast radius, coordinator crash recovery, idempotency, online expansion, ADM aggregation, day-end batch). Other targets: `make down`, `make seed-full`, `make topology-test`, `make smoke`.
+
+Observability entrypoints once the stack is up:
+
+- **http://localhost:18099** — console (topology view, container status wall, per-service RPS)
+- **http://localhost:13000** — Grafana RED dashboard (anonymous viewer, no login)
+- http://localhost:19090 — Prometheus; http://localhost:18070 — traefik unified entry; http://localhost:18071 — traefik dashboard
 
 As a jiade user, the equivalent flow is:
 
@@ -112,6 +145,11 @@ curl -sf -X POST localhost:18081/transfer \
 # Global aggregation report (ADM)
 curl -sf localhost:18091/report/summary
 curl -sf localhost:18091/reconcile
+
+# Day-end interest accrual batch (via the gateway; idempotent per bizDate)
+curl -sf -X POST localhost:18070/batch/jobs/interest \
+  -H 'Content-Type: application/json' \
+  -d "{\"bizDate\":\"$(date +%F)\"}"
 ```
 
 Online expansion in four steps (bring the unit up **before** registering its route, so GNS never routes account creation to a unit that is not ready):
@@ -140,14 +178,18 @@ curl -sf -X POST localhost:18084/transfer \
 
 | Port | Service | Port | Service |
 |------|---------|------|---------|
-| 18080 | gns | 13306 | dcn01-db |
-| 18081 | dcn01-app | 13307 | dcn02-db |
-| 18082 | dcn02-app | 13308 | dcn03-db |
-| 18083 | dcn03-app | 13309 | gns-db |
-| 18084 | dcn04-app (expansion) | 13310 | rmb-db |
-| 18090 | rmb-coordinator | 13311 | adm-db |
-| 18091 | adm | 13312 | dcn04-db (expansion) |
-| 15672 | rabbitmq management console | 16379 | gns-redis |
+| 18070 | traefik unified entry | 13306 | dcn01-db |
+| 18071 | traefik dashboard | 13307 | dcn02-db |
+| 18080 | gns | 13308 | dcn03-db |
+| 18081 | dcn01-app | 13309 | gns-db |
+| 18082 | dcn02-app | 13310 | rmb-db |
+| 18083 | dcn03-app | 13311 | adm-db |
+| 18084 | dcn04-app (expansion) | 13312 | dcn04-db (expansion) |
+| 18090 | rmb-coordinator | 13313 | batch-db |
+| 18091 | adm | 16379 | gns-redis |
+| 18092 | batch-scheduler | 15672 | rabbitmq management console |
+| 18099 | console (observability wall) | 19090 | prometheus |
+| 13000 | grafana (RED dashboard) | | |
 
 ## Differences from a production DCN architecture
 
@@ -156,6 +198,8 @@ curl -sf -X POST localhost:18084/transfer \
 3. **Multi-IDC deployment.** Production runs multiple replicas within a city plus remote disaster recovery; this simulation only models cross-IDC placement of primary databases with docker networks, without replicas. Multiple DCNs in the same IDC share one docker network, so network-layer isolation is not simulated — the "no direct cross-unit connection" rule is enforced by application code and convention, not by the network.
 4. **Global-scenario storage.** Production uses a native distributed database for global scenarios (evidence storage, batch processing); this simulation substitutes MySQL in the ADM zone.
 5. **Security and compliance.** This simulation includes no security or compliance capabilities (encryption, auditing, authorization); it is for architecture learning and demonstration only.
+6. **Batch scheduling.** Production day-end batch platforms offer dependency orchestration, checkpoints, and resume-from-failure across many job types; this simulation has a single job type (interest accrual) with per-unit concurrent execution and `bizDate`-level idempotent rerun — no dependency DAG.
+7. **Observability.** Production observability stacks include alerting, log aggregation, and distributed tracing; this simulation ships metrics only (RED instrumentation + Prometheus + Grafana dashboard + console wall), without alerting, logs, or tracing.
 
 ## Known simplifications
 

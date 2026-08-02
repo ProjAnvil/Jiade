@@ -217,7 +217,9 @@ services:
         condition: service_started
 
   traefik:
-    image: traefik:v3.1
+    # v3.6 起内嵌 docker 客户端支持 API 版本自动协商；v3.1 固定 1.24，
+    # 会被 Docker Engine ≥ 29（最低 API 1.40+）的 daemon 拒绝。
+    image: traefik:v3.6
     container_name: dcn-traefik
     restart: unless-stopped
     command:
@@ -280,6 +282,7 @@ services:
       RMB_ENDPOINT: http://rmb-coordinator:8080
       AMQP_URL: amqp://dcn:dcn123@dcn-rabbitmq:5672/
       RATE_LIMIT_RPS: "200"
+      INTEREST_DAILY_RATE: ${INTEREST_DAILY_RATE:-0.0001}
     ports: ["18081:8080"]
     networks: [idc1, global-net]
     labels:
@@ -315,6 +318,7 @@ services:
       RMB_ENDPOINT: http://rmb-coordinator:8080
       AMQP_URL: amqp://dcn:dcn123@dcn-rabbitmq:5672/
       RATE_LIMIT_RPS: "200"
+      INTEREST_DAILY_RATE: ${INTEREST_DAILY_RATE:-0.0001}
     ports: ["18083:8080"]
     networks: [idc1, global-net]
     labels:
@@ -364,6 +368,7 @@ services:
       RMB_ENDPOINT: http://rmb-coordinator:8080
       AMQP_URL: amqp://dcn:dcn123@dcn-rabbitmq:5672/
       RATE_LIMIT_RPS: "200"
+      INTEREST_DAILY_RATE: ${INTEREST_DAILY_RATE:-0.0001}
     ports: ["18082:8080"]
     networks: [idc2, global-net]
     labels:
@@ -415,6 +420,7 @@ services:
       RMB_ENDPOINT: http://rmb-coordinator:8080
       AMQP_URL: amqp://dcn:dcn123@dcn-rabbitmq:5672/
       RATE_LIMIT_RPS: "200"
+      INTEREST_DAILY_RATE: ${INTEREST_DAILY_RATE:-0.0001}
     ports: ["18084:8080"]
     networks: [idc2, global-net]
     labels:
