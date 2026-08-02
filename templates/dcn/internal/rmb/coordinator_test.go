@@ -136,6 +136,29 @@ func TestLateDoneReceiptReopensAndRecompensates(t *testing.T) {
 	}
 }
 
+// advance：补偿步骤全部 DONE → COMPENSATED 终态。
+func TestAdvanceCompensationCompleteTerminates(t *testing.T) {
+	db, rec := sqltest.NewDB(t,
+		sqltest.Rule{Contains: "FOR UPDATE", Columns: []string{"status"}, Rows: [][]any{{"PROCESSING"}}},
+		sqltest.Rule{Contains: "step_no, dcn, action, status, payload",
+			Columns: []string{"step_no", "dcn", "action", "status", "payload"},
+			Rows: [][]any{
+				{int64(1), "dcn01", "DEBIT", "DONE", stepPayload(t, "t4", 1, "DEBIT")},
+				{int64(2), "dcn02", "CREDIT", "FAILED", stepPayload(t, "t4", 2, "CREDIT")},
+				{int64(3), "dcn01", "COMPENSATE_DEBIT", "DONE", stepPayload(t, "t4", 3, "COMPENSATE_DEBIT")},
+			}},
+		sqltest.Rule{Contains: "UPDATE tx_log SET status"},
+	)
+	c := &Coordinator{db: db}
+	if err := c.advance("t4"); err != nil {
+		t.Fatal(err)
+	}
+	upd := rec.LastExec("UPDATE tx_log SET status")
+	if upd == nil || upd.Args[0] != "COMPENSATED" {
+		t.Fatalf("want COMPENSATED transition, got %+v", upd)
+	}
+}
+
 func result1() driver.Result { return oneRow{} }
 
 type oneRow struct{}

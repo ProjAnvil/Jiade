@@ -113,7 +113,6 @@ func TestCreateAccountDuplicateReturnsExists(t *testing.T) {
 			Err: &mysql.MySQLError{Number: 1062, Message: "Duplicate entry"}},
 	)
 	s := newSrv("dcn01", db, "http://gns-unused", "http://rmb-unused")
-	s.publishFn = func(string, string, []byte) error { return nil }
 	w := httptest.NewRecorder()
 	s.handleCreateAccount(w, httptest.NewRequest("POST", "/accounts",
 		strings.NewReader(`{"accountId":1001,"name":"王五","initBalance":"100.00"}`)))
