@@ -27,7 +27,15 @@ func TestMetricsEndpoints(t *testing.T) {
 		probe(t, s.base)
 		doJSON(t, "GET", s.base+s.hit, nil) // 触发计数（404 也计入）
 		_, raw := doJSON(t, "GET", s.base+"/metrics", nil)
-		if !strings.Contains(string(raw), `http_requests_total{service="`+s.name+`"`) {
+		// exposition 标签按字母序排列（code,handler,service），不能按 {service= 前缀匹配。
+		found := false
+		for _, line := range strings.Split(string(raw), "\n") {
+			if strings.HasPrefix(line, "http_requests_total{") && strings.Contains(line, `service="`+s.name+`"`) {
+				found = true
+				break
+			}
+		}
+		if !found {
 			t.Fatalf("%s /metrics missing its series", s.name)
 		}
 	}
