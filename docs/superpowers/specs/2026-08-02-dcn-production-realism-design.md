@@ -47,7 +47,7 @@
 | `grafana` | grafana/grafana | 13000 | 可视化，YAML provisioning 数据源 + 通用仪表盘 |
 | `console` | 源码构建（`cmd/console`） | 18099 | 自建观测页：拓扑视图 + 状态墙 + RPS 曲线 |
 
-基础设施 exporter：`mysqld-exporter`（单实例多 target 抓 5 个业务库）、`redis-exporter`（抓 gns-redis）、RabbitMQ 启用内置 `rabbitmq_prometheus` 插件（15692）。cAdvisor 可选（默认不启用，避免容器数膨胀；README 注明启用方法）。
+基础设施 exporter：`mysqld-exporter`（单实例 `/probe` 多 target 抓全部 7 个 MySQL 库；需跨 global-net/idc1/idc2 三网络部署以触达各库）、`redis-exporter`（抓 gns-redis）、RabbitMQ 启用内置 `rabbitmq_prometheus` 插件（15692）。cAdvisor 可选（默认不启用，避免容器数膨胀；README 注明启用方法）。
 
 各服务原有直暴露端口全部保留（README 注明网关为「真实路径」，直暴露端口用于教学观察与 verify）。
 
@@ -109,8 +109,7 @@ CREATE TABLE batch_unit_result (
 
 ### 7.2 采集与发现
 
-- Prometheus `docker_sd_configs`：挂 `/var/run/docker.sock`，relabel 只抓带 `prometheus.scrape=true` label 的容器，端口/路径可经 label 覆盖；
-- 全部 Go 服务 + traefik + mysqld-exporter + redis-exporter + rabbitmq(15692) 打 label，dcn04 扩容自动入监控；
+- Prometheus 两类采集并存：① `docker_sd_configs`（挂 `/var/run/docker.sock`）按 label（`prometheus.scrape=true` / `prometheus.port`）自动发现全部 Go 服务、traefik、redis-exporter、rabbitmq(15692)——dcn04 扩容自动入监控；② MySQL 全部七库走 mysqld-exporter 的 `/probe` 多目标模式，静态 job 列出库地址（库拓扑固定，不随业务扩容）；
 - scrape 间隔 5s（仿真场景取短间隔便于演示）。
 
 ### 7.3 Grafana
