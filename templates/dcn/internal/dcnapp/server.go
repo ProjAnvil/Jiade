@@ -21,18 +21,19 @@ import (
 
 // Server 是一个 DCN 单元应用。
 type Server struct {
-	dcn string
-	db  *sql.DB
-	gns string
-	rmb string
-	mqc *mq.Conn
-	rps float64
-	hc  *http.Client
+	dcn  string
+	db   *sql.DB
+	gns  string
+	rmb  string
+	mqc  *mq.Conn
+	rps  float64
+	rate decimal.Decimal
+	hc   *http.Client
 }
 
-// NewServer 构造 DCN 应用。
-func NewServer(dcn string, db *sql.DB, gns, rmb string, mqc *mq.Conn, rps float64) *Server {
-	return &Server{dcn: dcn, db: db, gns: gns, rmb: rmb, mqc: mqc, rps: rps, hc: newHTTPClient()}
+// NewServer 构造 DCN 应用；rate 为日终结息日利率。
+func NewServer(dcn string, db *sql.DB, gns, rmb string, mqc *mq.Conn, rps float64, rate decimal.Decimal) *Server {
+	return &Server{dcn: dcn, db: db, gns: gns, rmb: rmb, mqc: mqc, rps: rps, rate: rate, hc: newHTTPClient()}
 }
 
 // Handler 返回带限流与 metrics 的路由；/metrics 与 /healthz 一样不受限流约束。
@@ -45,6 +46,7 @@ func (s *Server) Handler() http.Handler {
 	metrics.Handle(mux, s.dcn, "GET /accounts/{id}/balance", http.HandlerFunc(s.handleBalance))
 	metrics.Handle(mux, s.dcn, "GET /internal/balance-sum", http.HandlerFunc(s.handleBalanceSum))
 	metrics.Handle(mux, s.dcn, "POST /transfer", http.HandlerFunc(s.handleTransfer))
+	metrics.Handle(mux, s.dcn, "POST /internal/batch/interest", http.HandlerFunc(s.handleInterestBatch))
 	return metrics.Mount(ratelimit.New(s.rps).Middleware(mux))
 }
 
