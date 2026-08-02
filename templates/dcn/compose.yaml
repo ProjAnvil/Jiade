@@ -53,8 +53,12 @@ services:
       RABBITMQ_DEFAULT_PASS: dcn123
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
+      - ./deploy/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
     ports: ["15672:15672"]
     networks: [global-net]
+    labels:
+      prometheus.scrape: "true"
+      prometheus.port: "15692"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 3s
@@ -106,6 +110,8 @@ services:
       traefik.http.routers.gns.middlewares: gns-strip
       traefik.http.middlewares.gns-strip.stripprefix.prefixes: /gns
       traefik.http.services.gns.loadbalancer.server.port: "8080"
+      prometheus.scrape: "true"
+      prometheus.port: "8080"
     depends_on:
       gns-db:
         condition: service_healthy
@@ -132,6 +138,8 @@ services:
       traefik.http.routers.rmb.middlewares: rmb-strip
       traefik.http.middlewares.rmb-strip.stripprefix.prefixes: /rmb
       traefik.http.services.rmb.loadbalancer.server.port: "8080"
+      prometheus.scrape: "true"
+      prometheus.port: "8080"
     depends_on:
       rmb-db:
         condition: service_healthy
@@ -158,6 +166,8 @@ services:
       traefik.http.routers.adm.middlewares: adm-strip
       traefik.http.middlewares.adm-strip.stripprefix.prefixes: /adm
       traefik.http.services.adm.loadbalancer.server.port: "8080"
+      prometheus.scrape: "true"
+      prometheus.port: "8080"
     depends_on:
       adm-db:
         condition: service_healthy
@@ -198,6 +208,8 @@ services:
       traefik.http.routers.batch.middlewares: batch-strip
       traefik.http.middlewares.batch-strip.stripprefix.prefixes: /batch
       traefik.http.services.batch.loadbalancer.server.port: "8080"
+      prometheus.scrape: "true"
+      prometheus.port: "8080"
     depends_on:
       batch-db:
         condition: service_healthy
@@ -214,12 +226,18 @@ services:
       - --providers.docker.network=dcn-global
       - --entrypoints.web.address=:80
       - --api.insecure=true
+      - --metrics.prometheus=true
+      - --entrypoints.metrics.address=:8082
+      - --metrics.prometheus.entrypoint=metrics
     ports:
       - "18070:80"    # 统一入口
       - "18071:8080"  # dashboard
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks: [global-net]
+    labels:
+      prometheus.scrape: "true"
+      prometheus.port: "8082"
 
   # ============ IDC 1（idc1）：dcn01 + dcn03 主库 ============
   dcn01-db:
@@ -271,6 +289,8 @@ services:
       traefik.http.routers.dcn.middlewares: dcn-strip
       traefik.http.middlewares.dcn-strip.stripprefix.prefixes: /dcn
       traefik.http.services.dcn.loadbalancer.server.port: "8080"
+      prometheus.scrape: "true"
+      prometheus.port: "8080"
     depends_on:
       dcn01-db:
         condition: service_healthy
@@ -304,6 +324,8 @@ services:
       traefik.http.routers.dcn.middlewares: dcn-strip
       traefik.http.middlewares.dcn-strip.stripprefix.prefixes: /dcn
       traefik.http.services.dcn.loadbalancer.server.port: "8080"
+      prometheus.scrape: "true"
+      prometheus.port: "8080"
     depends_on:
       dcn03-db:
         condition: service_healthy
@@ -351,6 +373,8 @@ services:
       traefik.http.routers.dcn.middlewares: dcn-strip
       traefik.http.middlewares.dcn-strip.stripprefix.prefixes: /dcn
       traefik.http.services.dcn.loadbalancer.server.port: "8080"
+      prometheus.scrape: "true"
+      prometheus.port: "8080"
     depends_on:
       dcn02-db:
         condition: service_healthy
@@ -400,6 +424,8 @@ services:
       traefik.http.routers.dcn.middlewares: dcn-strip
       traefik.http.middlewares.dcn-strip.stripprefix.prefixes: /dcn
       traefik.http.services.dcn.loadbalancer.server.port: "8080"
+      prometheus.scrape: "true"
+      prometheus.port: "8080"
     depends_on:
       dcn04-db:
         condition: service_healthy
@@ -409,6 +435,57 @@ services:
         condition: service_started
       rmb-coordinator:
         condition: service_started
+
+  # ============ 观测栈（Prometheus / exporters / Grafana） ============
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: dcn-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - prometheus-data:/prometheus
+    ports: ["19090:9090"]
+    networks: [global-net]
+
+  mysqld-exporter:
+    image: prom/mysqld-exporter:v0.15.1
+    container_name: mysqld-exporter
+    restart: unless-stopped
+    command:
+      - --config.my-cnf=/cfg/my.cnf
+    volumes:
+      - ./deploy/mysql-exporter/my.cnf:/cfg/my.cnf:ro
+    # 探测目标跨三个网络：dcn01/03-db 在 idc1，dcn02-db 在 idc2，其余在 global-net
+    networks: [global-net, idc1, idc2]
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.63.0
+    container_name: redis-exporter
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: redis://gns-redis:6379
+    networks: [global-net]
+    labels:
+      prometheus.scrape: "true"
+      prometheus.port: "9121"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: dcn-grafana
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["13000:3000"]
+    networks: [global-net]
+    depends_on:
+      - prometheus
 
 networks:
   idc1:
@@ -428,3 +505,5 @@ volumes:
   dcn02-db-data:
   dcn03-db-data:
   dcn04-db-data:
+  prometheus-data:
+  grafana-data:
