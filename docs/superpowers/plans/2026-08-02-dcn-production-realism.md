@@ -27,10 +27,13 @@
 - Modify: `templates/dcn/go.mod`（经 `go get`/`go mod tidy`）
 
 **Interfaces:**
-- Produces:
-  - `metrics.Mount(service string, h http.Handler) http.Handler` — 返回新 mux：`GET /metrics` 由 promhttp 处理，其余路径经 RED 中间件转发给 `h`。后续所有 cmd 入口用它包 handler。
+- Produces（实现期因 Go 1.22 无 `http.Request.Pattern`（1.23 新增）已调整为注册时显式传路由模板，以下签名以已入库代码为准）：
+  - `metrics.Handle(mux *http.ServeMux, service, pattern string, h http.Handler)` — 在 mux 上注册 pattern 并附 RED 采集；handler 标签取路由模板（去方法前缀）。
+  - `metrics.Wrap(service, handler string, next http.Handler) http.Handler` — 手工包单个 handler。
+  - `metrics.Mount(h http.Handler) http.Handler` — 返回带 `GET /metrics` 端点的总 handler（/metrics 自身不计数）。
   - `metrics.IncTx(status string)` — `rmb_tx_total{status}` 计数器 +1（Task 2 的 RMB 协调器用）。
   - 指标：`http_requests_total{service,handler,code}`、`http_request_duration_seconds{service,handler,code_class}` 直方图、`rmb_tx_total{status}`。
+  - 依赖钉 `github.com/prometheus/client_golang v1.22.0`（go 指令保持 1.22 系列，Dockerfile golang:1.22-alpine 可构建）。
 
 - [ ] **Step 1: 引入依赖**
 
@@ -187,51 +190,47 @@ git commit -m "feat(dcn): prometheus RED metrics platform package"
 - Modify: `templates/dcn/cmd/dcn-app/main.go`
 - Modify: `templates/dcn/cmd/rmb-coordinator/main.go`
 - Modify: `templates/dcn/cmd/adm/main.go`
+- Modify: `templates/dcn/internal/gns/server.go:37-47`（业务路由经 metrics.Handle 注册）
+- Modify: `templates/dcn/internal/adm/server.go:32-41`（同）
 - Modify: `templates/dcn/internal/dcnapp/server.go:38-48`（Handler 用 Mount 包装，/metrics 绕过限流）
-- Modify: `templates/dcn/internal/rmb/coordinator.go:382-401`（advance 终态提交后 IncTx）
+- Modify: `templates/dcn/internal/rmb/coordinator.go:382-401`（Handler 同改 + advance 终态提交后 IncTx）
 
 **Interfaces:**
-- Consumes: `metrics.Mount`、`metrics.IncTx`（Task 1）
-- Produces: 四个服务均暴露 `GET /metrics`；RMB 终态写入 `rmb_tx_total{status}`。
+- Consumes: `metrics.Handle`、`metrics.Mount`、`metrics.IncTx`（Task 1，签名以 Task 1 入库代码为准）
+- Produces: 四个服务均暴露 `GET /metrics`，业务路由带 RED 指标；RMB 终态写入 `rmb_tx_total{status}`。
 
-- [ ] **Step 1: gns 入口**
+- [ ] **Step 1: gns —— 路由经 metrics.Handle 注册，入口 Mount**
 
-`templates/dcn/cmd/gns/main.go` 改为：
+`templates/dcn/internal/gns/server.go` 的 `Handler()` 改为（import 加 `"dcn/internal/platform/metrics"`）：
 
 ```go
-package main
-
-import (
-	"dcn/internal/gns"
-	"dcn/internal/platform/metrics"
-	"dcn/internal/platform/mysqlx"
-	"dcn/internal/platform/redisx"
-	"dcn/internal/platform/runx"
-)
-
-func main() {
-	db := mysqlx.Open(runx.MustEnv("DB_DSN"))
-	cache := redisx.Open(runx.MustEnv("REDIS_ADDR"))
-	srv := gns.NewServer(db, cache)
-	runx.Serve(":"+runx.Env("PORT", "8080"), metrics.Mount("gns", srv.Handler()))
+// Handler 返回路由表；业务路由经 metrics.Handle 注册以带 RED 指标。
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		httpx.JSON(w, 200, map[string]string{"status": "ok"})
+	})
+	metrics.Handle(mux, "gns", "GET /locate", http.HandlerFunc(s.handleLocate))
+	metrics.Handle(mux, "gns", "POST /accounts", http.HandlerFunc(s.handleOpenAccount))
+	metrics.Handle(mux, "gns", "GET /routes", http.HandlerFunc(s.handleListRoutes))
+	metrics.Handle(mux, "gns", "POST /routes", http.HandlerFunc(s.handleAddRoute))
+	return mux
 }
 ```
 
-- [ ] **Step 2: adm / rmb-coordinator 入口**
-
-`cmd/adm/main.go`：`runx.Serve(...)` 一行改为
+`templates/dcn/cmd/gns/main.go` 的 `runx.Serve(...)` 一行改为（import 加 `"dcn/internal/platform/metrics"`）：
 
 ```go
-	runx.Serve(":"+runx.Env("PORT", "8080"), metrics.Mount("adm", srv.Handler()))
+	runx.Serve(":"+runx.Env("PORT", "8080"), metrics.Mount(srv.Handler()))
 ```
 
-`cmd/rmb-coordinator/main.go`：同样改为
+- [ ] **Step 2: adm / rmb-coordinator 同构改造**
 
-```go
-	runx.Serve(":"+runx.Env("PORT", "8080"), metrics.Mount("rmb-coordinator", coord.Handler()))
-```
+`templates/dcn/internal/adm/server.go` 的 `Handler()`：`GET /report/summary`、`GET /reconcile` 两条业务路由改经 `metrics.Handle(mux, "adm", ...)` 注册（写法同 Step 1）。
 
-（两文件均加 import `"dcn/internal/platform/metrics"`。）
+`templates/dcn/internal/rmb/coordinator.go` 的 `Handler()`：`POST /transactions`、`GET /transactions/{txId}` 改经 `metrics.Handle(mux, "rmb-coordinator", ...)` 注册。
+
+`cmd/adm/main.go` 与 `cmd/rmb-coordinator/main.go` 的 `runx.Serve(...)` 均改为 `metrics.Mount(...)` 包装（写法同 Step 1，import 加 metrics 包）。
 
 - [ ] **Step 3: dcn-app —— /metrics 绕过限流**
 
@@ -244,11 +243,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, 200, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("POST /accounts", s.handleCreateAccount)
-	mux.HandleFunc("GET /accounts/{id}/balance", s.handleBalance)
-	mux.HandleFunc("GET /internal/balance-sum", s.handleBalanceSum)
-	mux.HandleFunc("POST /transfer", s.handleTransfer)
-	return metrics.Mount(s.dcn, ratelimit.New(s.rps).Middleware(mux))
+	metrics.Handle(mux, s.dcn, "POST /accounts", http.HandlerFunc(s.handleCreateAccount))
+	metrics.Handle(mux, s.dcn, "GET /accounts/{id}/balance", http.HandlerFunc(s.handleBalance))
+	metrics.Handle(mux, s.dcn, "GET /internal/balance-sum", http.HandlerFunc(s.handleBalanceSum))
+	metrics.Handle(mux, s.dcn, "POST /transfer", http.HandlerFunc(s.handleTransfer))
+	return metrics.Mount(ratelimit.New(s.rps).Middleware(mux))
 }
 ```
 
@@ -495,10 +494,10 @@ func NewServer(dcn string, db *sql.DB, gns, rmb string, mqc *mq.Conn, rps float6
 }
 ```
 
-`Handler()` 的 mux 中加一行（`/internal/batch/interest` 走限流内侧即可）：
+`Handler()` 的 mux 中加一行（经 metrics.Handle 注册以带 RED 指标，仍在限流内侧）：
 
 ```go
-	mux.HandleFunc("POST /internal/batch/interest", s.handleInterestBatch)
+	metrics.Handle(mux, s.dcn, "POST /internal/batch/interest", http.HandlerFunc(s.handleInterestBatch))
 ```
 
 - [ ] **Step 5: 入口解析利率**
@@ -685,6 +684,7 @@ import (
 	"time"
 
 	"dcn/internal/platform/httpx"
+	"dcn/internal/platform/metrics"
 )
 
 const unitTimeout = 30 * time.Second
@@ -701,14 +701,14 @@ func NewServer(db *sql.DB, gns string) *Server {
 	return &Server{db: db, gns: gns, hc: &http.Client{Timeout: unitTimeout + 5*time.Second}}
 }
 
-// Handler 返回路由。
+// Handler 返回路由；业务路由经 metrics.Handle 注册以带 RED 指标。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, 200, map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("POST /jobs/interest", s.handleCreateInterest)
-	mux.HandleFunc("GET /jobs/{bizDate}", s.handleGetJob)
+	metrics.Handle(mux, "batch-scheduler", "POST /jobs/interest", http.HandlerFunc(s.handleCreateInterest))
+	metrics.Handle(mux, "batch-scheduler", "GET /jobs/{bizDate}", http.HandlerFunc(s.handleGetJob))
 	return mux
 }
 
@@ -943,7 +943,7 @@ import (
 func main() {
 	db := mysqlx.Open(runx.MustEnv("DB_DSN"))
 	srv := batch.NewServer(db, runx.MustEnv("GNS_ENDPOINT"))
-	runx.Serve(":"+runx.Env("PORT", "8080"), metrics.Mount("batch-scheduler", srv.Handler()))
+	runx.Serve(":"+runx.Env("PORT", "8080"), metrics.Mount(srv.Handler()))
 }
 ```
 
@@ -1683,6 +1683,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"dcn/internal/platform/metrics"
 )
 
 //go:embed index.html
@@ -1712,20 +1714,20 @@ func NewServer(promURL, dockerSocket string) *Server {
 	}
 }
 
-// Handler 返回路由。
+// Handler 返回路由；业务路由经 metrics.Handle 注册以带 RED 指标。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+	metrics.Handle(mux, "console", "GET /", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(indexHTML)
-	})
-	mux.HandleFunc("GET /api/targets", s.proxyProm("/api/v1/targets?state=active"))
-	mux.HandleFunc("GET /api/query", s.handleQuery)
-	mux.HandleFunc("GET /api/containers", s.handleContainers)
+	}))
+	metrics.Handle(mux, "console", "GET /api/targets", s.proxyProm("/api/v1/targets?state=active"))
+	metrics.Handle(mux, "console", "GET /api/query", http.HandlerFunc(s.handleQuery))
+	metrics.Handle(mux, "console", "GET /api/containers", http.HandlerFunc(s.handleContainers))
 	return mux
 }
 
@@ -1891,9 +1893,11 @@ func main() {
 	srv := console.NewServer(
 		runx.Env("PROMETHEUS_URL", "http://prometheus:9090"),
 		runx.Env("DOCKER_SOCKET", "/var/run/docker.sock"))
-	runx.Serve(":"+runx.Env("PORT", "8080"), metrics.Mount("console", srv.Handler()))
+	runx.Serve(":"+runx.Env("PORT", "8080"), metrics.Mount(srv.Handler()))
 }
 ```
+
+（`cmd/console/main.go` 的 import 为 `"dcn/internal/console"`、`"dcn/internal/platform/metrics"`、`"dcn/internal/platform/runx"`。）
 
 `compose.yaml` 加：
 
