@@ -9,10 +9,10 @@ import (
 
 func TestMountExposesMetricsAndCountsRequests(t *testing.T) {
 	inner := http.NewServeMux()
-	inner.HandleFunc("GET /accounts/{id}/balance", func(w http.ResponseWriter, r *http.Request) {
+	Handle(inner, "testsvc", "GET /accounts/{id}/balance", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
-	})
-	h := Mount("testsvc", inner)
+	}))
+	h := Mount(inner)
 
 	// 业务请求被计数
 	rec := httptest.NewRecorder()
@@ -36,7 +36,7 @@ func TestMountExposesMetricsAndCountsRequests(t *testing.T) {
 func TestIncTx(t *testing.T) {
 	IncTx("TESTSTATUS")
 	rec := httptest.NewRecorder()
-	Mount("x", http.NewServeMux()).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	Mount(http.NewServeMux()).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	if !strings.Contains(rec.Body.String(), `rmb_tx_total{status="TESTSTATUS"} 1`) {
 		t.Fatalf("missing rmb_tx_total:\n%s", rec.Body.String())
 	}

@@ -36,32 +36,35 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-// middleware 采集 RED 三要素。handler 标签取 ServeMux 路由后的 r.Pattern
-// （如 /accounts/{id}/balance），避免按原始路径炸基数；必须在 next 之后读取。
-func middleware(service string, next http.Handler) http.Handler {
+// Wrap 采集 RED 三要素。handler 标签由调用方给定为路由模板
+// （如 /accounts/{id}/balance），避免按原始路径炸基数。
+// 注：go 1.22 的 ServeMux 不提供 r.Pattern（go 1.23 才有），故标签只能注册时显式传入。
+func Wrap(service, handler string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sw := &statusWriter{ResponseWriter: w, code: 200}
 		start := time.Now()
 		next.ServeHTTP(sw, r)
-		// r.Pattern 含方法前缀（如 "GET /accounts/{id}/balance"），去掉方法只留路由模板。
-		handler := r.Pattern
-		if i := strings.IndexByte(handler, ' '); i >= 0 {
-			handler = handler[i+1:]
-		}
-		if handler == "" {
-			handler = "unmatched"
-		}
 		code := strconv.Itoa(sw.code)
 		reqTotal.WithLabelValues(service, handler, code).Inc()
 		reqDur.WithLabelValues(service, handler, code[:1]+"xx").Observe(time.Since(start).Seconds())
 	})
 }
 
-// Mount 返回带 /metrics 端点与 RED 采集的总 handler；/metrics 自身不计数。
-func Mount(service string, h http.Handler) http.Handler {
+// Handle 在 mux 上注册 pattern 并附 RED 采集；handler 标签取路由模板（去掉方法前缀）。
+func Handle(mux *http.ServeMux, service, pattern string, h http.Handler) {
+	label := pattern
+	if i := strings.IndexByte(label, ' '); i >= 0 {
+		label = label[i+1:]
+	}
+	mux.Handle(pattern, Wrap(service, label, h))
+}
+
+// Mount 返回带 /metrics 端点的总 handler；/metrics 自身不计数。
+// 业务路由需经 Handle 注册才有 RED 指标。
+func Mount(h http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.Handler())
-	mux.Handle("/", middleware(service, h))
+	mux.Handle("/", h)
 	return mux
 }
 
