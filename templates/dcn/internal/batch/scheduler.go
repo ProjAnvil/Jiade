@@ -186,6 +186,8 @@ func (s *Server) handleCreateInterest(w http.ResponseWriter, r *http.Request) {
 			 ON DUPLICATE KEY UPDATE accounts=VALUES(accounts), interest=VALUES(interest),
 			   status=VALUES(status), error=VALUES(error)`,
 			req.BizDate, res.DCN, res.Accounts, res.Interest, st, errStr); err != nil {
+			// 结果落库失败时把任务置为 FAILED 再返回：FAILED 允许重试（重试会覆盖分单元结果），避免任务卡死 RUNNING 永远无法重跑。
+			s.finishJob(req.BizDate, "FAILED", "0")
 			httpx.Error(w, 500, err.Error())
 			return
 		}
