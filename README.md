@@ -14,10 +14,10 @@ Each template is a standalone Go module that ships its own README and ARCHITECTU
 |----------|------------|------|
 | `bank` | Core banking microcosm — 7 Go services, 7 dedicated PostgreSQL databases, internal gRPC reads, RabbitMQ commands/events, Traefik gateway (:18000), double-entry ledger, daily rolling balances, **durable payment-transfer saga** (risk→hold→transfer forward, reverse-order compensation, operator admin gRPC), **full observability stack** (OTel/Jaeger/Prometheus/Grafana + 5 alerts), and **dev/prod Kubernetes overlays** (dev = stateful, prod = external state + SecretProviderClass). | [templates/bank/README.md](templates/bank/README.md) · [ARCHITECTURE.md](templates/bank/ARCHITECTURE.md) |
 | `commerce` | Commerce backend microcosm — 6 Go services, 6 PostgreSQL databases, RabbitMQ saga, Traefik gateway. | [templates/commerce/README.md](templates/commerce/README.md) · [ARCHITECTURE.md](templates/commerce/ARCHITECTURE.md) |
-| `dcn` | DCN unit-architecture simulation — GNS global routing (Redis+MySQL), RMB reliable message bus with transaction coordinator (RabbitMQ), 3 self-contained DCN units across 2 simulated IDCs, ADM global summary & reconcile, 7-gate verify suite (blast radius, crash recovery, idempotency, online expansion). | [templates/dcn/README.md](templates/dcn/README.md) · [ARCHITECTURE.md](templates/dcn/ARCHITECTURE.md) |
+| `bank_dcn` | DCN unit-architecture simulation — GNS global routing (Redis+MySQL), RMB reliable message bus with transaction coordinator (RabbitMQ), 3 self-contained DCN units across 2 simulated IDCs, ADM global summary & reconcile, 8-gate verify suite (blast radius, crash recovery, idempotency, online expansion, day-end batch), Traefik unified gateway, Prometheus/Grafana/console observability stack. | [templates/bank_dcn/README.md](templates/bank_dcn/README.md) · [ARCHITECTURE.md](templates/bank_dcn/ARCHITECTURE.md) |
 
 ```bash
-jiade init --template <bank|commerce|dcn> --dir ./myproj
+jiade init --template <bank|commerce|bank_dcn> --dir ./myproj
 cd myproj && make up
 ```
 
@@ -79,7 +79,7 @@ internal/template/   embedded template registry (tar-based)
 internal/docker/     docker/compose/daemon probe
 templates/bank/      the bank template — a standalone Go module (`module bank`)
 templates/commerce/  the commerce template — a standalone Go module (`module commerce`)
-templates/dcn/       the dcn template — a standalone Go module (`module dcn`)
+templates/bank_dcn/  the bank_dcn template — a standalone Go module (`module bank_dcn`)
 docs/superpowers/    design specs & implementation plans
 ```
 

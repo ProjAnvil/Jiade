@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DCN Console</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", sans-serif; margin: 24px; background: #0f1420; color: #dde3f0; }
+  h1 { font-size: 20px; } h2 { font-size: 15px; color: #8fa3c8; margin-top: 24px; }
+  .zone { border: 1px solid #2a3550; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px; }
+  .zone h3 { margin: 0 0 8px; font-size: 13px; color: #6f83ad; text-transform: uppercase; }
+  .node { display: inline-flex; align-items: center; gap: 6px; background: #1a2338; border-radius: 6px;
+          padding: 6px 10px; margin: 4px; font-size: 13px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #666; }
+  .up { background: #3ecf6f; } .down { background: #e05252; }
+  table { border-collapse: collapse; font-size: 13px; }
+  td, th { border: 1px solid #2a3550; padding: 4px 10px; }
+  .rps { font-variant-numeric: tabular-nums; }
+  #err { color: #e05252; }
+</style>
+</head>
+<body>
+<h1>DCN Unitized Architecture · Console</h1>
+<div id="err"></div>
+
+<h2>Service Topology &amp; Status</h2>
+<div id="topology"></div>
+
+<h2>Traffic (RPS, 1m rate)</h2>
+<table id="rps"><tr><th>service</th><th>rps</th></tr></table>
+
+<h2>Infrastructure Containers (Docker healthcheck)</h2>
+<table id="infra"><tr><th>container</th><th>state</th><th>status</th></tr></table>
+
+<script>
+const ZONES = [
+  { name: "global-net", nodes: ["gns", "rmb-coordinator", "adm", "batch-scheduler", "dcn-traefik", "dcn-prometheus", "dcn-grafana", "console"] },
+  { name: "idc1", nodes: ["dcn01-app", "dcn03-app"] },
+  { name: "idc2", nodes: ["dcn02-app", "dcn04-app"] },
+];
+const INFRA = ["gns-db", "gns-redis", "dcn-rabbitmq", "rmb-db", "adm-db", "batch-db",
+               "dcn01-db", "dcn02-db", "dcn03-db", "dcn04-db"];
+
+const topo = document.getElementById("topology");
+for (const z of ZONES) {
+  const div = document.createElement("div");
+  div.className = "zone";
+  div.innerHTML = `<h3>${z.name}</h3>` +
+    z.nodes.map(n => `<span class="node"><span class="dot" id="dot-${n}"></span>${n}</span>`).join("");
+  topo.appendChild(div);
+}
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(url + " -> " + r.status);
+  return r.json();
+}
+
+async function refresh() {
+  try {
+    const [targets, rps, containers] = await Promise.all([
+      getJSON("/api/targets"),
+      getJSON("/api/query?query=" + encodeURIComponent("sum by (service) (rate(http_requests_total[1m]))")),
+      getJSON("/api/containers"),
+    ]);
+    document.getElementById("err").textContent = "";
+
+    // Status wall: Prometheus targets (key = container label)
+    const health = {};
+    for (const t of targets.data.activeTargets) health[t.labels.container] = t.health;
+    // Docker container fallback (grafana and other non-scraped components)
+    const byName = {};
+    for (const c of containers) byName[c.Names[0].replace(/^\//, "")] = c;
+    for (const z of ZONES) for (const n of z.nodes) {
+      const dot = document.getElementById("dot-" + n);
+      let st = health[n];
+      if (!st && byName[n]) st = byName[n].State === "running" ? "up" : "down";
+      dot.className = "dot " + (st === "up" ? "up" : "down");
+    }
+
+    // RPS
+    const tbl = document.getElementById("rps");
+    tbl.innerHTML = "<tr><th>service</th><th>rps</th></tr>";
+    for (const s of rps.data.result.sort((a, b) => a.metric.service < b.metric.service ? -1 : 1)) {
+      tbl.innerHTML += `<tr><td>${s.metric.service}</td><td class="rps">${(+s.value[1]).toFixed(2)}</td></tr>`;
+    }
+
+    // Infrastructure
+    const inf = document.getElementById("infra");
+    inf.innerHTML = "<tr><th>container</th><th>state</th><th>status</th></tr>";
+    for (const name of INFRA) {
+      const c = byName[name];
+      inf.innerHTML += `<tr><td>${name}</td><td>${c ? c.State : "—"}</td><td>${c ? c.Status : "not running"}</td></tr>`;
+    }
+  } catch (e) {
+    document.getElementById("err").textContent = "Data fetch failed: " + e.message;
+  }
+}
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

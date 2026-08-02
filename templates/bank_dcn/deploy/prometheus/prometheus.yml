@@ -1,0 +1,44 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  # Go services / traefik / redis-exporter / rabbitmq: label-driven Docker service discovery
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+    relabel_configs:
+      - source_labels: [__meta_docker_container_label_prometheus_scrape]
+        regex: "true"
+        action: keep
+      - source_labels: [__meta_docker_container_name, __meta_docker_container_label_prometheus_port]
+        separator: ":"
+        regex: "/(.+):(\\d+)"
+        replacement: "${1}:${2}"
+        target_label: __address__
+      - source_labels: [__meta_docker_container_name]
+        regex: "/(.+)"
+        replacement: "$1"
+        target_label: container
+
+  # All seven MySQL databases: mysqld-exporter /probe multi-target (database topology is
+  # fixed, so targets are listed statically; mysqld-exporter must be attached to idc1,
+  # idc2, and global-net to reach every database, see Step 4)
+  - job_name: mysql
+    metrics_path: /probe
+    static_configs:
+      - targets:
+          # dcn04-db belongs to the expansion profile and is intentionally excluded from monitoring
+          - dcn01-db:3306
+          - dcn02-db:3306
+          - dcn03-db:3306
+          - gns-db:3306
+          - rmb-db:3306
+          - adm-db:3306
+          - batch-db:3306
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: mysqld-exporter:9104

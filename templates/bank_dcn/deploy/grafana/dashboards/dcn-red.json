@@ -1,0 +1,57 @@
+{
+  "uid": "dcn-red",
+  "title": "DCN Services (RED)",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {"from": "now-15m", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "Prometheus"},
+        "query": "label_values(http_requests_total, service)",
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "current": {"selected": true, "text": ["All"], "value": ["$__all"]}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "RPS",
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"expr": "sum by (service) (rate(http_requests_total{service=~\"$service\"}[1m]))", "legendFormat": "{{service}}", "refId": "A"}]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Error rate (5xx/s)",
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [{"expr": "sum by (service) (rate(http_requests_total{service=~\"$service\",code=~\"5..\"}[1m]))", "legendFormat": "{{service}}", "refId": "A"}]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "P99 latency (s)",
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [{"expr": "histogram_quantile(0.99, sum by (le, service) (rate(http_request_duration_seconds_bucket{service=~\"$service\"}[5m])))", "legendFormat": "{{service}}", "refId": "A"}]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "RMB transactions (final status)",
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [{"expr": "sum by (status) (increase(rmb_tx_total[5m]))", "legendFormat": "{{status}}", "refId": "A"}]
+    },
+    {
+      "id": 5, "type": "stat", "title": "Infra up",
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "mysql_up", "legendFormat": "{{instance}}", "refId": "A"},
+        {"expr": "up{job=\"docker\"}", "legendFormat": "{{container}}", "refId": "B"}
+      ]
+    }
+  ]
+}
