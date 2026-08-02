@@ -35,7 +35,7 @@ check "dcn04-db 仅在 idc2" \
 check "DCN 数据库均不接入 global-net" \
   '[.services["dcn01-db"], .services["dcn02-db"], .services["dcn03-db"], .services["dcn04-db"]] | all(.networks | has("global-net") | not)'
 check "全局区服务不接入任何 IDC 网络" \
-  '[.services["gns"], .services["rmb-coordinator"], .services["adm"], .services["batch-scheduler"], .services["batch-db"], .services["traefik"]] | all(.networks | keys == ["global-net"])'
+  '[.services["gns"], .services["rmb-coordinator"], .services["adm"], .services["batch-scheduler"], .services["batch-db"], .services["traefik"], .services["console"]] | all(.networks | keys == ["global-net"])'
 check "traefik 仅接入 global-net" \
   '.services["traefik"].networks | keys == ["global-net"]'
 check "dcn04 在 expansion profile" \

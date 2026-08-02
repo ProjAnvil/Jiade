@@ -487,6 +487,27 @@ services:
     depends_on:
       - prometheus
 
+  console:
+    <<: *app-health
+    container_name: console
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args: { SERVICE: console }
+    environment:
+      PROMETHEUS_URL: http://prometheus:9090
+      DOCKER_SOCKET: /var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports: ["18099:8080"]
+    networks: [global-net]
+    depends_on:
+      prometheus:
+        condition: service_started
+    labels:
+      prometheus.scrape: "true"
+      prometheus.port: "8080"
+
 networks:
   idc1:
     name: dcn-idc1
