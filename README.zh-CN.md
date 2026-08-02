@@ -12,8 +12,8 @@
 
 | 模板 | 是什么 | 文档 |
 |------|--------|------|
-| `bank` | 银行核心系统缩影——7 个 Go 服务、7 个独立 PostgreSQL 库、内部 gRPC 读取、RabbitMQ 命令/事件、Traefik 网关（:18000）、复式记账总账、逐日滚存余额、**durable 支付 saga**（风控→冻结→过账 forward，逆序补偿，运营者 admin gRPC）、**全栈可观测性**（OTel/Jaeger/Prometheus/Grafana + 5 告警）、**dev/prod Kubernetes overlay**（dev = 状态化，prod = 外部状态 + SecretProviderClass）。 | [templates/bank/README.md](templates/bank/README.md) · [ARCHITECTURE.md](templates/bank/ARCHITECTURE.md) |
-| `commerce` | 电商后端缩影——6 个 Go 服务、6 个 PostgreSQL 库、RabbitMQ saga、Traefik 网关。 | [templates/commerce/README.md](templates/commerce/README.md) · [ARCHITECTURE.md](templates/commerce/ARCHITECTURE.md) |
+| `bank` | 银行核心系统缩影——7 个 Go 服务、7 个独立 PostgreSQL 库、内部 gRPC 读取、RabbitMQ 命令/事件、Traefik 网关（:18000）、复式记账总账、逐日滚存余额、**durable 支付 saga**（风控→冻结→过账 forward，逆序补偿，运营者 admin gRPC）、**全栈可观测性**（OTel/Jaeger/Prometheus/Grafana + 5 告警）、**dev/prod Kubernetes overlay**（dev = 状态化，prod = 外部状态 + SecretProviderClass）。 | [中文](templates/bank/README.zh-CN.md) · [English](templates/bank/README.md) · [ARCHITECTURE.md](templates/bank/ARCHITECTURE.md) |
+| `commerce` | 电商后端缩影——6 个 Go 服务、6 个 PostgreSQL 库、RabbitMQ saga、Traefik 网关。 | [中文](templates/commerce/README.zh-CN.md) · [English](templates/commerce/README.md) · [ARCHITECTURE.md](templates/commerce/ARCHITECTURE.md) |
 
 ```bash
 jiade init --template <bank|commerce> --dir ./myproj

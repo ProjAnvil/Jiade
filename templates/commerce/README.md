@@ -1,5 +1,7 @@
 # Commerce Template
 
+[中文文档](README.zh-CN.md)
+
 A complete commerce backend microcosm: catalog/SKUs, customers, inventory
 reservations, orders, payments/refunds, split fulfillment, and tracking. Six
 Go microservices, six service-owned PostgreSQL databases, RabbitMQ, and a
