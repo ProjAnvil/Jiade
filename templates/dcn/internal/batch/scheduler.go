@@ -154,8 +154,9 @@ func (s *Server) handleCreateInterest(w http.ResponseWriter, r *http.Request) {
 	case err == nil:
 		// FAILED 允许重试，仅重跑失败单元（成功单元靠 journal 幂等兜底）；
 		// 过期 RUNNING 视为僵尸任务（进程中途崩溃或 finishJob 落库失败），允许重跑。
+		// 重置 created_at：重跑任务重新计龄，避免 10 分钟后被误判为僵尸。
 		if _, err := s.db.Exec(
-			`UPDATE batch_job SET status = 'RUNNING', finished_at = NULL WHERE biz_date = ?`,
+			`UPDATE batch_job SET status = 'RUNNING', finished_at = NULL, created_at = NOW() WHERE biz_date = ?`,
 			req.BizDate); err != nil {
 			httpx.Error(w, 500, err.Error())
 			return
