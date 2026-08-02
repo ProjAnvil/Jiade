@@ -116,7 +116,9 @@ Prerequisites: Docker (Docker Desktop with ≥ 4 GB memory recommended — the f
 make up && make seed && make verify
 ```
 
-`make up` builds and starts the full topology (base three units; dcn04 stays off under the `expansion` profile). `make seed` opens the dev accounts via GNS. `make verify` runs the 8-gate acceptance suite (local transfer, cross-DCN transfer, blast radius, coordinator crash recovery, idempotency, online expansion, ADM aggregation, day-end batch). Other targets: `make down`, `make seed-full`, `make topology-test`, `make smoke`.
+`make up` builds and starts the full topology (base three units; dcn04 stays off under the `expansion` profile). `make seed` opens the dev accounts via GNS. `make verify` runs the 8-gate acceptance suite (local transfer, cross-DCN transfer, blast radius, coordinator crash recovery, idempotency, online expansion, ADM aggregation, day-end batch). Other targets: `make down`, `make seed-full`, `make topology-test`, `make smoke`, `make integration-test`.
+
+`make integration-test` runs the external integration suite (`test/integration/`, Go with build tag `integration`) against the running stack — per-service behavior contract tests over HTTP. Tests skip automatically when the stack is unreachable; endpoints can be overridden via `DCN_IT_*` environment variables.
 
 Observability entrypoints once the stack is up:
 

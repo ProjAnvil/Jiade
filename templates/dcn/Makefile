@@ -1,4 +1,4 @@
-.PHONY: up down seed seed-full verify smoke topology-test
+.PHONY: up down seed seed-full verify smoke topology-test integration-test
 
 up:
 	docker compose up -d --build --wait
@@ -17,5 +17,8 @@ verify:
 
 topology-test:
 	bash test/topology.sh
+
+integration-test:
+	go test -tags=integration -p 1 ./test/integration/...
 
 smoke: verify

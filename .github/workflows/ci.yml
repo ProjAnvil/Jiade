@@ -109,6 +109,8 @@ jobs:
         run: cd templates/dcn && make up && make seed
       - name: Verify
         run: cd templates/dcn && make verify
+      - name: Integration tests
+        run: cd templates/dcn && make integration-test
       - name: Capture logs
         if: failure()
         run: cd templates/dcn && docker compose --profile expansion logs --no-color

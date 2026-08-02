@@ -116,7 +116,9 @@ flowchart TB
 make up && make seed && make verify
 ```
 
-`make up` 构建并启动完整拓扑（基础三单元；dcn04 位于 `expansion` profile，默认不启动）。`make seed` 经 GNS 开出 dev 档账户。`make verify` 运行八关验收（本地转账、跨 DCN 转账、爆炸半径、协调者崩溃恢复、幂等、在线扩容、ADM 汇总、日终批量）。其余目标：`make down`、`make seed-full`、`make topology-test`、`make smoke`。
+`make up` 构建并启动完整拓扑（基础三单元；dcn04 位于 `expansion` profile，默认不启动）。`make seed` 经 GNS 开出 dev 档账户。`make verify` 运行八关验收（本地转账、跨 DCN 转账、爆炸半径、协调者崩溃恢复、幂等、在线扩容、ADM 汇总、日终批量）。其余目标：`make down`、`make seed-full`、`make topology-test`、`make smoke`、`make integration-test`。
+
+`make integration-test` 对运行中的栈发起外部集成测试（`test/integration/`，Go，build tag `integration`）——按服务的外部行为契约测试，全部走 HTTP。栈不可达时用例自动 Skip；端点可用 `DCN_IT_*` 环境变量覆盖。
 
 栈启动后的观测入口：
 
