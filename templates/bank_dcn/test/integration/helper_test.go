@@ -106,6 +106,9 @@ func openAccount(t *testing.T, gnsURL, name, requestID string) (int, string) {
 }
 
 // openPair opens several accounts and finds a pair in the same unit (sameUnit=true) or across units (false).
+// For cross-unit pairs, when all new accounts cluster in one unit (PickSegment routes new accounts to the
+// least-loaded segment, which after seed+verify funnels every open into the newest unit), it falls back to
+// locating pre-seeded accounts 1001 (dcn01) and 2001 (dcn02), which are guaranteed by `make seed`.
 func openPair(t *testing.T, gnsURL string, sameUnit bool) (int, int, string, string) {
 	t.Helper()
 	type acct struct {
@@ -123,8 +126,35 @@ func openPair(t *testing.T, gnsURL string, sameUnit bool) (int, int, string, str
 		}
 		list = append(list, acct{id, dcn})
 	}
+	// Fallback for cross-unit pairs: PickSegment load-balances new accounts into the least-populated
+	// segment, so after seed+verify all new opens land in the same unit. Locate two pre-seeded accounts
+	// from different segments instead.
+	if !sameUnit {
+		a, dcnA := locateAccount(t, gnsURL, 1001)
+		b, dcnB := locateAccount(t, gnsURL, 2001)
+		if dcnA != dcnB {
+			return a, b, dcnA, dcnB
+		}
+	}
 	t.Fatalf("no suitable account pair after 8 opens (sameUnit=%v)", sameUnit)
 	return 0, 0, "", ""
+}
+
+// locateAccount looks up a pre-existing account via GNS /locate, returning its ID and unit.
+func locateAccount(t *testing.T, gnsURL string, accountID int) (int, string) {
+	t.Helper()
+	code, raw := doJSON(t, "GET", fmt.Sprintf("%s/locate?accountId=%d", gnsURL, accountID), nil)
+	if code != 200 {
+		t.Fatalf("locate %d: %d %s", accountID, code, raw)
+	}
+	var v struct {
+		AccountID int    `json:"accountId"`
+		DCN       string `json:"dcn"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	return v.AccountID, v.DCN
 }
 
 // balance reads the account balance (returned as a string verbatim).
