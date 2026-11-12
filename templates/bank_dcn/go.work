@@ -1,0 +1,13 @@
+go 1.22.0
+
+use (
+	./lib
+	./gns
+	./rmb
+	./dcn-app
+	./adm
+	./batch-scheduler
+	./console
+	./seed
+	./test/integration
+)

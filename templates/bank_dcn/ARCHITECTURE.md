@@ -195,13 +195,13 @@ RMB 子事务消息全链路 at-least-once，幂等由各端唯一键兜底；AD
 | adm_db | `event_log` | 事件审计 + 去重；UNIQUE KEY `uk_event (tx_id, account_id, direction)` |
 | adm_db | `global_balance` | `account_id` PK；`dcn`；`balance`（全局镜像汇总） |
 
-完整 DDL 见 `db/init/`（`gns/`、`rmb/`、`dcn/`、`adm/` 各一份 `01_init.sql`）。
+完整 DDL 随所属服务存放（各一份 `01_init.sql`）：`gns/db/init`、`rmb/db/init`、`dcn-app/db/init`（dcn01–04 共用）、`adm/db/init`、`batch-scheduler/db/init`。
 
 ## 7. 观测体系
 
 仿真生产的「统一监控平台」，仅覆盖指标（metrics），不含告警、日志聚合与链路追踪：
 
-- **RED 埋点**：所有 Go 服务（dcn-app、gns、rmb-coordinator、adm、batch-scheduler、console）的业务路由经 `internal/platform/metrics` 的 `metrics.Handle` 包装，输出 `http_requests_total`（labels: service/route/code）与 `http_request_duration_seconds` 直方图；`/metrics` 与 `/healthz` 一样不受限流约束。
+- **RED 埋点**：所有 Go 服务（dcn-app、gns、rmb-coordinator、adm、batch-scheduler、console）的业务路由经 `lib/metrics` 的 `metrics.Handle` 包装，输出 `http_requests_total`（labels: service/route/code）与 `http_request_duration_seconds` 直方图；`/metrics` 与 `/healthz` 一样不受限流约束。
 - **Prometheus 自动发现**：`docker_sd_configs` + 容器 label（`prometheus.scrape` / `prometheus.port`）驱动抓取，新增容器只需打 label 即自动纳入；MySQL 拓扑固定，经 mysqld-exporter `/probe` 静态枚举七库（dcn01/02/03、gns、rmb、adm、batch——mysqld-exporter 需同时挂三个网络才能触达各库）；另有 redis-exporter、rabbitmq prometheus 插件（:15692）、traefik `--metrics.prometheus`（:8082）。
 - **Grafana**：provisioning 自动装配 Prometheus datasource 与 RED 仪表盘（uid `dcn-red`，「DCN Services (RED)」；`$service` 变量下钻单服务，面板含 RPS / 5xx 错误率 / P99 延迟 / RMB 事务终态）；匿名 Viewer 免登录，端口 13000。
 - **console 观测台**（18099）：内嵌单页——拓扑视图、容器状态墙（Docker Engine API，只读挂载 socket）、各服务 RPS 曲线（经 `/api/query` 代理 Prometheus HTTP API）。
@@ -224,3 +224,24 @@ RMB 子事务消息全链路 at-least-once，幂等由各端唯一键兜底；AD
 辅助：`make topology-test`（`test/topology.sh`）用 `docker compose config --format json` + jq 静态断言三网络存在、各 DB 仅接入所属 IDC 网络、DCN 应用双网卡、dcn04 在 expansion profile。
 
 集成测试：`make integration-test`（`test/integration/`，Go，build tag `integration`）是与 verify.sh 互补的另一层验证——verify.sh 是编排式故障注入冒烟（停容器、重投消息、触发批量，断言端到端资金守恒），integration 包则不做故障编排，只按服务对运行中的栈发起 HTTP 外部行为契约测试（dcn-app 余额/转账语义、rmb 事务幂等注册、adm 汇总/对账、gns 开户/路由等）。栈不可达时用例自动 Skip，端点可用 `DCN_IT_*` 环境变量覆盖。
+
+## 9. 代码组织（独立 Go project 并排）
+
+仓库按「每个模块一个独立 Go project」组织：顶层每个目录都是自带 `go.mod` 的独立工程，没有嵌套 module 层级；根目录 `go.work` 串联本地开发（`go run ./seed/cmd/seed` 等根级命令依赖它）。
+
+```text
+├── compose.yaml            # 拓扑编排；build context 为 workspace 根，dockerfile 指向各服务目录
+├── go.work                 # 本地开发工作区
+├── lib/                    # 共享 lib（单一 module）：contracts/（RMB 消息契约，TxStep 等，零第三方依赖）
+│                           #   + httpx / metrics / mq / mysqlx / ratelimit / redisx / runx / sqltest
+├── gns/                    # 独立 project：go.mod + cmd/ + internal/ + Dockerfile + db/init/（全局路由）
+├── rmb/                    # 同上（可靠消息总线协调者）
+├── dcn-app/                # 同上（单元应用；dcn01–03 部署，dcn04 扩容 profile）
+├── adm/                    # 同上（全局汇总与核对）
+├── batch-scheduler/        # 同上（日终批量调度）
+├── console/                # 同上（观测台单页）
+├── seed/                   # 夹具生成器（宿主机 go run，不进镜像；不依赖 lib）
+└── test/integration/       # 外部集成测试（独立 module，build tag `integration`，纯黑盒 HTTP）
+```
+
+依赖只允许单向：各服务 project → `lib`（`replace bank-dcn/lib => ../lib`）；服务之间零 import，跨服务交互仅 HTTP / RabbitMQ / MySQL（契约见 `lib/contracts`）。目录可整体搬移：保持同级相邻，任何一个 project 都能直接抽成独立仓库。Docker 构建以 workspace 根为 context，镜像内 `GOWORK=off`、按各自 module 独立编译。`make build` / `make test` 遍历全部 project。

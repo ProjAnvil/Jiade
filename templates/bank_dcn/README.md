@@ -108,6 +108,23 @@ Account IDs are allocated starting at `segStart + 1` (the first account of segme
 | 3000–3999 | dcn03 | idc1 |
 | 4000–4999 | dcn04 | idc2 (registered by the expansion scenario; does not exist initially) |
 
+## Repository layout
+
+Independent Go projects laid out side by side — each top-level directory is a self-contained project with its own `go.mod` (no nested module hierarchy):
+
+```text
+lib/                the shared lib, one module: contracts (RMB message DTOs) + platform components
+                    (httpx / metrics / mq / mysqlx / ratelimit / redisx / runx / sqltest)
+gns/  rmb/  dcn-app/  adm/  batch-scheduler/  console/
+                    each an independent Go project: go.mod + cmd/ + internal/ + Dockerfile + db/init/;
+                    dcn-app is deployed as dcn01–03 (dcn04 under the expansion profile)
+seed/               fixture generator (runs on the host via go run, not containerized)
+test/integration/   black-box integration tests (own module, build tag `integration`)
+compose.yaml, Makefile, deploy/, docs   cross-service orchestration assets at the workspace root
+```
+
+Every project resolves the shared lib through `replace bank-dcn/lib => ../lib`, so the projects are relocatable: any directory can be moved out as a standalone repository as long as siblings stay adjacent. Services never import each other — cross-service interaction is HTTP / RabbitMQ / MySQL only. Docker builds use the workspace root as context and compile each project standalone with `GOWORK=off`. `go.work` at the root enables workspace-level commands (`go run ./seed/cmd/seed`); `make build` / `make test` iterate over every project.
+
 ## Quickstart
 
 Prerequisites: Docker (Docker Desktop with ≥ 4 GB memory recommended — the full base stack runs 22 containers, 24 after expansion) and Go (for `seed` and the test scripts).
@@ -116,7 +133,7 @@ Prerequisites: Docker (Docker Desktop with ≥ 4 GB memory recommended — the f
 make up && make seed && make verify
 ```
 
-`make up` builds and starts the full topology (base three units; dcn04 stays off under the `expansion` profile). `make seed` opens the dev accounts via GNS. `make verify` runs the 8-gate acceptance suite (local transfer, cross-DCN transfer, blast radius, coordinator crash recovery, idempotency, online expansion, ADM aggregation, day-end batch). Other targets: `make down`, `make seed-full`, `make topology-test`, `make smoke`, `make integration-test`.
+`make up` builds and starts the full topology (base three units; dcn04 stays off under the `expansion` profile). `make seed` opens the dev accounts via GNS. `make verify` runs the 8-gate acceptance suite (local transfer, cross-DCN transfer, blast radius, coordinator crash recovery, idempotency, online expansion, ADM aggregation, day-end batch). Other targets: `make down`, `make seed-full`, `make topology-test`, `make smoke`, `make integration-test`, `make cover` (per-project unit-test coverage; broker-gated lib tests skip without the stack).
 
 `make integration-test` runs the external integration suite (`test/integration/`, Go with build tag `integration`) against the running stack — per-service behavior contract tests over HTTP. Tests skip automatically when the stack is unreachable; endpoints can be overridden via `DCN_IT_*` environment variables.
 

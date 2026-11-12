@@ -27,7 +27,7 @@ services:
       MYSQL_ROOT_HOST: "%"
       MYSQL_DATABASE: gns_db
     volumes:
-      - ./db/init/gns:/docker-entrypoint-initdb.d:ro
+      - ./gns/db/init:/docker-entrypoint-initdb.d:ro
       - gns-db-data:/var/lib/mysql
     ports: ["13309:3306"]
     networks: [global-net]
@@ -73,7 +73,7 @@ services:
       MYSQL_ROOT_HOST: "%"
       MYSQL_DATABASE: rmb_db
     volumes:
-      - ./db/init/rmb:/docker-entrypoint-initdb.d:ro
+      - ./rmb/db/init:/docker-entrypoint-initdb.d:ro
       - rmb-db-data:/var/lib/mysql
     ports: ["13310:3306"]
     networks: [global-net]
@@ -86,7 +86,7 @@ services:
       MYSQL_ROOT_HOST: "%"
       MYSQL_DATABASE: adm_db
     volumes:
-      - ./db/init/adm:/docker-entrypoint-initdb.d:ro
+      - ./adm/db/init:/docker-entrypoint-initdb.d:ro
       - adm-db-data:/var/lib/mysql
     ports: ["13311:3306"]
     networks: [global-net]
@@ -96,8 +96,7 @@ services:
     container_name: gns
     build:
       context: .
-      dockerfile: Dockerfile
-      args: { SERVICE: gns }
+      dockerfile: gns/Dockerfile
     environment:
       DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(gns-db:3306)/gns_db?parseTime=true
       REDIS_ADDR: gns-redis:6379
@@ -123,8 +122,7 @@ services:
     container_name: rmb-coordinator
     build:
       context: .
-      dockerfile: Dockerfile
-      args: { SERVICE: rmb-coordinator }
+      dockerfile: rmb/Dockerfile
     environment:
       DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(rmb-db:3306)/rmb_db?parseTime=true
       AMQP_URL: amqp://dcn:dcn123@dcn-rabbitmq:5672/
@@ -151,8 +149,7 @@ services:
     container_name: adm
     build:
       context: .
-      dockerfile: Dockerfile
-      args: { SERVICE: adm }
+      dockerfile: adm/Dockerfile
     environment:
       DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(adm-db:3306)/adm_db?parseTime=true
       AMQP_URL: amqp://dcn:dcn123@dcn-rabbitmq:5672/
@@ -184,7 +181,7 @@ services:
       MYSQL_ROOT_HOST: "%"
       MYSQL_DATABASE: batch_db
     volumes:
-      - ./db/init/batch:/docker-entrypoint-initdb.d:ro
+      - ./batch-scheduler/db/init:/docker-entrypoint-initdb.d:ro
       - batch-db-data:/var/lib/mysql
     ports: ["13313:3306"]
     networks: [global-net]
@@ -194,8 +191,7 @@ services:
     container_name: batch-scheduler
     build:
       context: .
-      dockerfile: Dockerfile
-      args: { SERVICE: batch-scheduler }
+      dockerfile: batch-scheduler/Dockerfile
     environment:
       DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(batch-db:3306)/batch_db?parseTime=true
       GNS_ENDPOINT: http://gns:8080
@@ -250,7 +246,7 @@ services:
       MYSQL_ROOT_HOST: "%"
       MYSQL_DATABASE: dcn01_db
     volumes:
-      - ./db/init/dcn:/docker-entrypoint-initdb.d:ro
+      - ./dcn-app/db/init:/docker-entrypoint-initdb.d:ro
       - dcn01-db-data:/var/lib/mysql
     ports: ["13306:3306"]
     networks: [idc1]
@@ -263,7 +259,7 @@ services:
       MYSQL_ROOT_HOST: "%"
       MYSQL_DATABASE: dcn03_db
     volumes:
-      - ./db/init/dcn:/docker-entrypoint-initdb.d:ro
+      - ./dcn-app/db/init:/docker-entrypoint-initdb.d:ro
       - dcn03-db-data:/var/lib/mysql
     ports: ["13308:3306"]
     networks: [idc1]
@@ -273,8 +269,7 @@ services:
     container_name: dcn01-app
     build:
       context: .
-      dockerfile: Dockerfile
-      args: { SERVICE: dcn-app }
+      dockerfile: dcn-app/Dockerfile
     environment:
       DCN_ID: dcn01
       DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(dcn01-db:3306)/dcn01_db?parseTime=true
@@ -309,8 +304,7 @@ services:
     container_name: dcn03-app
     build:
       context: .
-      dockerfile: Dockerfile
-      args: { SERVICE: dcn-app }
+      dockerfile: dcn-app/Dockerfile
     environment:
       DCN_ID: dcn03
       DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(dcn03-db:3306)/dcn03_db?parseTime=true
@@ -349,7 +343,7 @@ services:
       MYSQL_ROOT_HOST: "%"
       MYSQL_DATABASE: dcn02_db
     volumes:
-      - ./db/init/dcn:/docker-entrypoint-initdb.d:ro
+      - ./dcn-app/db/init:/docker-entrypoint-initdb.d:ro
       - dcn02-db-data:/var/lib/mysql
     ports: ["13307:3306"]
     networks: [idc2]
@@ -359,8 +353,7 @@ services:
     container_name: dcn02-app
     build:
       context: .
-      dockerfile: Dockerfile
-      args: { SERVICE: dcn-app }
+      dockerfile: dcn-app/Dockerfile
     environment:
       DCN_ID: dcn02
       DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(dcn02-db:3306)/dcn02_db?parseTime=true
@@ -400,7 +393,7 @@ services:
       MYSQL_ROOT_HOST: "%"
       MYSQL_DATABASE: dcn04_db
     volumes:
-      - ./db/init/dcn:/docker-entrypoint-initdb.d:ro
+      - ./dcn-app/db/init:/docker-entrypoint-initdb.d:ro
       - dcn04-db-data:/var/lib/mysql
     ports: ["13312:3306"]
     networks: [idc2]
@@ -411,8 +404,7 @@ services:
     profiles: [expansion]
     build:
       context: .
-      dockerfile: Dockerfile
-      args: { SERVICE: dcn-app }
+      dockerfile: dcn-app/Dockerfile
     environment:
       DCN_ID: dcn04
       DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(dcn04-db:3306)/dcn04_db?parseTime=true
@@ -498,8 +490,7 @@ services:
     container_name: console
     build:
       context: .
-      dockerfile: Dockerfile
-      args: { SERVICE: console }
+      dockerfile: console/Dockerfile
     environment:
       PROMETHEUS_URL: http://prometheus:9090
       DOCKER_SOCKET: /var/run/docker.sock

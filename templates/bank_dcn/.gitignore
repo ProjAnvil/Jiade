@@ -1,2 +1,4 @@
 .env
-/seed
+/seed/seed
+coverage.out
+coverage.html

@@ -2,12 +2,12 @@ name: bank_dcn
 description: DCN unitized architecture simulation — GNS global routing + RMB reliable message bus + self-contained DCN units + ADM global aggregation and reconciliation
 version: 0.1.0
 databases:
-  - { name: gns-db, migrate: db/init/gns }
-  - { name: rmb-db, migrate: db/init/rmb }
-  - { name: dcn01-db, migrate: db/init/dcn }
-  - { name: dcn02-db, migrate: db/init/dcn }
-  - { name: dcn03-db, migrate: db/init/dcn }
-  - { name: adm-db, migrate: db/init/adm }
+  - { name: gns-db, migrate: gns/db/init }
+  - { name: rmb-db, migrate: rmb/db/init }
+  - { name: dcn01-db, migrate: dcn-app/db/init }
+  - { name: dcn02-db, migrate: dcn-app/db/init }
+  - { name: dcn03-db, migrate: dcn-app/db/init }
+  - { name: adm-db, migrate: adm/db/init }
 services:
   - { name: gns, port: 18080, db: gns-db }
   - { name: rmb-coordinator, port: 18090, db: rmb-db }
@@ -16,5 +16,5 @@ services:
   - { name: dcn03-app, port: 18083, db: dcn03-db }
   - { name: adm, port: 18091, db: adm-db }
 seed:
-  entrypoint: go run ./cmd/seed
+  entrypoint: go run ./seed/cmd/seed
   scales: [dev, full]

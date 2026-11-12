@@ -108,6 +108,23 @@ flowchart TB
 | 3000–3999 | dcn03 | idc1 |
 | 4000–4999 | dcn04 | idc2（扩容用例注册，初始不存在） |
 
+## 仓库结构
+
+并排的独立 Go project——每个顶层目录都是自带 `go.mod` 的独立工程（没有嵌套 module 层级）：
+
+```text
+lib/                共享 lib（单一 module）：contracts（RMB 消息 DTO）+ platform 组件
+                    （httpx / metrics / mq / mysqlx / ratelimit / redisx / runx / sqltest）
+gns/  rmb/  dcn-app/  adm/  batch-scheduler/  console/
+                    每个都是独立 Go project：go.mod + cmd/ + internal/ + Dockerfile + db/init/；
+                    dcn-app 以 dcn01–03 三个实例部署（dcn04 走 expansion profile）
+seed/               夹具生成器（宿主机 go run，不打镜像）
+test/integration/   黑盒集成测试（独立 module，build tag `integration`）
+compose.yaml、Makefile、deploy/、文档   跨服务编排资产，放在 workspace 根
+```
+
+各 project 经 `replace bank-dcn/lib => ../lib` 引用共享 lib，目录可整体搬走——只要保持同级相邻，任何目录都可以直接抽成独立仓库。服务之间零 import——跨服务交互只有 HTTP / RabbitMQ / MySQL。Docker 构建以 workspace 根为 context，镜像内 `GOWORK=off` 按 project 独立编译。根 `go.work` 支持根级命令（`go run ./seed/cmd/seed`）；`make build` / `make test` 遍历全部 project。
+
 ## 快速开始
 
 前置要求：Docker（Docker Desktop 建议分配 ≥ 4GB 内存——基础拓扑共 22 个容器，扩容后 24 个）与 Go（seed 与测试脚本需要）。
@@ -116,7 +133,7 @@ flowchart TB
 make up && make seed && make verify
 ```
 
-`make up` 构建并启动完整拓扑（基础三单元；dcn04 位于 `expansion` profile，默认不启动）。`make seed` 经 GNS 开出 dev 档账户。`make verify` 运行八关验收（本地转账、跨 DCN 转账、爆炸半径、协调者崩溃恢复、幂等、在线扩容、ADM 汇总、日终批量）。其余目标：`make down`、`make seed-full`、`make topology-test`、`make smoke`、`make integration-test`。
+`make up` 构建并启动完整拓扑（基础三单元；dcn04 位于 `expansion` profile，默认不启动）。`make seed` 经 GNS 开出 dev 档账户。`make verify` 运行八关验收（本地转账、跨 DCN 转账、爆炸半径、协调者崩溃恢复、幂等、在线扩容、ADM 汇总、日终批量）。其余目标：`make down`、`make seed-full`、`make topology-test`、`make smoke`、`make integration-test`、`make cover`（逐 project 单测覆盖率；依赖真实中间件的 lib 用例在栈未启动时自动 Skip）。
 
 `make integration-test` 对运行中的栈发起外部集成测试（`test/integration/`，Go，build tag `integration`）——按服务的外部行为契约测试，全部走 HTTP。栈不可达时用例自动 Skip；端点可用 `DCN_IT_*` 环境变量覆盖。
 
