@@ -94,8 +94,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-      - run: cd templates/bank_dcn && go build ./...
-      - run: cd templates/bank_dcn && go test ./...
+      - run: cd templates/bank_dcn && make build
+      - run: cd templates/bank_dcn && make test
+      - run: cd templates/bank_dcn && make cover
       - run: cd templates/bank_dcn && make topology-test
 
   bank_dcn-e2e:

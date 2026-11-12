@@ -137,6 +137,15 @@ func TestTemplateArchiveMatchesTemplateSources(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		// Mirror the artifact exclusions in pack.go so the parity check holds
+		// after a local `make cover` leaves coverage profiles behind.
+		rel := filepath.ToSlash(relative)
+		switch {
+		case filepath.Base(rel) == "coverage.out",
+			filepath.Base(rel) == "coverage.html",
+			rel == "bank_dcn/seed/seed":
+			return nil
+		}
 		contents, err := os.ReadFile(path)
 		if err != nil {
 			return err

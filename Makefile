@@ -31,11 +31,9 @@ commerce-ci:
 	cd templates/commerce && $(MAKE) config-check
 	kubectl kustomize templates/commerce/deploy/k8s >/tmp/commerce-k8s.yaml
 
-# dcn template static verification (build, test, compose topology)
+# dcn template static verification (multi-module build, test, coverage, compose topology)
 dcn-ci:
-	cd templates/dcn && go build ./...
-	cd templates/dcn && go test ./...
-	cd templates/dcn && $(MAKE) topology-test
+	cd templates/bank_dcn && $(MAKE) build test cover topology-test
 
 # End-to-end smoke (requires docker; acceptance #4/#5).
 # Generates a bank project from the embedded template, boots the full

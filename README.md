@@ -79,7 +79,7 @@ internal/template/   embedded template registry (tar-based)
 internal/docker/     docker/compose/daemon probe
 templates/bank/      the bank template — a standalone Go module (`module bank`)
 templates/commerce/  the commerce template — a standalone Go module (`module commerce`)
-templates/bank_dcn/  the bank_dcn template — a standalone Go module (`module bank_dcn`)
+templates/bank_dcn/  the bank_dcn template — side-by-side independent Go projects (one go.mod per module directory, shared lib under lib/, root go.work)
 docs/superpowers/    design specs & implementation plans
 ```
 

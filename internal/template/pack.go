@@ -50,6 +50,13 @@ func main() {
 			!strings.HasPrefix(rel, "bank_dcn/") {
 			return nil
 		}
+		// Skip local build/test artifacts (gitignored but still on disk):
+		// coverage profiles from `make cover` and stray compiled binaries.
+		base := filepath.Base(rel)
+		if base == "coverage.out" || base == "coverage.html" ||
+			(rel == "bank_dcn/seed/seed" && d.Type().IsRegular()) {
+			return nil
+		}
 		paths = append(paths, rel)
 		return nil
 	})
