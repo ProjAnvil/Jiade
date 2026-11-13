@@ -1,14 +1,17 @@
-# Compiled service binaries produced by `go build ./cmd/<svc>` in this directory.
-/catalog
-/customer
-/inventory
-/order
-/payment
-/fulfillment
-/seed
-/jiade
+# Compiled service binaries produced by `go build ./cmd/<svc>` inside each
+# independent project directory. (Bare /<name> entries would ignore the whole
+# project directories.)
+/catalog/catalog
+/customer/customer
+/inventory/inventory
+/order/order
+/payment/payment
+/fulfillment/fulfillment
+/seed/seed
 
 # Go test and coverage artifacts.
 *.test
 *.out
+coverage.out
+coverage.html
 coverage.txt

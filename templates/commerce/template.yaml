@@ -22,7 +22,7 @@ services:
   - {name: payment,      port: 8080, db: payment,      replicas: 1}
   - {name: fulfillment,  port: 8080, db: fulfillment,  replicas: 1}
 seed:
-  entrypoint: go run ./cmd/seed
+  entrypoint: go run ./seed/cmd/seed
   scales: [dev, demo, load]
 deploy:
   compose: compose.yaml

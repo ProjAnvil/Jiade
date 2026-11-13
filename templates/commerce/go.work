@@ -1,0 +1,13 @@
+go 1.22.0
+
+use (
+	./lib
+	./catalog
+	./customer
+	./fulfillment
+	./inventory
+	./order
+	./payment
+	./seed
+	./db/migrations
+)

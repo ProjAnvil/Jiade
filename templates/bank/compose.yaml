@@ -8,7 +8,6 @@ name: bank
 x-service-common: &service-common
   build:
     context: .
-    dockerfile: Dockerfile
   init: true
   restart: unless-stopped
   read_only: true
@@ -202,7 +201,7 @@ services:
 
   core-banking:
     <<: *service-common
-    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: core-banking}}
+    build: {context: ., dockerfile: core-banking/Dockerfile}
     depends_on:
       core-banking-db: {condition: service_healthy}
       migrate-core-banking: {condition: service_completed_successfully}
@@ -225,7 +224,7 @@ services:
 
   customer:
     <<: *service-common
-    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: customer}}
+    build: {context: ., dockerfile: customer/Dockerfile}
     depends_on:
       customer-db: {condition: service_healthy}
       migrate-customer: {condition: service_completed_successfully}
@@ -244,7 +243,7 @@ services:
 
   payment:
     <<: *service-common
-    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: payment}}
+    build: {context: ., dockerfile: payment/Dockerfile}
     depends_on:
       payment-db: {condition: service_healthy}
       migrate-payment: {condition: service_completed_successfully}
@@ -264,7 +263,7 @@ services:
 
   reward:
     <<: *service-common
-    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: reward}}
+    build: {context: ., dockerfile: reward/Dockerfile}
     depends_on:
       reward-db: {condition: service_healthy}
       migrate-reward: {condition: service_completed_successfully}
@@ -283,7 +282,7 @@ services:
 
   risk:
     <<: *service-common
-    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: risk}}
+    build: {context: ., dockerfile: risk/Dockerfile}
     depends_on:
       risk-db: {condition: service_healthy}
       migrate-risk: {condition: service_completed_successfully}
@@ -302,7 +301,7 @@ services:
 
   loan:
     <<: *service-common
-    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: loan}}
+    build: {context: ., dockerfile: loan/Dockerfile}
     depends_on:
       loan-db: {condition: service_healthy}
       migrate-loan: {condition: service_completed_successfully}
@@ -321,7 +320,7 @@ services:
 
   wealth:
     <<: *service-common
-    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: wealth}}
+    build: {context: ., dockerfile: wealth/Dockerfile}
     depends_on:
       wealth-db: {condition: service_healthy}
       migrate-wealth: {condition: service_completed_successfully}
@@ -340,7 +339,7 @@ services:
 
   seed:
     profiles: [seed]
-    build: {context: ., dockerfile: Dockerfile, args: {SERVICE: seed}}
+    build: {context: ., dockerfile: seed/Dockerfile}
     init: true
     restart: "no"
     networks: [data]

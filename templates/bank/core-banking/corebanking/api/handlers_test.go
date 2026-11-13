@@ -1,0 +1,262 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"bank/core-banking/corebanking/domain"
+	"bank/core-banking/corebanking/service"
+	"bank/lib/pg"
+
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+type fakeAccounts struct {
+	demand    *domain.DemandAccount
+	fixed     *domain.FixedAccount
+	demandErr error
+}
+
+func (f fakeAccounts) GetDemand(_ context.Context, _ string) (domain.DemandAccount, error) {
+	if f.demandErr != nil {
+		return domain.DemandAccount{}, f.demandErr
+	}
+	if f.demand != nil {
+		return *f.demand, nil
+	}
+	return domain.DemandAccount{}, sql.ErrNoRows
+}
+func (f fakeAccounts) GetFixed(_ context.Context, _ string) (domain.FixedAccount, error) {
+	if f.fixed != nil {
+		return *f.fixed, nil
+	}
+	return domain.FixedAccount{}, sql.ErrNoRows
+}
+
+type fakeLedger struct{ gls []domain.GLBalance }
+
+func (f fakeLedger) GetGL(context.Context, string) ([]domain.GLBalance, error) { return f.gls, nil }
+
+type fakeTxnStore struct{ bal *domain.Balance }
+
+func (f fakeTxnStore) ListTxns(context.Context, string, string, string) ([]domain.Txn, error) {
+	return nil, nil
+}
+func (f fakeTxnStore) GetLatestBalance(context.Context, string) (domain.Balance, error) {
+	if f.bal != nil {
+		return *f.bal, nil
+	}
+	return domain.Balance{}, sql.ErrNoRows
+}
+
+func getBody(t *testing.T, h http.Handler, path string) (int, string) {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode, strings.TrimSpace(string(b))
+}
+
+func TestHealthz(t *testing.T) {
+	code, body := getBody(t, NewRouter(&Handlers{}), "/healthz")
+	if code != 200 || !strings.Contains(body, "ok") {
+		t.Errorf("healthz code=%d body=%s", code, body)
+	}
+}
+
+func TestGetAccount_Demand(t *testing.T) {
+	h := &Handlers{Accounts: fakeAccounts{demand: &domain.DemandAccount{
+		AccountNo: "D1", CustID: "C1", Ccy: "CNY", Status: domain.AccountStatusActive,
+	}}}
+	code, body := getBody(t, NewRouter(h), "/api/v1/accounts/D1")
+	if code != 200 || !strings.Contains(body, `"cust_id":"C1"`) {
+		t.Errorf("code=%d body=%s", code, body)
+	}
+}
+
+func TestGetAccount_NotFound(t *testing.T) {
+	h := &Handlers{Accounts: fakeAccounts{}}
+	code, _ := getBody(t, NewRouter(h), "/api/v1/accounts/NOPE")
+	if code != 404 {
+		t.Errorf("want 404, got %d", code)
+	}
+}
+
+func TestGetBalance(t *testing.T) {
+	// Read-only path: Use nil to write dependencies db/accounts/ledger/store (Record is not triggered), and only inject read
+	h := &Handlers{TxnSvc: service.NewTxnService(nil, nil, nil, nil).WithReader(fakeTxnStore{bal: &domain.Balance{
+		AccountNo: "D1", BizDate: "2026-07-15", Balance: domain.NewMoneyFromCents(123456),
+		AvailableBalance: domain.NewMoneyFromCents(123456),
+	}})}
+	code, body := getBody(t, NewRouter(h), "/api/v1/accounts/D1/balance")
+	if code != 200 || !strings.Contains(body, `"balance":"1234.56"`) {
+		t.Errorf("code=%d body=%s", code, body)
+	}
+}
+
+func TestGetLedger_MissingBizDate(t *testing.T) {
+	h := &Handlers{Ledger: fakeLedger{}}
+	code, _ := getBody(t, NewRouter(h), "/api/v1/ledger")
+	if code != 400 {
+		t.Errorf("missing biz_date should give 400, got %d", code)
+	}
+}
+
+// --- B-3 write-path tests ---
+
+func postJSON(t *testing.T, h http.Handler, path, body string) (int, string) {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+path, "application/json", bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode, strings.TrimSpace(string(b))
+}
+
+// newRecordSvc constructs a real TxnService using recordingAPIStore fake (db=nil single test path).
+func newRecordSvc() *service.TxnService {
+	store := &recordingAPIStore{}
+	return service.NewTxnService(nil, apiAccountsRdr{m: map[string]domain.DemandAccount{
+		"D1": {AccountNo: "D1", SubjectCode: "2011", Ccy: "CNY", Status: domain.AccountStatusActive},
+	}}, service.NewLedgerService(store), store)
+}
+
+// newRecordSvcWithVoucher is the same as newRecordSvc, but the store is preset with a set of original voucher flows (for blue flush/red flush reversal).
+func newRecordSvcWithVoucher(voucherNo string) (*service.TxnService, *recordingAPIStore) {
+	store := &recordingAPIStore{voucherTxns: balancedVoucherTxns(voucherNo)}
+	svc := service.NewTxnService(nil, apiAccountsRdr{m: map[string]domain.DemandAccount{
+		"D1": {AccountNo: "D1", SubjectCode: "2011", Ccy: "CNY", Status: domain.AccountStatusActive},
+	}}, service.NewLedgerService(store), store)
+	return svc, store
+}
+
+// balancedVoucherTxns constructs a pair of balanced original vouchers (one debit and one loan, the same amount and the same voucher) for offset and rollback.
+func balancedVoucherTxns(voucherNo string) []domain.Txn {
+	amt := domain.NewMoneyFromCents(10000)
+	return []domain.Txn{
+		{TxnID: "T1", AccountNo: "D1", DCFlag: domain.DCDebit, Amount: amt, SubjectCode: "1001", VoucherNo: voucherNo, Ccy: "CNY"},
+		{TxnID: "T2", AccountNo: "D2", DCFlag: domain.DCCredit, Amount: amt, SubjectCode: "2011", VoucherNo: voucherNo, Ccy: "CNY"},
+	}
+}
+
+// apiAccountsRdr Accounts used for accounting are read-only fake (implement service.AccountReader).
+type apiAccountsRdr struct {
+	m map[string]domain.DemandAccount
+}
+
+func (a apiAccountsRdr) GetDemand(_ context.Context, no string) (domain.DemandAccount, error) {
+	if v, ok := a.m[no]; ok {
+		return v, nil
+	}
+	return domain.DemandAccount{}, sql.ErrNoRows
+}
+
+// recordingAPIStore minimum LedgerStore fake: InsertTxns backfills fake ID, EnsureBalanceRow gives large balance (anti-overdraft).
+// voucherTxns is used by LockTxnsByVoucher/GetTxnsByVoucher to return the original voucher flow (for correction handler testing).
+type recordingAPIStore struct {
+	voucherTxns []domain.Txn // LockTxnsByVoucher / GetTxnsByVoucher Return
+}
+
+func (s *recordingAPIStore) InsertTxns(_ context.Context, _ pg.DBTX, txns []domain.Txn) error {
+	for i := range txns {
+		txns[i].TxnID = "T-api"
+	}
+	return nil
+}
+func (*recordingAPIStore) ApplyBalanceDeltas(context.Context, pg.DBTX, string, []domain.BalanceDelta) error {
+	return nil
+}
+func (*recordingAPIStore) UpsertGL(context.Context, pg.DBTX, domain.GLBalance) error { return nil }
+func (*recordingAPIStore) EnsureBalanceRow(_ context.Context, _ pg.DBTX, _, _, _ string) (domain.Balance, error) {
+	return domain.Balance{AvailableBalance: domain.NewMoneyFromCents(999999)}, nil
+}
+func (s *recordingAPIStore) GetTxnsByVoucher(context.Context, pg.DBTX, string) ([]domain.Txn, error) {
+	return s.voucherTxns, nil
+}
+func (s *recordingAPIStore) LockTxnsByVoucher(context.Context, pg.DBTX, string) ([]domain.Txn, error) {
+	return s.voucherTxns, nil
+}
+func (*recordingAPIStore) HasReversal(context.Context, pg.DBTX, string) (bool, error) {
+	return false, nil
+}
+func (*recordingAPIStore) UpdateTxnStatus(context.Context, pg.DBTX, string, domain.TxnStatus) error {
+	return nil
+}
+func (*recordingAPIStore) SetTxnSummary(context.Context, pg.DBTX, string, string) error { return nil }
+func (*recordingAPIStore) GetBizDate(context.Context) (string, error)                   { return "2026-07-13", nil }
+
+func TestPostTxn_Deposit_201(t *testing.T) {
+	h := &Handlers{TxnSvc: newRecordSvc()}
+	code, body := postJSON(t, NewRouter(h), "/api/v1/txns",
+		`{"action":"deposit","account_no":"D1","amount":"100.00","ccy":"CNY"}`)
+	if code != 201 || !strings.Contains(body, `"voucher_no"`) {
+		t.Errorf("code=%d body=%s", code, body)
+	}
+}
+
+func TestPostTxn_BadRequest_MissingAction(t *testing.T) {
+	h := &Handlers{TxnSvc: newRecordSvc()}
+	code, _ := postJSON(t, NewRouter(h), "/api/v1/txns", `{"account_no":"D1","amount":"1.00"}`)
+	if code != 400 {
+		t.Errorf("missing action should give 400, got %d", code)
+	}
+}
+
+func TestPostTxn_AccountNotFound_404(t *testing.T) {
+	h := &Handlers{TxnSvc: newRecordSvc()}
+	code, _ := postJSON(t, NewRouter(h), "/api/v1/txns",
+		`{"action":"deposit","account_no":"NOPE","amount":"1.00","ccy":"CNY"}`)
+	if code != 404 {
+		t.Errorf("account not found should give 404, got %d", code)
+	}
+}
+
+// --- B-3 reverse handler tests ---
+
+// TestReverseVoucher_InvalidMode_400 corrects the illegal mode (green) should be 400 in the handler layer and does not touch the service.
+func TestReverseVoucher_InvalidMode_400(t *testing.T) {
+	h := &Handlers{TxnSvc: newRecordSvc()}
+	code, body := postJSON(t, NewRouter(h), "/api/v1/vouchers/V1/reverse?mode=green", "")
+	if code != 400 || !strings.Contains(body, "mode") {
+		t.Errorf("invalid mode should give 400 and mention mode, code=%d body=%s", code, body)
+	}
+}
+
+// TestReverseVoucher_BlueDefault_200 does not pass mode and defaults to blue reversing, returning 200 + mode=blue + status=reversed.
+func TestReverseVoucher_BlueDefault_200(t *testing.T) {
+	svc, _ := newRecordSvcWithVoucher("V1")
+	h := &Handlers{TxnSvc: svc}
+	code, body := postJSON(t, NewRouter(h), "/api/v1/vouchers/V1/reverse", "")
+	if code != 200 {
+		t.Fatalf("blue reversal should give 200, got %d body=%s", code, body)
+	}
+	if !strings.Contains(body, `"mode":"blue"`) || !strings.Contains(body, `"status":"reversed"`) {
+		t.Errorf("blue reversal response should contain mode=blue + status=reversed, body=%s", body)
+	}
+}
+
+// TestStatusFor_Deadlock_409 fixed spec §8.3: Postgres deadlock SQLSTATE 40P01 → 409 Conflict.
+func TestStatusFor_Deadlock_409(t *testing.T) {
+	if got := statusFor(&pgconn.PgError{Code: "40P01"}); got != http.StatusConflict {
+		t.Errorf("40P01 deadlock should map to 409, got %d", got)
+	}
+	// Other SQLSTATE should not be mistaken for deadlock 409
+	if got := statusFor(&pgconn.PgError{Code: "23505"}); got == http.StatusConflict {
+		t.Errorf("non-40P01 should not map to 409, got %d", got)
+	}
+}

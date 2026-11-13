@@ -23,9 +23,11 @@ name: commerce
 # Shared fields for the six Go services. Each service derives its database
 # host/user from `x-service-common.<svc>.db` and binds the broker.
 x-service-common: &service-common
+  # Build context is the workspace root. Each service overrides `dockerfile`
+  # with its own <name>/Dockerfile, which copies lib/ plus the modules the
+  # service's go.mod replaces (order also needs inventory/).
   build:
     context: .
-    dockerfile: Dockerfile
   init: true
   restart: unless-stopped
   read_only: true
@@ -367,9 +369,7 @@ services:
     image: ${COMMERCE_IMAGE_PREFIX:-}commerce-catalog:${COMMERCE_TAG:-latest}
     build:
       context: .
-      dockerfile: Dockerfile
-      args:
-        SERVICE: catalog
+      dockerfile: catalog/Dockerfile
     depends_on:
       catalog-db: { condition: service_healthy }
       migrate-catalog: { condition: service_completed_successfully }
@@ -409,9 +409,7 @@ services:
     image: ${COMMERCE_IMAGE_PREFIX:-}commerce-customer:${COMMERCE_TAG:-latest}
     build:
       context: .
-      dockerfile: Dockerfile
-      args:
-        SERVICE: customer
+      dockerfile: customer/Dockerfile
     depends_on:
       customer-db: { condition: service_healthy }
       migrate-customer: { condition: service_completed_successfully }
@@ -449,9 +447,7 @@ services:
     image: ${COMMERCE_IMAGE_PREFIX:-}commerce-inventory:${COMMERCE_TAG:-latest}
     build:
       context: .
-      dockerfile: Dockerfile
-      args:
-        SERVICE: inventory
+      dockerfile: inventory/Dockerfile
     depends_on:
       inventory-db: { condition: service_healthy }
       migrate-inventory: { condition: service_completed_successfully }
@@ -489,9 +485,7 @@ services:
     image: ${COMMERCE_IMAGE_PREFIX:-}commerce-order:${COMMERCE_TAG:-latest}
     build:
       context: .
-      dockerfile: Dockerfile
-      args:
-        SERVICE: order
+      dockerfile: order/Dockerfile
     depends_on:
       order-db: { condition: service_healthy }
       migrate-order: { condition: service_completed_successfully }
@@ -532,9 +526,7 @@ services:
     image: ${COMMERCE_IMAGE_PREFIX:-}commerce-payment:${COMMERCE_TAG:-latest}
     build:
       context: .
-      dockerfile: Dockerfile
-      args:
-        SERVICE: payment
+      dockerfile: payment/Dockerfile
     depends_on:
       payment-db: { condition: service_healthy }
       migrate-payment: { condition: service_completed_successfully }
@@ -572,9 +564,7 @@ services:
     image: ${COMMERCE_IMAGE_PREFIX:-}commerce-fulfillment:${COMMERCE_TAG:-latest}
     build:
       context: .
-      dockerfile: Dockerfile
-      args:
-        SERVICE: fulfillment
+      dockerfile: fulfillment/Dockerfile
     depends_on:
       fulfillment-db: { condition: service_healthy }
       migrate-fulfillment: { condition: service_completed_successfully }
@@ -618,9 +608,7 @@ services:
     profiles: ["seed"]
     build:
       context: .
-      dockerfile: Dockerfile
-      args:
-        SERVICE: seed
+      dockerfile: seed/Dockerfile
     image: ${COMMERCE_IMAGE_PREFIX:-}commerce-seed:${COMMERCE_TAG:-latest}
     init: true
     restart: "no"

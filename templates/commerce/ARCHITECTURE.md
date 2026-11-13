@@ -140,7 +140,7 @@ inspection.
   another service's data.
 - **Cross-domain reads go over HTTP.** Order calls customer, catalog, and
   inventory synchronously during checkout validation. The HTTP client
-  (`internal/platform/client/`) is resilient: bounded retries with jitter,
+  (`lib/client/`) is resilient: bounded retries with jitter,
   per-attempt and per-request timeouts, and a circuit breaker.
 - **Money is int64 minor units** everywhere. Binary floating point is
   forbidden; non-monetary decimals (rates, NAV-like values) are stored as
@@ -155,6 +155,12 @@ default (`deploy.replicas`), a `mem_reservation`/`mem_limit`/`cpus` envelope,
 a `read_only: true` root filesystem with a `tmpfs:/tmp`, `cap_drop: [ALL]`,
 and `no-new-privileges`. Traefik labels declare the per-service routing rule
 and the load-balancer healthcheck on `/livez`.
+
+Images are built from per-service Dockerfiles (`<name>/Dockerfile`, distroless
+runtime with a static busybox `wget` for the healthcheck). The build context
+is the workspace root: each image copies `lib/` plus the modules its go.mod
+replaces (order also copies `inventory/`; seed copies `order/`), then builds
+`./cmd/<name>` with `GOWORK=off` against its own go.mod.
 
 The Makefile wraps compose so `make up` is the one-shot bring-up. Two
 overlays exist:
@@ -216,7 +222,7 @@ overlay only adds containers; it does not change the base topology.
 ## Configuration
 
 All configuration flows through environment variables, parsed and validated
-by `internal/platform/config/config.go`. Required keys per service:
+by `lib/config/config.go`. Required keys per service:
 
 - `SERVICE`, `INSTANCE_ID`, `DB_HOST`, `DB_NAME` — identity + database.
 - `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_SSLMODE` — connection.

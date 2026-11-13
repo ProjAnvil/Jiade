@@ -3,6 +3,16 @@
 # Targets produce the production-shaped compose topology described in
 # docs/superpowers/plans/2026-07-24-commerce-production-topology.md (Task 9).
 #
+# Microservice layout: every project directory (catalog, customer, ... lib,
+# seed) is its own independent Go project (own go.mod); go.work wires them
+# together for root-level commands. db/migrations is a dedicated module
+# holding the SQL migration contract tests. `order` keeps a legacy direct
+# dependency on the inventory module (see order/go.mod).
+#
+#   make build           compile every Go project in the workspace.
+#   make test            run unit tests for every Go project.
+#   make cover           per-project coverage totals (coverage.out per dir).
+#   make images          build all service images without starting them.
 #   make up              build + bring up the topology with default replicas,
 #                        run migrations, seed dev data, wait for healthy.
 #   make scale           re-scale a single SERVICE to REPLICAS instances.
@@ -19,6 +29,9 @@
 
 SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
+
+# Independent Go projects in this workspace (see go.work).
+MODULES := lib catalog customer fulfillment inventory order payment seed db/migrations
 
 COMPOSE          ?= docker compose
 COMPOSE_FILES    := -f compose.yaml
@@ -51,12 +64,31 @@ help: ## Show this help.
 	  /^[a-zA-Z_-]+:.*?##/ { printf "  %-18s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 .PHONY: build
-build: ## Build all service images without starting them.
+build: ## Compile every Go project in the workspace.
+	@for m in $(MODULES); do echo "build $$m"; (cd $$m && go build ./...); done
+
+.PHONY: test
+test: ## Run unit tests for every Go project.
+	@for m in $(MODULES); do echo "test $$m"; (cd $$m && go test ./...); done
+
+# Per-project unit-test coverage: writes coverage.out in each project dir and
+# prints the per-project statement total. Integration-gated tests (live
+# PostgreSQL/RabbitMQ) skip cleanly when the stack is down; run `make up`
+# first for full coverage.
+.PHONY: cover
+cover: ## Per-project unit-test coverage totals.
+	@set -e; for m in $(MODULES); do \
+	  echo "== cover $$m"; \
+	  (cd $$m && go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out | tail -1); \
+	done
+
+.PHONY: images
+images: ## Build all service images without starting them.
 	$(COMPOSE) $(COMPOSE_FILES) build
 
 .PHONY: up
-up: ## Bring up the topology with default replicas, migrations, and seed.
-	$(COMPOSE) $(COMPOSE_FILES) up -d --wait $(DEFAULT_SCALE)
+up: ## Bring up the topology (built images) with default replicas and seed.
+	$(COMPOSE) $(COMPOSE_FILES) up -d --build --wait $(DEFAULT_SCALE)
 	$(MAKE) seed
 
 .PHONY: down
@@ -99,7 +131,7 @@ verify-seed: ## Verify seeded data integrity.
 
 .PHONY: load
 load: ## Bring up the topology at load scale and seed 1M orders.
-	$(COMPOSE) $(COMPOSE_LOAD) up -d --wait \
+	$(COMPOSE) $(COMPOSE_LOAD) up -d --build --wait \
 		--scale order=4 --scale inventory=3
 	$(COMPOSE) $(COMPOSE_LOAD) run --rm \
 		seed generate --scale load --seed $(SEED) --reset

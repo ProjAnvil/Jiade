@@ -3,7 +3,7 @@
 #
 # Drives the payment-transfer saga through each failure + recovery path
 # using the deterministic test-only failure controls (see
-# internal/platform/testfail). Each gate is a positive or negative
+# lib/testfail). Each gate is a positive or negative
 # assertion; any failure exits non-zero so CI can mark the suite red.
 #
 # Pre-requisites:

@@ -68,27 +68,31 @@ jq -e '
     );
   ([.exchanges[].name] | sort == ["bank.commands", "bank.dlx", "bank.events", "bank.retry"]) and
   [
-    {source: "risk.commands", source_exchange: "bank.commands", retry: "risk.commands.retry", dlq: "risk.commands.dlq", dead: "risk.commands.dead"},
-    {source: "core-banking.commands", source_exchange: "bank.commands", retry: "core-banking.commands.retry", dlq: "core-banking.commands.dlq", dead: "core-banking.commands.dead"},
-    {source: "payment.workflow.events", source_exchange: "bank.events", retry: "payment-workflow.retry", dlq: "payment-workflow.dlq", dead: "payment-workflow.dead"},
-    {source: "reward.payment-events", source_exchange: "bank.events", retry: "reward.payment-events.retry", dlq: "reward.payment-events.dlq", dead: "reward.payment-events.dead"}
+    # keys: the routing-key bindings that actually deliver traffic to the
+    # queue. Command queues consume versioned typed keys (risk.#, core.#);
+    # the payment saga listens to every core/risk result event; reward
+    # consumes the exact payment.completed result event.
+    {source: "risk.commands", source_exchange: "bank.commands", keys: ["risk.#"], retry: "risk.commands.retry", dlq: "risk.commands.dlq", dead: "risk.commands.dead"},
+    {source: "core-banking.commands", source_exchange: "bank.commands", keys: ["core.#"], retry: "core-banking.commands.retry", dlq: "core-banking.commands.dlq", dead: "core-banking.commands.dead"},
+    {source: "payment.workflow.events", source_exchange: "bank.events", keys: ["core.#", "risk.#"], retry: "payment-workflow.retry", dlq: "payment-workflow.dlq", dead: "payment-workflow.dead"},
+    {source: "reward.payment-events", source_exchange: "bank.events", keys: ["payment.completed"], retry: "reward.payment-events.retry", dlq: "reward.payment-events.dlq", dead: "reward.payment-events.dead"}
   ] as $flows |
   all($flows[];
     . as $flow | $defs |
     queue($flow.source) and
     retry_queue($flow.retry; $flow.source_exchange; $flow.source) and
     queue($flow.dlq) and
-    binding($flow.source_exchange; $flow.source; $flow.source) and
+    all($flow.keys[]; . as $k | $defs | binding($flow.source_exchange; $flow.source; $k)) and
     binding("bank.retry"; $flow.retry; $flow.retry) and
     binding("bank.dlx"; $flow.dlq; $flow.dead)
   )
 ' deploy/rabbitmq/definitions.json >/dev/null
 
-# `cmd/seed` reads migrations by a relative path; verify both the final-image
+# `seed/cmd/seed` reads migrations by a relative path; verify both the final-image
 # assets and the profile-only job that selects all seven dedicated hosts.
 bash test/seed-image.sh
 jq -e '
-  .services.seed.build.args.SERVICE == "seed" and
+  .services.seed.build.dockerfile == "seed/Dockerfile" and
   .services.seed.environment.DEDICATED_DATABASES == "true" and
   ([.services.seed.environment | keys[] | select(startswith("DB_HOST_"))] | length == 7)
 ' "$seed_json" >/dev/null

@@ -32,6 +32,27 @@ Every service follows the same four-layer vertical slice (`api → service → r
 - **Money as int64 minor units, no floats**; non-monetary decimals (rates, NAV, shares) are stored as NUMERIC text.
 - **Self-contained output**: builds and runs without jiade — only Docker and Go are needed.
 
+## Repository layout
+
+Independent Go projects laid out side by side — each top-level directory is a self-contained project with its own `go.mod` (no nested module hierarchy):
+
+```text
+contracts/           generated protobuf contracts (module path `bank`): proto/ + buf configs + gen/;
+                     the go_package import paths (bank/gen/bank/<domain>/v1) stay stable
+lib/                 shared platform packages (grpcx / httpx / messaging / migrate / pg / runx /
+                     serviceclient / telemetry / testfail / workflow)
+core-banking/  customer/  payment/  reward/  risk/  loan/  wealth/
+                     each an independent Go project: go.mod + cmd/<name>/ + <domain>/ (api / domain /
+                     repo / service; payment also admin + workflows) + per-service Dockerfile
+seed/                fixture generator: cmd/seed/ + internal/fixtures; imports all seven services'
+                     domain packages plus lib
+test/integration/    payment-saga integration tests (own module, build tag `integration`)
+db/migrations/  deploy/  test/*.sh  docs   cross-service assets at the workspace root
+compose.yaml  Makefile  go.work          orchestration at the workspace root
+```
+
+Every project resolves its siblings through relative `replace` directives (`bank/lib => ../lib`, and `bank => ../contracts` for the generated contracts), so the projects are relocatable: any directory can be moved out as a standalone repository as long as siblings stay adjacent. `seed` additionally depends on all seven service projects (it seeds their domain tables), and `test/integration` depends on core-banking, payment, risk and lib. Docker builds use the workspace root as build context (`dockerfile: <name>/Dockerfile`) and compile each project standalone with `GOWORK=off`; migrations stay at the workspace root and are baked into the seed image. `go.work` at the root enables workspace-level commands (`go run ./seed/cmd/seed`); `make build` / `make test` / `make cover` iterate over every project.
+
 ## Quick start
 
 ```bash
@@ -44,7 +65,7 @@ Seed scale: `--scale=dev` (≈¼ volume, default) or `--scale=full`. Re-running 
 ```bash
 make seed                       # dev scale (default)
 SCALE=full make seed            # full scale
-go test -tags=integration -p 1 ./...   # integration tests; needs postgres on localhost:15432 (DB_PORT to override)
+make integration-test                  # integration tests; needs postgres on localhost:15432 (DB_PORT to override)
 ```
 
 All public REST endpoints are accessed through the gateway at `http://localhost:18000`; service container ports are never published to the host. `make up` uses `--wait` and blocks until every healthcheck is ready. Inspect individual service health:
@@ -80,7 +101,7 @@ curl -sf -X POST 'localhost:18000/api/v1/vouchers/V.../reverse?mode=blue'
 
 **Entry point**: `POST /api/v1/payments/workflows` (payment service, via gateway 18000 → payment:8080).
 
-The workflow is a durable saga orchestrator built into the payment service (`internal/platform/workflow`): each request is persisted as an immutable Instance that executes three Actions in sequence; when any Action fails terminally, compensation is triggered in **reverse order**; operators can intervene on stuck compensations via admin gRPC. All saga commands/events are delivered through RabbitMQ and, before publishing, are written in the same PostgreSQL transaction as the business state change (transactional outbox), guaranteeing atomic consistency between state transitions and event emission.
+The workflow is a durable saga orchestrator built into the payment service (`lib/workflow`): each request is persisted as an immutable Instance that executes three Actions in sequence; when any Action fails terminally, compensation is triggered in **reverse order**; operators can intervene on stuck compensations via admin gRPC. All saga commands/events are delivered through RabbitMQ and, before publishing, are written in the same PostgreSQL transaction as the business state change (transactional outbox), guaranteeing atomic consistency between state transitions and event emission.
 
 ### Submit a payment
 
@@ -302,7 +323,7 @@ The payment workflow exposes **two** protected RPCs (`proto/bank/payment/v1/work
 
 ## Failure-injection smoke suite (10 gates)
 
-`make smoke` (`test/smoke.sh`) runs 10 gates covering the saga's success/failure/recovery paths. Failure injection is provided by `internal/platform/testfail` and triggers **only** when `BANK_TEST_FAILURES_ENABLED=true` and the workflow ID starts with a specific prefix (`smoke-reject-` / `smoke-insuff-` / `smoke-transient-` / `smoke-compfail-`); `compose.smoke.yaml` is the only place that enables this env, and it is applied solely by the smoke script.
+`make smoke` (`test/smoke.sh`) runs 10 gates covering the saga's success/failure/recovery paths. Failure injection is provided by `lib/testfail` and triggers **only** when `BANK_TEST_FAILURES_ENABLED=true` and the workflow ID starts with a specific prefix (`smoke-reject-` / `smoke-insuff-` / `smoke-transient-` / `smoke-compfail-`); `compose.smoke.yaml` is the only place that enables this env, and it is applied solely by the smoke script.
 
 | # | Gate | Assertion |
 |---|------|-----------|
@@ -373,4 +394,4 @@ dev overlay PVCs are not automatically deleted by `kubectl delete -k`; run `kube
 
 ## Architecture
 
-See [ARCHITECTURE.md](ARCHITECTURE.md). 7 processes + 7 independent PostgreSQL databases + RabbitMQ + Traefik gateway; synchronous cross-domain reads via internal gRPC, asynchronous commands/events via RabbitMQ; each service layers as `api → service → repo → domain` with zero external dependencies in the domain layer. The payment durable saga is orchestrated by the `internal/platform/workflow` engine inside payment.
+See [ARCHITECTURE.md](ARCHITECTURE.md). 7 processes + 7 independent PostgreSQL databases + RabbitMQ + Traefik gateway; synchronous cross-domain reads via internal gRPC, asynchronous commands/events via RabbitMQ; each service layers as `api → service → repo → domain` with zero external dependencies in the domain layer. The payment durable saga is orchestrated by the `lib/workflow` engine inside payment.

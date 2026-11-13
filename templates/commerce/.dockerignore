@@ -2,16 +2,22 @@
 # Keep the .sql migrations (they are mounted via deploy/, not used at runtime,
 # but harmless and small).
 
-# Compiled service binaries left over from local `go build`.
-/order
-/catalog
-/customer
-/inventory
-/payment
-/fulfillment
-/seed
+# Compiled service binaries left over from local `go build` inside each
+# project directory.
+/order/order
+/catalog/catalog
+/customer/customer
+/inventory/inventory
+/payment/payment
+/fulfillment/fulfillment
+/seed/seed
 templates/commerce/fulfillment
 templates/commerce/payment
+
+# Go workspace files: the image build runs with GOWORK=off against the
+# per-service go.mod, so the workspace never needs to enter the context.
+/go.work
+/go.work.sum
 
 # Go workspace and test caches.
 **/.cache/

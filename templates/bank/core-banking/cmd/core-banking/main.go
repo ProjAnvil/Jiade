@@ -1,0 +1,199 @@
+// Package main is the core-banking API service entrance (read-only query +
+// B-3 accounting/rewriting interface + saga command consumer + outbox relay).
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	corev1 "bank/gen/bank/core/v1"
+	"bank/core-banking/corebanking"
+	"bank/core-banking/corebanking/api"
+	"bank/core-banking/corebanking/repo"
+	"bank/core-banking/corebanking/service"
+	"bank/lib/grpcx"
+	"bank/lib/httpx"
+	"bank/lib/messaging"
+	"bank/lib/pg"
+	"bank/lib/runx"
+	"bank/lib/telemetry"
+
+	amqp "github.com/rabbitmq/amqp091-go"
+)
+
+func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
+	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Initialise OpenTelemetry tracing early so the otelgrpc/otelhttp
+	// instrumentation installed in Task 2 exports spans via the global
+	// TracerProvider. OTel init failure MUST NOT block startup: on error we
+	// fall back to a NoOp provider so the process keeps serving traffic.
+	telemetryProvider := initTelemetry(signalCtx, "core-banking", getenv("INSTANCE_ID", "core-banking-1"))
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := telemetryProvider.Shutdown(shutdownCtx); err != nil {
+			log.Printf("core-banking telemetry shutdown: %v", err)
+		}
+		cancel()
+	}()
+
+	dbName := getenv("DB_NAME", "core_db")
+	db, err := pg.Open(dbName)
+	if err != nil {
+		return fmt.Errorf("open %s failed: %w", dbName, err)
+	}
+	defer db.Close()
+
+	// Start retry: core_db may not be ready yet (seed has not finished running)
+	if err := waitForDB(db, 5, time.Second); err != nil {
+		return fmt.Errorf("connect %s failed (run make up then make seed first): %w", dbName, err)
+	}
+
+	ledgerRepo := repo.NewLedgerRepo(db)
+	ledgerSvc := service.NewLedgerService(ledgerRepo)
+	holdRepo := repo.NewHoldRepo(db)
+	accountRepo := repo.NewAccountRepo(db)
+	txnRepo := repo.NewTxnRepo(db)
+	txnSvc := service.NewTxnService(db, accountRepo, ledgerSvc, ledgerRepo).WithReader(txnRepo)
+	holdSvc := service.NewHoldService(db, holdRepo)
+	transferSvc := service.NewHeldTransferService(db, holdRepo, accountRepo, ledgerSvc, ledgerRepo, ledgerRepo)
+
+	handlers := &api.Handlers{
+		Accounts: accountRepo,
+		TxnSvc:   txnSvc,
+		Ledger:   ledgerRepo,
+	}
+	httpAddr := getenv("HTTP_ADDR", ":8080")
+
+	// Readiness: the HTTP /readyz probe pings the DB. If the consumer or relay
+	// stops unexpectedly, runx.Serve cancels the context and returns an error
+	// — the process exits and the orchestrator restarts it.
+	srv := httpx.NewServer(httpx.ServerConfig{
+		Service:  "core-banking",
+		Instance: getenv("INSTANCE_ID", "core-banking-1"),
+		Addr:     httpAddr,
+		Handler:  api.NewRouter(handlers),
+		Ready:    func(ctx context.Context) error { return db.PingContext(ctx) },
+	})
+
+	grpcServer := grpcx.NewServer(grpcx.ServerConfig{Ready: func(ctx context.Context) error { return db.PingContext(ctx) }})
+	corev1.RegisterAccountQueryServiceServer(grpcServer, api.NewAccountQueryServer(accountRepo, txnRepo))
+	grpcAddr := getenv("GRPC_ADDR", ":9090")
+	grpcListener, err := net.Listen("tcp", grpcAddr)
+	if err != nil {
+		return fmt.Errorf("core-banking gRPC listen failed: %w", err)
+	}
+
+	// --- Saga command consumer + outbox relay ---
+	amqpURL := getenv("AMQP_URL", "amqp://guest:guest@localhost:5672/")
+	commandQueue := getenv("CORE_BANKING_COMMAND_QUEUE", "core-banking.commands")
+	// Retry/DLQ routing keys MUST match the bindings in
+	// deploy/rabbitmq/definitions.json: bank.retry → core-banking.commands.retry
+	// (which TTLs back to bank.commands with routing key core-banking.commands)
+	// and bank.dlx → core-banking.commands.dead. The retry queue's
+	// x-dead-letter-routing-key "core-banking.commands" re-delivers to this
+	// service's command queue after the TTL expires.
+	retryPolicy := messaging.RetryPolicy{
+		MaxAttempts:          3,
+		RetryExchange:        getenv("CORE_BANKING_RETRY_EXCHANGE", messaging.ExchangeRetry),
+		RetryRoutingKey:      getenv("CORE_BANKING_RETRY_KEY", "core-banking.commands.retry"),
+		DeadLetterExchange:   getenv("CORE_BANKING_DLQ_EXCHANGE", messaging.ExchangeDeadLetter),
+		DeadLetterRoutingKey: getenv("CORE_BANKING_DLQ_KEY", "core-banking.commands.dead"),
+	}
+	consumer := corebanking.NewConsumer(db, holdSvc, transferSvc, ledgerRepo, retryPolicy, nil)
+
+	// Outbox relay: eagerly dial the broker so a broker-down condition fails
+	// the process at startup rather than silently skipping event delivery.
+	relayConn, err := amqp.Dial(amqpURL)
+	if err != nil {
+		return fmt.Errorf("core-banking outbox relay connect broker failed: %w", err)
+	}
+	defer relayConn.Close()
+	relayCh, err := relayConn.Channel()
+	if err != nil {
+		return fmt.Errorf("core-banking outbox relay open channel failed: %w", err)
+	}
+	// The relay derives the topic exchange per outbox row (bank.commands vs
+	// bank.events) via messaging.ExchangeForRoutingKey, so the publisher's
+	// constructor exchange is never used for the relay's own publishes.
+	// bank.events is the documented default because core-banking's outbox
+	// holds result events (core.hold.*, core.transfer.*, *.command.rejected).
+	relayPublisher, err := messaging.NewRabbitPublisher(relayCh, messaging.ExchangeEvents)
+	if err != nil {
+		return fmt.Errorf("core-banking outbox relay publisher failed: %w", err)
+	}
+	relay := corebanking.NewOutboxRelay(db, relayPublisher)
+
+	// Workers: run under the signal context via runx.Serve. If either stops
+	// unexpectedly, runx.Serve cancels the context so HTTP/gRPC shut down too.
+	workers := []runx.Worker{
+		runx.WorkerFunc(func(ctx context.Context) error {
+			return consumer.Run(ctx, amqpURL, commandQueue)
+		}),
+		runx.WorkerFunc(func(ctx context.Context) error {
+			defer relayPublisher.Close()
+			return relay.Run(ctx)
+		}),
+	}
+
+	log.Printf("core-banking HTTP listening %s, gRPC listening %s (db=%s), consuming queue=%s", httpAddr, grpcAddr, dbName, commandQueue)
+	return runx.Serve(signalCtx, srv, &runx.GRPCService{
+		Server:   grpcServer,
+		Listener: grpcListener,
+	}, 5*time.Second, workers...)
+}
+
+type pinger interface{ Ping() error }
+
+func waitForDB(p pinger, retries int, wait time.Duration) error {
+	var err error
+	for i := 0; i < retries; i++ {
+		if err = p.Ping(); err == nil {
+			return nil
+		}
+		time.Sleep(wait)
+	}
+	return err
+}
+
+func getenv(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+// initTelemetry configures the global OpenTelemetry TracerProvider from the
+// OTEL_* env vars set by compose.observability.yaml. provider.New /
+// provider.Disabled install the provider globally (otel.SetTracerProvider +
+// otel.SetTextMapPropagator), so the otelgrpc/otelhttp instrumentation
+// installed in Task 2 picks it up automatically. On init failure it installs a
+// NoOp provider so OTel problems never block startup.
+func initTelemetry(ctx context.Context, service, instance string) *telemetry.Provider {
+	cfg := telemetry.Config{
+		Service:  service,
+		Instance: instance,
+		Endpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		Enabled:  os.Getenv("OTEL_ENABLED") == "true",
+		Insecure: os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "true",
+	}
+	provider, err := telemetry.New(ctx, cfg)
+	if err != nil {
+		log.Printf("%s: telemetry init failed, falling back to NoOp provider: %v", service, err)
+		return telemetry.Disabled()
+	}
+	return provider
+}

@@ -83,7 +83,7 @@ operator (label role=bank-operator) ──admin gRPC :9091──> payment (Workf
 ## 支付工作流 saga（durable）
 
 payment 服务内置一个 domain-neutral 的 durable 工作流引擎
-（`internal/platform/workflow`），版本 1 名为 `payment-transfer`。每次请求落库为一个
+（`lib/workflow`），版本 1 名为 `payment-transfer`。每次请求落库为一个
 不可变 `Instance`（status / current_action / revision / lease / actions 全在 PostgreSQL）。
 
 ### Preparation（不可变上下文）
@@ -202,7 +202,7 @@ payment 在独立 `:9091` 监听器上发布 `WorkflowAdminService`（proto 在
 
 ## Seed 数据流
 
-`cmd/seed` 只负责数据库与 fixture：
+`seed/cmd/seed` 只负责数据库与 fixture：
 
 1. 连接 7 个**专用** PostgreSQL 主机（`core-banking-db` … `wealth-db`）。
 2. 执行 7 套迁移（每库先跑 `shared.sql` 建发件箱/收件箱表，再跑域迁移）。

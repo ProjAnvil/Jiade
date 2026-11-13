@@ -6,11 +6,36 @@ COMPOSE_OBS   := -f compose.yaml -f compose.observability.yaml
 
 GATEWAY ?= http://localhost:18000
 
-.PHONY: up down seed scale config-check topology-test test integration-test proto
+# Microservice layout: every module directory (lib, core-banking, customer,
+# payment, reward, risk, loan, wealth, seed) is its own independent Go project
+# (own go.mod); go.work wires them together for root-level commands.
+# contracts/ is the generated protobuf module (`bank`) and is exercised through
+# the modules that import it; test/integration is built only by
+# `make integration-test` (build tag `integration`).
+MODULES := lib core-banking customer payment reward risk loan wealth seed
+
+.PHONY: build test cover race up down seed scale config-check topology-test integration-test proto
 .PHONY: observability observability-down smoke trace-smoke observability-check
 
+build:
+	@for m in $(MODULES); do echo "build $$m"; (cd $$m && go build ./...); done
+
+test:
+	@for m in $(MODULES); do echo "test $$m"; (cd $$m && go test ./...); done
+
+# Per-project unit-test coverage: writes coverage.out in each project dir and
+# prints the per-project statement total.
+cover:
+	@set -e; for m in $(MODULES); do \
+	  echo "== cover $$m"; \
+	  (cd $$m && go test -coverprofile=coverage.out ./... && go tool cover -func=coverage.out | tail -1); \
+	done
+
+race:
+	cd lib && go test -race ./...
+
 proto:
-	docker run --rm -v "$(CURDIR):/workspace" -w /workspace bufbuild/buf:1.47.2 generate
+	docker run --rm -v "$(CURDIR)/contracts:/workspace" -w /workspace bufbuild/buf:1.47.2 generate
 
 up:
 	docker compose -f compose.yaml up -d --build --wait
@@ -32,11 +57,8 @@ config-check:
 topology-test:
 	bash test/topology.sh
 
-test:
-	go test ./...
-
 integration-test:
-	go test -tags=integration -p 1 ./...
+	cd test/integration && go test -tags=integration -p 1 ./...
 
 observability: ## Bring up the otel/prometheus/grafana/jaeger overlay.
 	$(COMPOSE) $(COMPOSE_OBS) --profile observability up -d

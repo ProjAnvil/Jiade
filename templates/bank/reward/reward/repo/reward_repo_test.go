@@ -1,0 +1,79 @@
+//go:build integration
+
+package repo_test
+
+import (
+	"context"
+	"database/sql"
+	"testing"
+
+	"bank/lib/pg"
+	"bank/lib/serviceclient"
+	"bank/reward/reward/repo"
+)
+
+type deterministicCustomerReader struct{}
+
+var _ serviceclient.CustomerReader = deterministicCustomerReader{}
+
+func (deterministicCustomerReader) GetCustomer(_ context.Context, customerID, _ string) (serviceclient.Customer, error) {
+	return serviceclient.Customer{CustomerID: customerID, Name: "test customer", CustomerType: "personal", KYCStatus: "passed", Status: "active"}, nil
+}
+
+func setupRewardDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := pg.Open("reward_db")
+	if err != nil {
+		t.Skipf("no reward_db connection, skipping: %v", err)
+	}
+	if err := db.Ping(); err != nil {
+		t.Skipf("postgres not ready, skipping (run make seed first): %v", err)
+	}
+	return db
+}
+
+func TestRewardRepo_GetPointsAcct(t *testing.T) {
+	db := setupRewardDB(t)
+	defer db.Close()
+	ctx := context.Background()
+	r := repo.NewRewardRepo(db, deterministicCustomerReader{})
+	db.ExecContext(ctx, "DELETE FROM points_acct WHERE cust_id='IT-RC'")
+	db.ExecContext(ctx, `INSERT INTO points_acct(cust_id,points_balance,frozen_points,member_level,update_biz_date)
+		VALUES ('IT-RC',300,0,'L2','2026-01-01')`)
+	got, err := r.GetPointsAcct(ctx, "IT-RC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PointsBalance != 300 || got.MemberLevel != "L2" {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestRewardRepo_ListPointsAccts(t *testing.T) {
+	db := setupRewardDB(t)
+	defer db.Close()
+	list, err := repo.NewRewardRepo(db, deterministicCustomerReader{}).ListPointsAccts(context.Background(), "L2", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = list
+}
+
+func TestRewardRepo_ListCoupons(t *testing.T) {
+	db := setupRewardDB(t)
+	defer db.Close()
+	_, err := repo.NewRewardRepo(db, deterministicCustomerReader{}).ListCoupons(context.Background(), "IT-RC", "", 0, 10)
+	if err != nil {
+		t.Fatalf("ListCoupons failed: %v", err)
+	}
+}
+
+func TestRewardRepo_GetProfile_ServiceCall(t *testing.T) {
+	db := setupRewardDB(t)
+	defer db.Close()
+	// Customer lookup is deterministic; only the reward profile is database-backed.
+	_, err := repo.NewRewardRepo(db, deterministicCustomerReader{}).GetProfile(context.Background(), "C0000001")
+	if err != nil {
+		t.Fatalf("GetProfile cross-service aggregation failed (run make up first): %v", err)
+	}
+}

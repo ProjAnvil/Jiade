@@ -1,9 +1,13 @@
 .env
-/core-banking
-/customer
-/payment
-/reward
-/risk
-/seed
-/loan
-/wealth
+# Per-project compiled binaries (a bare /<name> would ignore the whole
+# project directory after the multi-module restructure).
+/core-banking/core-banking
+/customer/customer
+/payment/payment
+/reward/reward
+/risk/risk
+/loan/loan
+/wealth/wealth
+/seed/seed
+coverage.out
+coverage.html

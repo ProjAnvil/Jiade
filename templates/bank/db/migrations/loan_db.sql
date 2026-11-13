@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS loan_account (
     start_biz_date  DATE NOT NULL,
     mature_date     DATE NOT NULL,
     term_months     INTEGER NOT NULL,
-    status          TEXT DEFAULT 'disbursed',-- 放款/还款中/结清/逾期
+    status          TEXT DEFAULT 'disbursed',-- disbursing/repaying/settled/overdue
     guarantee_type  TEXT,                    -- Credit/Mortgage/Guarantee
     branch_code     TEXT
 );

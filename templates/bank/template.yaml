@@ -25,5 +25,5 @@ services:
   - {name: loan, port: 8080, db: loan_db}
   - {name: wealth, port: 8080, db: wealth_db}
 seed:
-  entrypoint: go run ./cmd/seed
+  entrypoint: go run ./seed/cmd/seed
   scales: [dev, full]

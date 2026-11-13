@@ -1,0 +1,391 @@
+package messaging
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"commerce/lib/telemetry"
+	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
+)
+
+func TestRabbitPublisherInjectsTraceparentHeader(t *testing.T) {
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	originalProvider := otel.GetTracerProvider()
+	originalPropagator := otel.GetTextMapPropagator()
+	otel.SetTracerProvider(provider)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		otel.SetTracerProvider(originalProvider)
+		otel.SetTextMapPropagator(originalPropagator)
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+
+	channel := newFakeRabbitChannel()
+	channel.outcomes = []fakePublishOutcome{{ack: true}}
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, span := otel.Tracer("test").Start(context.Background(), "parent")
+	defer span.End()
+	if err := publisher.Publish(ctx, testEvent()); err != nil {
+		t.Fatal(err)
+	}
+	if got := channel.lastMessage.Headers["traceparent"]; got == nil || got == "" {
+		t.Fatalf("traceparent=%v, want propagated trace context", got)
+	}
+	if got := trace.SpanContextFromContext(telemetry.ExtractAMQP(context.Background(), channel.lastMessage.Headers)); !got.IsValid() {
+		t.Fatalf("traceparent=%v, want a valid trace context", channel.lastMessage.Headers["traceparent"])
+	}
+}
+
+func TestProcessRabbitDeliveryPassesExtractedTraceContextToHandler(t *testing.T) {
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	originalProvider := otel.GetTracerProvider()
+	originalPropagator := otel.GetTextMapPropagator()
+	otel.SetTracerProvider(provider)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() {
+		otel.SetTracerProvider(originalProvider)
+		otel.SetTextMapPropagator(originalPropagator)
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+
+	parentCtx, parent := otel.Tracer("test").Start(context.Background(), "parent")
+	headers := amqp.Table{}
+	telemetry.InjectAMQP(parentCtx, headers)
+	parentTraceID := parent.SpanContext().TraceID()
+	parent.End()
+	body, err := json.Marshal(testEvent())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var handlerTraceID trace.TraceID
+	delivery := amqp.Delivery{Body: body, Headers: headers, Acknowledger: rabbitTestAcknowledger{}}
+	err = ProcessRabbitDelivery(context.Background(), &inboxTx{}, "projection", delivery,
+		func(ctx context.Context, _ Event) error {
+			handlerTraceID = trace.SpanContextFromContext(ctx).TraceID()
+			return nil
+		}, RetryPolicy{MaxAttempts: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handlerTraceID != parentTraceID {
+		t.Fatalf("handler trace ID=%s, want %s from delivery headers", handlerTraceID, parentTraceID)
+	}
+}
+
+func TestRabbitPublisherObservesIdleAsynchronousChannelClosure(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	channel.asyncClose()
+	select {
+	case <-publisher.watcherDone:
+	case <-time.After(time.Second):
+		t.Fatal("publisher close watcher did not terminate")
+	}
+	if publisher.Available() {
+		t.Fatal("publisher reports available after asynchronous channel closure")
+	}
+	if err := publisher.Publish(context.Background(), testEvent()); !errors.Is(err, ErrPublisherUnavailable) {
+		t.Fatalf("Publish() after asynchronous closure error=%v", err)
+	}
+	if channel.publishCalls != 0 {
+		t.Fatalf("publishCalls=%d after idle channel closure", channel.publishCalls)
+	}
+}
+
+func TestRabbitPublisherCloseStopsWatcherOnce(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-publisher.watcherDone:
+	case <-time.After(time.Second):
+		t.Fatal("publisher watcher leaked after Close")
+	}
+	if err := publisher.Close(); err != nil {
+		t.Fatalf("second Close() error=%v", err)
+	}
+	if publisher.Available() || channel.closeCalls != 1 {
+		t.Fatalf("available=%v closeCalls=%d", publisher.Available(), channel.closeCalls)
+	}
+}
+
+func TestRabbitPublisherConsumesReturnedPublishConfirmBeforeNextPublish(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	channel.outcomes = []fakePublishOutcome{
+		{returned: true, ack: true},
+		{ack: false},
+	}
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := publisher.Publish(context.Background(), testEvent()); err == nil || !strings.Contains(err.Error(), "returned") {
+		t.Fatalf("first Publish() error=%v, want returned-message error", err)
+	}
+	if err := publisher.Publish(context.Background(), testEvent()); err == nil || !strings.Contains(err.Error(), "negatively confirmed") {
+		t.Fatalf("second Publish() error=%v, want its own nack", err)
+	}
+	if channel.publishCalls != 2 || channel.closed {
+		t.Fatalf("publishCalls=%d closed=%v, want two aligned publishes on open channel", channel.publishCalls, channel.closed)
+	}
+}
+
+func TestRabbitPublisherNegativeConfirmationIsFailure(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	channel.outcomes = []fakePublishOutcome{{ack: false}}
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Publish(context.Background(), testEvent()); err == nil || !strings.Contains(err.Error(), "negatively confirmed") {
+		t.Fatalf("Publish() error=%v, want nack error", err)
+	}
+}
+
+func TestRabbitPublisherCancellationRetiresChannel(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	ctx, cancel := context.WithCancel(context.Background())
+	channel.onPublish = cancel
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Publish(ctx, testEvent()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Publish() error=%v, want context.Canceled", err)
+	} else if !errors.Is(err, ErrPublisherUnavailable) {
+		t.Fatalf("Publish() error=%v, want ErrPublisherUnavailable", err)
+	}
+	if !channel.closed {
+		t.Fatal("channel was not retired after ambiguous cancellation")
+	}
+	if publisher.Available() {
+		t.Fatal("publisher still reports available after channel retirement")
+	}
+	if err := publisher.Publish(context.Background(), testEvent()); err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Fatalf("Publish() after retirement error=%v", err)
+	}
+}
+
+func TestRabbitPublisherReportsAvailabilityBeforeRetirement(t *testing.T) {
+	publisher, err := newRabbitPublisher(newFakeRabbitChannel(), "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !publisher.Available() {
+		t.Fatal("new publisher reports unavailable")
+	}
+}
+
+func TestRabbitPublisherConfirmationClosureRetiresChannel(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	channel.closeConfirmOnPublish = true
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Publish(context.Background(), testEvent()); err == nil || !strings.Contains(err.Error(), "confirmation") || !errors.Is(err, ErrPublisherUnavailable) {
+		t.Fatalf("Publish() error=%v, want confirmation closure error", err)
+	}
+	if !channel.closed {
+		t.Fatal("channel was not retired after confirmation stream closure")
+	}
+}
+
+func TestRabbitPublisherReturnClosureRetiresChannel(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	channel.closeReturnOnPublish = true
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Publish(context.Background(), testEvent()); err == nil || !strings.Contains(err.Error(), "return") || !errors.Is(err, ErrPublisherUnavailable) {
+		t.Fatalf("Publish() error=%v, want return closure error", err)
+	}
+	if !channel.closed {
+		t.Fatal("channel was not retired after return stream closure")
+	}
+}
+
+func TestRabbitPublisherWrongConfirmationSequenceRetiresChannel(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	channel.wrongSequenceOnPublish = true
+	channel.outcomes = []fakePublishOutcome{{ack: true}}
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.Publish(context.Background(), testEvent()); err == nil || !strings.Contains(err.Error(), "correlation lost") || !errors.Is(err, ErrPublisherUnavailable) {
+		t.Fatalf("Publish() error=%v, want correlation error", err)
+	}
+	if !channel.closed {
+		t.Fatal("channel was not retired after sequence mismatch")
+	}
+}
+
+func TestRelayRecordsTerminalRabbitFailureThenStopsBatch(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	channel.closeConfirmOnPublish = true
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &relayStore{claims: []outboxClaim{{Event: testEvent()}, {Event: testEvent()}}}
+
+	_, err = relayOnce(context.Background(), store, publisher, RelayConfig{BatchSize: 2})
+	if !errors.Is(err, ErrPublisherUnavailable) {
+		t.Fatalf("relayOnce() error=%v, want ErrPublisherUnavailable", err)
+	}
+	if store.failed != 1 || channel.publishCalls != 1 {
+		t.Fatalf("failed=%d publishCalls=%d, want one recorded failure and immediate stop", store.failed, channel.publishCalls)
+	}
+	if len(store.failureErrors) != 1 || !errors.Is(store.failureErrors[0], ErrPublisherUnavailable) {
+		t.Fatalf("recorded failure=%v, want ErrPublisherUnavailable", store.failureErrors)
+	}
+}
+
+func TestRelayContinuesBatchAfterAlignedReturnAndNack(t *testing.T) {
+	channel := newFakeRabbitChannel()
+	channel.outcomes = []fakePublishOutcome{
+		{returned: true, ack: true},
+		{ack: false},
+	}
+	publisher, err := newRabbitPublisher(channel, "commerce.events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &relayStore{claims: []outboxClaim{{Event: testEvent()}, {Event: testEvent()}}}
+
+	if _, err := relayOnce(context.Background(), store, publisher, RelayConfig{BatchSize: 2}); err != nil {
+		t.Fatalf("relayOnce() error=%v, want event-local failures only", err)
+	}
+	if store.failed != 2 || channel.publishCalls != 2 || channel.closed {
+		t.Fatalf("failed=%d publishCalls=%d closed=%v, want two recorded event failures on usable publisher", store.failed, channel.publishCalls, channel.closed)
+	}
+}
+
+type fakePublishOutcome struct {
+	returned bool
+	ack      bool
+}
+
+type fakeRabbitChannel struct {
+	nextSeq                uint64
+	confirms               chan amqp.Confirmation
+	returns                chan amqp.Return
+	outcomes               []fakePublishOutcome
+	publishCalls           int
+	closed                 bool
+	closeConfirmOnPublish  bool
+	closeReturnOnPublish   bool
+	wrongSequenceOnPublish bool
+	onPublish              func()
+	closes                 chan *amqp.Error
+	closeOnce              sync.Once
+	closeCalls             int
+	lastMessage            amqp.Publishing
+}
+
+func newFakeRabbitChannel() *fakeRabbitChannel {
+	return &fakeRabbitChannel{nextSeq: 1}
+}
+
+func (channel *fakeRabbitChannel) Confirm(bool) error { return nil }
+func (channel *fakeRabbitChannel) NotifyPublish(confirm chan amqp.Confirmation) chan amqp.Confirmation {
+	channel.confirms = confirm
+	return confirm
+}
+func (channel *fakeRabbitChannel) NotifyReturn(returned chan amqp.Return) chan amqp.Return {
+	channel.returns = returned
+	return returned
+}
+func (channel *fakeRabbitChannel) NotifyClose(closes chan *amqp.Error) chan *amqp.Error {
+	channel.closes = closes
+	return closes
+}
+func (channel *fakeRabbitChannel) GetNextPublishSeqNo() uint64 { return channel.nextSeq }
+func (channel *fakeRabbitChannel) PublishWithContext(_ context.Context, _, _ string, _, _ bool, message amqp.Publishing) error {
+	channel.publishCalls++
+	channel.lastMessage = message
+	sequence := channel.nextSeq
+	channel.nextSeq++
+	if channel.onPublish != nil {
+		channel.onPublish()
+	}
+	if channel.closeConfirmOnPublish {
+		close(channel.confirms)
+		channel.closeConfirmOnPublish = false
+		return nil
+	}
+	if channel.closeReturnOnPublish {
+		close(channel.returns)
+		channel.closeReturnOnPublish = false
+		return nil
+	}
+	if len(channel.outcomes) == 0 {
+		return nil
+	}
+	outcome := channel.outcomes[0]
+	channel.outcomes = channel.outcomes[1:]
+	if outcome.returned {
+		channel.returns <- amqp.Return{ReplyCode: 312, ReplyText: "NO_ROUTE", MessageId: message.MessageId}
+	}
+	if channel.wrongSequenceOnPublish {
+		sequence++
+		channel.wrongSequenceOnPublish = false
+	}
+	channel.confirms <- amqp.Confirmation{DeliveryTag: sequence, Ack: outcome.ack}
+	return nil
+}
+
+type rabbitTestAcknowledger struct{}
+
+func (rabbitTestAcknowledger) Ack(uint64, bool) error        { return nil }
+func (rabbitTestAcknowledger) Nack(uint64, bool, bool) error { return nil }
+func (rabbitTestAcknowledger) Reject(uint64, bool) error     { return nil }
+func (channel *fakeRabbitChannel) Close() error {
+	channel.closeOnce.Do(func() {
+		channel.closeCalls++
+		channel.closed = true
+		if channel.closes != nil {
+			close(channel.closes)
+		}
+	})
+	return nil
+}
+
+func (channel *fakeRabbitChannel) asyncClose() {
+	channel.closeOnce.Do(func() {
+		channel.closeCalls++
+		channel.closed = true
+		if channel.closes != nil {
+			channel.closes <- &amqp.Error{Code: 504, Reason: "channel closed"}
+			close(channel.closes)
+		}
+	})
+}

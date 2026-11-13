@@ -64,6 +64,51 @@ named volume (no shared database). Cross-service reads go over HTTP; state
 propagation goes through RabbitMQ topic events. See
 [ARCHITECTURE.md](ARCHITECTURE.md) for the data flow.
 
+## Repository layout
+
+The template is a Go workspace of side-by-side independent projects: every
+top-level directory is its own module with its own `go.mod`, and `go.work`
+wires them together for workspace-root commands.
+
+```
+commerce/
+├── lib/            # module commerce/lib — shared platform packages:
+│                   #   client, config, httpx, messaging, postgres, telemetry
+├── catalog/        # module commerce/catalog — cmd/catalog + catalog/
+├── customer/       # module commerce/customer — cmd/customer + customer/
+├── fulfillment/    # module commerce/fulfillment — cmd/fulfillment + fulfillment/
+├── inventory/      # module commerce/inventory — cmd/inventory + inventory/
+├── order/          # module commerce/order — cmd/order + order/
+├── payment/        # module commerce/payment — cmd/payment + payment/
+├── seed/           # module commerce/seed — cmd/seed + internal/seed
+│                   #   (dev/demo/load data generator; imports commerce/order)
+├── db/migrations/  # module commerce/db-migrations — SQL migration contract
+│                   #   tests over the per-service *_db.sql files
+├── compose.yaml    # + compose.observability.yaml / compose.load.yaml overlays
+├── Makefile        # build/test/cover loops + compose orchestration
+├── template.yaml
+├── deploy/         # traefik/, k8s/, grafana/, otel/, prometheus/, rabbitmq/
+└── test/           # smoke.sh, trace-smoke.sh (bash acceptance gates)
+```
+
+Module paths are `commerce/<name>`, and every service module replaces
+`commerce/lib => ../lib`. Two deliberate cross-project dependencies survive
+from the original monorepo (kept as direct module requires, not HTTP calls):
+
+- `order` requires `commerce/inventory` (used by the order package's decode
+  contract test, `order/order/store_decode_contract_test.go`), replaced via
+  `../inventory`.
+- `seed` requires `commerce/order` (the seeder drives the order saga types),
+  replaced via `../order`; because the replace directives of a dependency do
+  not propagate, seed mirrors order's `../inventory` replace too.
+
+Per-project Go commands stay inside their directory (`cd order && go test
+./...`); `make build` / `make test` / `make cover` loop over all projects.
+Each project ships its own `Dockerfile` (distroless runtime, static busybox
+`wget` for healthchecks); the compose build context is the workspace root so
+an image can copy `lib/` and any replaced sibling modules alongside the
+service directory.
+
 ## Endpoints
 
 External routes (only reachable through the Traefik gateway on `:18100`):
@@ -285,10 +330,12 @@ Jaeger receives its trace.
 
 ## CI gates
 
-The local static gate is `make commerce-ci`. It builds and tests all Commerce
-packages, runs race detection for `internal/platform`, validates every Compose
-configuration, and renders the Kubernetes kustomization to
-`/tmp/commerce-k8s.yaml` without applying it.
+The local static gate is `make build test cover config-check`: it compiles
+and unit-tests every Go project in the workspace, collects per-project
+coverage totals, validates every Compose configuration, and
+`kubectl kustomize deploy/k8s` renders the Kubernetes manifests without
+applying them. Race detection for the shared platform packages runs in the
+lib project (`cd lib && go test -race ./...`).
 
 GitHub Actions runs the same checks in the `commerce` job. The separate
 `commerce-e2e` job starts one replica of each mutable service, runs

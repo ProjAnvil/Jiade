@@ -32,6 +32,26 @@
 - **金额 int64 分，禁 float**；利率/净值/份额等非货币小数按 NUMERIC 文本直存。
 - **生成物自包含**：离开 jiade 也能构建运行——只需 Docker 和 Go。
 
+## 仓库结构
+
+并排的独立 Go project——每个顶层目录都是自带 `go.mod` 的独立工程（没有嵌套 module 层级）：
+
+```text
+contracts/           生成的 protobuf 契约（module 路径 `bank`）：proto/ + buf 配置 + gen/；
+                     go_package 导入路径（bank/gen/bank/<domain>/v1）保持不变
+lib/                 共享 platform 组件（grpcx / httpx / messaging / migrate / pg / runx /
+                     serviceclient / telemetry / testfail / workflow）
+core-banking/  customer/  payment/  reward/  risk/  loan/  wealth/
+                     每个都是独立 Go project：go.mod + cmd/<name>/ + <domain>/（api / domain /
+                     repo / service；payment 另有 admin 与 workflows）+ 各自的 Dockerfile
+seed/                灌数生成器：cmd/seed/ + internal/fixtures；引用全部 7 个服务的 domain 包与 lib
+test/integration/    支付 saga 集成测试（独立 module，build tag `integration`）
+db/migrations/  deploy/  test/*.sh  文档      跨服务资产，放在 workspace 根
+compose.yaml  Makefile  go.work          workspace 根的编排资产
+```
+
+各 project 经相对 `replace` 引用同级模块（`bank/lib => ../lib`；生成契约为 `bank => ../contracts`），目录可整体搬走——只要保持同级相邻，任何目录都可以直接抽成独立仓库。`seed` 额外依赖全部 7 个服务工程（为它们的域表灌数）；`test/integration` 依赖 core-banking、payment、risk 与 lib。Docker 构建以 workspace 根为 context（`dockerfile: <name>/Dockerfile`），镜像内 `GOWORK=off` 按 project 独立编译；迁移 SQL 留在 workspace 根并打进 seed 镜像。根 `go.work` 支持根级命令（`go run ./seed/cmd/seed`）；`make build` / `make test` / `make cover` 遍历全部 project。
+
 ## 快速开始
 
 ```bash
@@ -44,7 +64,7 @@ make seed     # 建 7 库 → 建 7 库表 → 灌 7 域 fixture（9 步，幂�
 ```bash
 make seed                       # dev 规模（默认）
 SCALE=full make seed            # full 规模
-go test -tags=integration -p 1 ./...   # 集成测试，需本机 15432 有 postgres（DB_PORT 可覆盖）
+cd test/integration && go test -tags=integration -p 1 ./...   # 集成测试，需本机 15432 有 postgres（DB_PORT 可覆盖）
 ```
 
 所有公开 REST 端点经网关 `http://localhost:18000` 访问；服务容器端口不发布到宿主机。`make up` 使用 `--wait`，会等到全部 healthcheck 就绪再返回。查看单个服务健康状态：
@@ -80,7 +100,7 @@ curl -sf -X POST 'localhost:18000/api/v1/vouchers/V.../reverse?mode=blue'
 
 **入口**：`POST /api/v1/payments/workflows`（payment 服务，经网关 18000 → payment:8080）。
 
-工作流是 payment 服务内置的 durable saga 编排器（`internal/platform/workflow`）：每次请求落库为一个不可变 Instance，按顺序执行三个 Action；任一 Action 终态失败时按**逆序**触发补偿；运营者可经 admin gRPC 干预卡住的补偿。所有 saga 命令/事件经 RabbitMQ 投递，落库前与业务写在同一 PostgreSQL 事务中（事务发件箱），保证「状态变更」与「事件发出」原子一致。
+工作流是 payment 服务内置的 durable saga 编排器（`lib/workflow`）：每次请求落库为一个不可变 Instance，按顺序执行三个 Action；任一 Action 终态失败时按**逆序**触发补偿；运营者可经 admin gRPC 干预卡住的补偿。所有 saga 命令/事件经 RabbitMQ 投递，落库前与业务写在同一 PostgreSQL 事务中（事务发件箱），保证「状态变更」与「事件发出」原子一致。
 
 ### 提交一个支付
 
@@ -301,7 +321,7 @@ make observability-down   # 仅下掉可观测性 overlay 容器
 
 ## 失败注入 smoke 套件（10 gate）
 
-`make smoke`（`test/smoke.sh`）运行 10 个 gate，覆盖 saga 的成功/失败/恢复路径。失败注入由 `internal/platform/testfail` 提供，**仅**当 `BANK_TEST_FAILURES_ENABLED=true` 且 workflow id 以特定前缀（`smoke-reject-` / `smoke-insuff-` / `smoke-transient-` / `smoke-compfail-`）开头时触发；`compose.smoke.yaml` 是唯一开启该 env 的地方，且只由 smoke 脚本 apply。
+`make smoke`（`test/smoke.sh`）运行 10 个 gate，覆盖 saga 的成功/失败/恢复路径。失败注入由 `lib/testfail` 提供，**仅**当 `BANK_TEST_FAILURES_ENABLED=true` 且 workflow id 以特定前缀（`smoke-reject-` / `smoke-insuff-` / `smoke-transient-` / `smoke-compfail-`）开头时触发；`compose.smoke.yaml` 是唯一开启该 env 的地方，且只由 smoke 脚本 apply。
 
 | # | Gate | 断言 |
 |---|------|------|
@@ -372,4 +392,4 @@ dev overlay 的 PVC 不会随 `kubectl delete -k` 自动删除；手动 `kubectl
 
 ## 架构
 
-见 [ARCHITECTURE.md](ARCHITECTURE.md)。7 进程 + 7 独立 PostgreSQL + RabbitMQ + Traefik 网关；同步跨域读取走内部 gRPC，异步命令/事件走 RabbitMQ；每服务分层 `api → service → repo → domain`，domain 零外部依赖。支付 durable saga 由 payment 内的 `internal/platform/workflow` 引擎编排。
+见 [ARCHITECTURE.md](ARCHITECTURE.md)。7 进程 + 7 独立 PostgreSQL + RabbitMQ + Traefik 网关；同步跨域读取走内部 gRPC，异步命令/事件走 RabbitMQ；每服务分层 `api → service → repo → domain`，domain 零外部依赖。支付 durable saga 由 payment 内的 `lib/workflow` 引擎编排。

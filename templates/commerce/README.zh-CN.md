@@ -54,6 +54,48 @@ make down
 每个服务独占一个 PostgreSQL 16 容器、数据库、schema 和命名卷（无共享库）。跨服务读取走 HTTP；
 状态传播走 RabbitMQ topic 事件。数据流详见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
+## 仓库布局
+
+本模板是一个由多个独立 Go 项目并列组成的 Go workspace：每个顶层目录都是自带
+`go.mod` 的独立模块，由根目录的 `go.work` 串联起来。
+
+```
+commerce/
+├── lib/            # 模块 commerce/lib —— 共享平台包：
+│                   #   client、config、httpx、messaging、postgres、telemetry
+├── catalog/        # 模块 commerce/catalog —— cmd/catalog + catalog/
+├── customer/       # 模块 commerce/customer —— cmd/customer + customer/
+├── fulfillment/    # 模块 commerce/fulfillment —— cmd/fulfillment + fulfillment/
+├── inventory/      # 模块 commerce/inventory —— cmd/inventory + inventory/
+├── order/          # 模块 commerce/order —— cmd/order + order/
+├── payment/        # 模块 commerce/payment —— cmd/payment + payment/
+├── seed/           # 模块 commerce/seed —— cmd/seed + internal/seed
+│                   #   （dev/demo/load 数据生成器；引用 commerce/order）
+├── db/migrations/  # 模块 commerce/db-migrations —— 针对各服务 *_db.sql 的
+│                   #   SQL 迁移契约测试
+├── compose.yaml    # 以及 compose.observability.yaml / compose.load.yaml 两个 overlay
+├── Makefile        # build/test/cover 循环 + compose 编排
+├── template.yaml
+├── deploy/         # traefik/、k8s/、grafana/、otel/、prometheus/、rabbitmq/
+└── test/           # smoke.sh、trace-smoke.sh（bash 验收门控）
+```
+
+模块路径为 `commerce/<name>`，每个服务模块都以 `replace commerce/lib =>
+../lib` 引用共享库。从原单体仓库刻意保留了两处跨项目依赖（直接模块依赖，
+而非 HTTP 调用）：
+
+- `order` 依赖 `commerce/inventory`（由 order 包的解码契约测试
+  `order/order/store_decode_contract_test.go` 使用），经 `../inventory` replace。
+- `seed` 依赖 `commerce/order`（seeder 直接驱动 order saga 类型），经
+  `../order` replace；由于依赖模块的 replace 不会传递，seed 同时镜像了
+  order 的 `../inventory` replace。
+
+各项目的 Go 命令在自己的目录内执行（如 `cd order && go test ./...`）；
+`make build` / `make test` / `make cover` 会遍历所有项目。每个项目自带
+`Dockerfile`（distroless 运行时 + 静态 busybox `wget` 健康检查）；compose
+构建上下文为 workspace 根目录，因此镜像可以连同服务目录一起复制 `lib/`
+及被 replace 的兄弟模块。
+
 ## 端点
 
 外部路由（仅可通过 Traefik 网关 `:18100` 访问）：
@@ -247,9 +289,10 @@ Jaeger 是否收到该请求的 trace。
 
 ## CI 门控
 
-本地静态门控是 `make commerce-ci`。它构建并测试所有 Commerce 包，对 `internal/platform` 运行
-race 检测，校验每个 Compose 配置，并将 Kubernetes kustomization 渲染到 `/tmp/commerce-k8s.yaml`
-（不 apply）。
+本地静态门控是 `make build test cover config-check`：编译并对 workspace 内所有 Go 项目做单元测试，
+收集各项目覆盖率，校验每个 Compose 配置，并用 `kubectl kustomize deploy/k8s` 渲染 Kubernetes
+清单（不 apply）。共享平台包的 race 检测在 lib 项目内运行
+（`cd lib && go test -race ./...`）。
 
 GitHub Actions 在 `commerce` job 中运行相同的检查。独立的 `commerce-e2e` job 各起一个可变服务的
 副本，运行 `make smoke`，启用可观测性 overlay，并运行 `make trace-smoke`。失败时捕获合并的
