@@ -19,7 +19,7 @@ func TestCustomerListPaginationAndDetailPreservePublicPaths(t *testing.T) {
 		},
 		details: map[string]Customer{
 			"CUS-1": {ID: "CUS-1", Email: "one@example.test", Name: "One", Status: "active",
-				Addresses: []Address{{ID: "ADDR-1", CustomerID: "CUS-1", Recipient: "One", Phone: "13800000000", CountryCode: "CN", Province: "上海", City: "上海", District: "浦东", Line1: "世纪大道 1 号", PostalCode: "200000", Default: true}}},
+				Addresses: []Address{{ID: "ADDR-1", CustomerID: "CUS-1", Recipient: "One", Phone: "13800000000", CountryCode: "CN", Province: "Shanghai", City: "Shanghai", District: "Pudong", Line1: "No. 1 Century Avenue", PostalCode: "200000", Default: true}}},
 		},
 	}
 	handler := NewHandler(NewService(store))
@@ -46,8 +46,8 @@ func TestValidateAddressProvesOwnershipAndUsability(t *testing.T) {
 	store := &customerStoreStub{validation: AddressValidation{
 		CustomerID: "CUS-1", CustomerStatus: "active",
 		Address: Address{ID: "ADDR-1", CustomerID: "CUS-1", Recipient: "One", Phone: "13800000000",
-			CountryCode: "CN", Province: "上海", City: "上海", District: "浦东",
-			Line1: "世纪大道 1 号", PostalCode: "200000", Default: true},
+			CountryCode: "CN", Province: "Shanghai", City: "Shanghai", District: "Pudong",
+			Line1: "No. 1 Century Avenue", PostalCode: "200000", Default: true},
 	}}
 	handler := NewHandler(NewService(store))
 	response := postCustomerJSON(handler, "/internal/v1/customer-addresses/validate",

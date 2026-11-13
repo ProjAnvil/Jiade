@@ -137,30 +137,30 @@ func trackingHistory(stream *rand.Rand, finalStatus string, shippedAt, delivered
 	if shippedAt != nil {
 		start = *shippedAt
 	}
-	loc1 := locPtr("Origin Sort Center 始发分拣中心")
-	loc2 := locPtr("In Transit Hub 中转中心")
-	loc3 := locPtr("Destination Hub 目的地")
-	loc4 := locPtr("Final Delivery 末端配送")
+	loc1 := locPtr("Origin Sort Center")
+	loc2 := locPtr("In Transit Hub")
+	loc3 := locPtr("Destination Hub")
+	loc4 := locPtr("Final Delivery")
 	events = append(events, trackingEventDraft{
-		Status: "picked_up", Description: "Package picked up 包裹已揽收",
+		Status: "picked_up", Description: "Package picked up",
 		Location: loc1, OccurredAt: start,
 	})
 	events = append(events, trackingEventDraft{
-		Status: "in_transit", Description: "In transit 运输中",
+		Status: "in_transit", Description: "In transit",
 		Location: loc2, OccurredAt: start.Add(12 * time.Hour),
 	})
 	if finalStatus == "delivered" && deliveredAt != nil {
 		events = append(events, trackingEventDraft{
-			Status: "out_for_delivery", Description: "Out for delivery 派送中",
+			Status: "out_for_delivery", Description: "Out for delivery",
 			Location: loc3, OccurredAt: deliveredAt.Add(-6 * time.Hour),
 		})
 		events = append(events, trackingEventDraft{
-			Status: "delivered", Description: "Delivered 已送达",
+			Status: "delivered", Description: "Delivered",
 			Location: loc4, OccurredAt: *deliveredAt,
 		})
 	} else if finalStatus == "delayed" {
 		events = append(events, trackingEventDraft{
-			Status: "delayed", Description: "Delayed in transit 运输延误",
+			Status: "delayed", Description: "Delayed in transit",
 			Location: loc3, OccurredAt: start.Add(36 * time.Hour),
 		})
 	} else {

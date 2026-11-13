@@ -72,7 +72,7 @@ func TestAllocatePercentageDiscountUsesLargestRemainderDeterministically(t *test
 }
 
 func TestRegionalTaxUsesDiscountedTaxableAmount(t *testing.T) {
-	rate, tax, err := RegionalTax("CN", "上海市", 9000)
+	rate, tax, err := RegionalTax("CN", "Shanghai", 9000)
 	if err != nil {
 		t.Fatal(err)
 	}

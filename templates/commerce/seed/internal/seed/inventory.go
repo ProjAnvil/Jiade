@@ -95,18 +95,18 @@ var locationVocabulary = []struct {
 	Region   string
 	TimeZone string
 }{
-	{"wh-primary", "Primary Warehouse 主仓", "warehouse", "CN", "Asia/Shanghai"},
-	{"wh-west", "West Coast Warehouse 西岸仓", "warehouse", "US", "America/Los_Angeles"},
-	{"wh-east", "East Coast Warehouse 东岸仓", "warehouse", "US", "America/New_York"},
-	{"store-shanghai", "Shanghai Flagship 上海旗舰店", "store", "CN", "Asia/Shanghai"},
-	{"store-sf", "San Francisco Store 旧金山店", "store", "US", "America/Los_Angeles"},
-	{"store-london", "London Store 伦敦店", "store", "GB", "Europe/London"},
-	{"wh-south", "South Warehouse 南仓", "warehouse", "CN", "Asia/Shanghai"},
-	{"wh-north", "North Warehouse 北仓", "warehouse", "CN", "Asia/Shanghai"},
-	{"store-bj", "Beijing Store 北京店", "store", "CN", "Asia/Shanghai"},
-	{"store-nyc", "New York Store 纽约店", "store", "US", "America/New_York"},
-	{"wh-cn-south", "South China Warehouse 华南仓", "warehouse", "CN", "Asia/Shanghai"},
-	{"wh-cn-east", "East China Warehouse 华东仓", "warehouse", "CN", "Asia/Shanghai"},
+	{"wh-primary", "Primary Warehouse", "warehouse", "CN", "Asia/Shanghai"},
+	{"wh-west", "West Coast Warehouse", "warehouse", "US", "America/Los_Angeles"},
+	{"wh-east", "East Coast Warehouse", "warehouse", "US", "America/New_York"},
+	{"store-shanghai", "Shanghai Flagship", "store", "CN", "Asia/Shanghai"},
+	{"store-sf", "San Francisco Store", "store", "US", "America/Los_Angeles"},
+	{"store-london", "London Store", "store", "GB", "Europe/London"},
+	{"wh-south", "South Warehouse", "warehouse", "CN", "Asia/Shanghai"},
+	{"wh-north", "North Warehouse", "warehouse", "CN", "Asia/Shanghai"},
+	{"store-bj", "Beijing Store", "store", "CN", "Asia/Shanghai"},
+	{"store-nyc", "New York Store", "store", "US", "America/New_York"},
+	{"wh-cn-south", "South China Warehouse", "warehouse", "CN", "Asia/Shanghai"},
+	{"wh-cn-east", "East China Warehouse", "warehouse", "CN", "Asia/Shanghai"},
 }
 
 func refPtr(value string) *string { return &value }

@@ -198,7 +198,7 @@ func TestPostgresConcurrentCheckoutSameKeyReturnsOneOrderAndOneReservation(t *te
 	}
 	customer := &customerStub{snapshot: CustomerSnapshot{
 		ID: "CUS-1", Email: "buyer@example.test", Name: "Buyer",
-		Address: json.RawMessage(`{"address_id":"ADDR-1","country_code":"CN","province":"上海市"}`),
+		Address: json.RawMessage(`{"address_id":"ADDR-1","country_code":"CN","province":"Shanghai"}`),
 	}}
 	catalog := &catalogStub{items: []CatalogSnapshot{{
 		ProductID: "PROD-1", SKU: "SKU-1", ProductTitle: "Product",

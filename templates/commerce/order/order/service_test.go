@@ -528,7 +528,7 @@ func newCheckoutFixture() checkoutFixture {
 	}
 	customer := &customerStub{snapshot: CustomerSnapshot{
 		ID: "CUS-1", Email: "buyer@example.test", Name: "Buyer", Phone: "13800000000",
-		Address: json.RawMessage(`{"address_id":"ADDR-1","recipient":"Buyer","country_code":"CN","province":"上海市","city":"上海市","district":"浦东新区","line1":"世纪大道 1 号","postal_code":"200000"}`),
+		Address: json.RawMessage(`{"address_id":"ADDR-1","recipient":"Buyer","country_code":"CN","province":"Shanghai","city":"Shanghai","district":"Pudong New Area","line1":"No. 1 Century Avenue","postal_code":"200000"}`),
 	}}
 	catalog := &catalogStub{items: []CatalogSnapshot{{
 		SKU: "SKU-1", Title: "Snapshot title", UnitPriceMinor: 1236, Currency: "CNY",

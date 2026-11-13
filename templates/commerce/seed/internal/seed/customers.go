@@ -77,7 +77,7 @@ func generateCustomers(ds *Dataset, c counts, seed int64, generatedAt time.Time)
 		// customer-service default-address invariant).
 		var street string
 		if region.Country == "China" {
-			street = pick(stream, streetNamesCN) + fmt.Sprintf(" %d号", intRange(stream, 1, 999))
+			street = pick(stream, streetNamesCN) + fmt.Sprintf(" No. %d", intRange(stream, 1, 999))
 		} else {
 			street = fmt.Sprintf("%d %s", intRange(stream, 100, 9999), pick(stream, streetNamesEN))
 		}
@@ -101,7 +101,7 @@ func generateCustomers(ds *Dataset, c counts, seed int64, generatedAt time.Time)
 		if boolP(stream, 0.20) {
 			altStreet := street
 			if region.Country == "China" {
-				altStreet = pick(stream, streetNamesCN) + fmt.Sprintf(" %d号", intRange(stream, 1, 999))
+				altStreet = pick(stream, streetNamesCN) + fmt.Sprintf(" No. %d", intRange(stream, 1, 999))
 			} else {
 				altStreet = fmt.Sprintf("%d %s", intRange(stream, 100, 9999), pick(stream, streetNamesEN))
 			}
