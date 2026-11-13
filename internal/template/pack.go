@@ -51,10 +51,13 @@ func main() {
 			return nil
 		}
 		// Skip local build/test artifacts (gitignored but still on disk):
-		// coverage profiles from `make cover` and stray compiled binaries.
+		// coverage profiles from `make cover` and stray compiled binaries
+		// dropped by `go build ./...` inside a seed/ project directory.
 		base := filepath.Base(rel)
-		if base == "coverage.out" || base == "coverage.html" ||
-			(rel == "bank_dcn/seed/seed" && d.Type().IsRegular()) {
+		if base == "coverage.out" || base == "coverage.html" {
+			return nil
+		}
+		if d.Type().IsRegular() && strings.HasSuffix(rel, "/seed/seed") {
 			return nil
 		}
 		paths = append(paths, rel)

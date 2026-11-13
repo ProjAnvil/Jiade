@@ -21,13 +21,14 @@ jobs:
         with:
           go-version: '1.22'
       - uses: azure/setup-kubectl@v4
-      - run: cd templates/bank && go build ./...
-      - run: cd templates/bank && go test ./...
-      - run: cd templates/bank && go test -race ./internal/platform/...
-      - run: cd templates/bank && make config-check observability-check
+      - run: cd templates/bank && make build
+      - run: cd templates/bank && make test
+      - run: cd templates/bank && make cover
+      - run: cd templates/bank && make race
+      - run: cd templates/bank && make config-check observability-check topology-test
       - run: kubectl kustomize templates/bank/deploy/k8s/overlays/dev >/tmp/bank-dev.yaml
       - run: kubectl kustomize templates/bank/deploy/k8s/overlays/prod >/tmp/bank-prod.yaml
-      - run: cd templates/bank && make proto && git diff --exit-code -- gen
+      - run: cd templates/bank && make proto && git diff --exit-code -- templates/bank/contracts/gen
 
   bank-e2e:
     runs-on: ubuntu-latest
@@ -58,9 +59,9 @@ jobs:
         with:
           go-version: '1.22'
       - uses: azure/setup-kubectl@v4
-      - run: cd templates/commerce && go build ./...
-      - run: cd templates/commerce && go test ./...
-      - run: cd templates/commerce && go test -race ./internal/platform/...
+      - run: cd templates/commerce && make build
+      - run: cd templates/commerce && make test
+      - run: cd templates/commerce && make cover
       - run: cd templates/commerce && make config-check
       - run: kubectl kustomize templates/commerce/deploy/k8s >/tmp/commerce-k8s.yaml
 

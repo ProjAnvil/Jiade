@@ -76,8 +76,8 @@ cmd/jiade/           CLI 入口（cobra）
 internal/cli/        list / init / up / down / seed 命令
 internal/template/   内嵌模板 registry（tar 方案）
 internal/docker/     docker/compose/daemon 探测
-templates/bank/      bank 模板——独立 Go module（`module bank`）
-templates/commerce/  commerce 模板——独立 Go module（`module commerce`）
+templates/bank/      bank 模板——并排独立 Go project（每个模块目录一个 go.mod，lib/ 共享库，contracts/ gRPC 契约，根 go.work）
+templates/commerce/  commerce 模板——并排独立 Go project（每个模块目录一个 go.mod，lib/ 共享库，根 go.work）
 templates/bank_dcn/  bank_dcn 模板——并排独立 Go project（每个模块目录一个 go.mod，lib/ 共享库，根 go.work）
 docs/superpowers/    设计 spec 与实施计划
 ```

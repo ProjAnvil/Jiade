@@ -9,26 +9,23 @@ test: generate
 	go build ./...
 	go test ./...
 
-# bank template as standalone module verification (acceptance #2)
+# bank template multi-project verification (acceptance #2)
 bank-test:
-	cd templates/bank && go build ./... && go test ./...
+	cd templates/bank && $(MAKE) build test
 
-# bank template static CI mirror (build, test, race platform, config/observability
-# checks, k8s kustomize dev/prod render). Mirrors the bank job in .github/workflows/ci.yml.
+# bank template static CI mirror (per-project build, test, coverage, race on
+# the shared lib, config/observability/topology checks, k8s kustomize dev/prod
+# render, proto regen diff). Mirrors the bank job in .github/workflows/ci.yml.
 bank-ci:
-	cd templates/bank && go build ./...
-	cd templates/bank && go test ./...
-	cd templates/bank && go test -race ./internal/platform/...
-	cd templates/bank && $(MAKE) config-check observability-check
+	cd templates/bank && $(MAKE) build test cover race config-check observability-check topology-test
 	kubectl kustomize templates/bank/deploy/k8s/overlays/dev >/tmp/bank-dev.yaml
 	kubectl kustomize templates/bank/deploy/k8s/overlays/prod >/tmp/bank-prod.yaml
+	cd templates/bank && $(MAKE) proto && git diff --exit-code -- templates/bank/contracts/gen
 
-# commerce template static verification (build, test, compose, and manifests)
+# commerce template static verification (per-project build, test, coverage,
+# compose, and manifests)
 commerce-ci:
-	cd templates/commerce && go build ./...
-	cd templates/commerce && go test ./...
-	cd templates/commerce && go test -race ./internal/platform/...
-	cd templates/commerce && $(MAKE) config-check
+	cd templates/commerce && $(MAKE) build test cover config-check
 	kubectl kustomize templates/commerce/deploy/k8s >/tmp/commerce-k8s.yaml
 
 # dcn template static verification (multi-module build, test, coverage, compose topology)

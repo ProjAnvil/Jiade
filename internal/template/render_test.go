@@ -18,15 +18,23 @@ func TestCopy_CreatesFullProject(t *testing.T) {
 	if err := Copy("bank", r, dir, false); err != nil {
 		t.Fatal(err)
 	}
+	// The bank template is a set of side-by-side independent Go projects:
+	// verify the workspace root plus one representative file per project kind
+	// (shared lib, gRPC contracts, service, seeder, integration tests).
 	must := []string{
-		"go.mod", "go.sum", "compose.yaml", "Dockerfile",
+		"go.work", "compose.yaml",
 		"template.yaml", ".env.example", "Makefile",
 		"README.md", "ARCHITECTURE.md",
-		"cmd/core-banking/main.go", "cmd/seed/main.go",
 		"db/migrations/core_db.sql",
-		"internal/corebanking/domain/money.go",
-		"internal/corebanking/service/ledger_service.go",
-		"internal/fixtures/domains/core.go",
+		"lib/go.mod", "lib/workflow/engine.go",
+		"contracts/go.mod", "contracts/gen/bank/core/v1/account_query.pb.go",
+		"core-banking/go.mod", "core-banking/Dockerfile",
+		"core-banking/cmd/core-banking/main.go",
+		"core-banking/corebanking/domain/money.go",
+		"core-banking/corebanking/service/ledger_service.go",
+		"seed/go.mod", "seed/cmd/seed/main.go",
+		"seed/internal/fixtures/domains/core.go",
+		"test/integration/go.mod",
 	}
 	for _, p := range must {
 		if _, err := os.Stat(filepath.Join(dir, p)); err != nil {
@@ -143,7 +151,7 @@ func TestTemplateArchiveMatchesTemplateSources(t *testing.T) {
 		switch {
 		case filepath.Base(rel) == "coverage.out",
 			filepath.Base(rel) == "coverage.html",
-			rel == "bank_dcn/seed/seed":
+			strings.HasSuffix(rel, "/seed/seed"):
 			return nil
 		}
 		contents, err := os.ReadFile(path)
