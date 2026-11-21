@@ -9,5 +9,7 @@ use (
 	./batch-scheduler
 	./console
 	./seed
+	./db-proxy
+	./db-keeper
 	./test/integration
 )

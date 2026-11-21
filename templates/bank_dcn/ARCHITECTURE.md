@@ -180,7 +180,21 @@ RMB 子事务消息全链路 at-least-once，幂等由各端唯一键兜底；AD
 - **ADM `uk_event (tx_id, account_id, direction)`**：event_log 唯一键去重，at-least-once 事件重复消费安全。
 - **协调服务 txId 幂等注册**：`POST /transactions` 携带已存在的 `txId` → 直接返回当前状态，不重复落库、不重复分发。
 
-## 6. 数据模型（DDL 摘要）
+## 6. DB 层控制面（自管复制演示：DBKeeper / DBProxy / DBAdmin）
+
+微众真实形态里数据库层由 TDSQL 的网关 + 调度平台托管；本模板用三个自研组件演示其开源等价物（ProxySQL + Orchestrator 模型），仅作用于 dcn01 一个演示集（其余单元库保持「RDS 仿真」单实例）：
+
+| 组件 | 角色 | 实现要点 |
+|---|---|---|
+| db-keeper ×3 | 仲裁 + 切换编排 + 探测 | hashicorp/raft 多数派选主；leader 运行调和循环：注册 SETS → 建复制（GTID，repl 账号）→ 探测（SELECT 1 / SHOW REPLICA STATUS）→ 连续 3 次主库失联且从库 lag=0 时自动切换 |
+| db-proxy ×2 | L4 连接层（port-per-set） | 纯 TCP 转发不解析 MySQL 协议；路由表由 keeper 经 admin API 下发；连接快照后端（改路由只影响新连接，模拟托管端点行为）；`/admin/drain` 作网络侧围栏 |
+| db-admin | 管理台（Vue3 + DaisyUI） | 拓扑/健康/延迟面板 + 手动切换（经 raft 提交）；nginx 反代 `/api/` 到 keeper，follower 307 重定向到 leader |
+
+切换时序（keeper 执行，顺序即安全性）：**等从库追平（lag=0）→ 围栏旧主（`SET GLOBAL super_read_only=ON`）→ 提升新主（`STOP REPLICA; RESET REPLICA ALL; read_only=OFF`）→ 旧主降级为新主的从库 → 重推 proxy 路由 → drain 旧连接**。应用侧无感：dcn01-app 的 DSN 恒为 `db-proxy:23301`。verify gate 9 断言完整往返（切到副本 → 经 proxy 转账精确对账 → 切回 → 再转账）。
+
+脑裂防护的三道闸：raft 多数派（切换决策需 2/3 节点提交）、先围栏后提升的固定顺序、proxy drain 网络侧兜底。教学简化：快照为内存态、围栏仅 super_read_only（生产需叠加凭证轮换/SG 封锁）。
+
+## 7. 数据模型（DDL 摘要）
 
 四个库（dcnXX_db 四单元共用同一 schema；建表经 `/docker-entrypoint-initdb.d` 初始化，dcn04 首次启动自动建表）：
 
@@ -197,7 +211,7 @@ RMB 子事务消息全链路 at-least-once，幂等由各端唯一键兜底；AD
 
 完整 DDL 随所属服务存放（各一份 `01_init.sql`）：`gns/db/init`、`rmb/db/init`、`dcn-app/db/init`（dcn01–04 共用）、`adm/db/init`、`batch-scheduler/db/init`。
 
-## 7. 观测体系
+## 8. 观测体系
 
 仿真生产的「统一监控平台」，仅覆盖指标（metrics），不含告警、日志聚合与链路追踪：
 
@@ -206,9 +220,9 @@ RMB 子事务消息全链路 at-least-once，幂等由各端唯一键兜底；AD
 - **Grafana**：provisioning 自动装配 Prometheus datasource 与 RED 仪表盘（uid `dcn-red`，「DCN Services (RED)」；`$service` 变量下钻单服务，面板含 RPS / 5xx 错误率 / P99 延迟 / RMB 事务终态）；匿名 Viewer 免登录，端口 13000。
 - **console 观测台**（18099）：内嵌单页——拓扑视图、容器状态墙（Docker Engine API，只读挂载 socket）、各服务 RPS 曲线（经 `/api/query` 代理 Prometheus HTTP API）。
 
-## 8. 故障与扩容用例（verify 八关）
+## 9. 故障与扩容用例（verify 九关）
 
-`make verify`（`test/verify.sh`）八关，任一失败整体退出 1：
+`make verify`（`test/verify.sh`）九关，任一失败整体退出 1：
 
 | # | 用例 | 操作 | 预期 |
 |---|------|------|------|
@@ -225,7 +239,7 @@ RMB 子事务消息全链路 at-least-once，幂等由各端唯一键兜底；AD
 
 集成测试：`make integration-test`（`test/integration/`，Go，build tag `integration`）是与 verify.sh 互补的另一层验证——verify.sh 是编排式故障注入冒烟（停容器、重投消息、触发批量，断言端到端资金守恒），integration 包则不做故障编排，只按服务对运行中的栈发起 HTTP 外部行为契约测试（dcn-app 余额/转账语义、rmb 事务幂等注册、adm 汇总/对账、gns 开户/路由等）。栈不可达时用例自动 Skip，端点可用 `DCN_IT_*` 环境变量覆盖。
 
-## 9. 代码组织（独立 Go project 并排）
+## 10. 代码组织（独立 Go project 并排）
 
 仓库按「每个模块一个独立 Go project」组织：顶层每个目录都是自带 `go.mod` 的独立工程，没有嵌套 module 层级；根目录 `go.work` 串联本地开发（`go run ./seed/cmd/seed` 等根级命令依赖它）。
 

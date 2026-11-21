@@ -55,4 +55,20 @@ check "grafana and console only on mgmt" \
 check "dcn04 is in expansion profile" \
   '.services["dcn04-app"].profiles == ["expansion"] and .services["dcn04-db"].profiles == ["expansion"]'
 
+# DB layer control plane: replication set + keeper quorum + proxies + admin UI
+check "dcn01-db has binlog/GTID flags for self-managed replication" \
+  '.services["dcn01-db"].command | join(" ") | contains("gtid-mode=ON")'
+check "dcn01-db-replica only in idc1 (replication pair)" \
+  '.services["dcn01-db-replica"].networks | keys == ["idc1"]'
+check "db keepers on mgmt+idc1 (3-node raft quorum)" \
+  '[.services["db-keeper-1"], .services["db-keeper-2"], .services["db-keeper-3"]] | all(.networks | keys | sort == ["idc1", "mgmt"])'
+check "db proxies on sf+idc1+mgmt" \
+  '[.services["db-proxy"], .services["db-proxy-2"]] | all(.networks | keys | sort == ["idc1", "mgmt", "sf"])'
+check "db-admin only on mgmt" \
+  '.services["db-admin"].networks | keys == ["mgmt"]'
+check "dcn01-app connects through DBProxy port-per-set" \
+  '.services["dcn01-app"].environment.DB_DSN | contains("db-proxy:23301")'
+check "dcn02/dcn03 apps still hit their DBs directly" \
+  '[.services["dcn02-app"], .services["dcn03-app"]] | all(.environment.DB_DSN | contains("dcn02-db") or contains("dcn03-db"))'
+
 echo "topology OK"

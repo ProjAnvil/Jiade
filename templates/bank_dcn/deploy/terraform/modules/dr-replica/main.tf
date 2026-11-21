@@ -50,7 +50,7 @@ resource "aws_vpc_security_group_egress_rule" "db_all" {
 }
 
 resource "aws_db_instance" "replica" {
-  for_each = var.unit_dbs
+  for_each = var.source_dbs
 
   identifier          = "${var.prefix}-${each.key}-db"
   replicate_source_db = each.value

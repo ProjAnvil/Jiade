@@ -243,6 +243,14 @@ services:
   dcn01-db:
     <<: *mysql-common
     container_name: dcn01-db
+    # Self-managed replication set (with dcn01-db-replica below): binlog +
+    # GTID so DBKeeper can orchestrate primary switches; other unit DBs stay
+    # plain single instances like the RDS simulation.
+    command:
+      - --server-id=1
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --log-bin=binlog
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dcn123}
       MYSQL_ROOT_HOST: "%"
@@ -274,7 +282,7 @@ services:
       dockerfile: dcn-app/Dockerfile
     environment:
       DCN_ID: dcn01
-      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(dcn01-db:3306)/dcn01_db?parseTime=true
+      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(db-proxy:23301)/dcn01_db?parseTime=true
       GNS_ENDPOINT: http://gns:8080
       RMB_ENDPOINT: http://rmb-coordinator:8080
       AMQP_URL: amqp://dcn:dcn123@dcn-rabbitmq:5672/
@@ -293,6 +301,8 @@ services:
       prometheus.port: "8080"
     depends_on:
       dcn01-db:
+        condition: service_healthy
+      db-proxy:
         condition: service_healthy
       dcn-rabbitmq:
         condition: service_healthy
@@ -383,6 +393,138 @@ services:
       gns:
         condition: service_started
       rmb-coordinator:
+        condition: service_started
+
+  # ============ DB layer control plane (self-managed MySQL set demo) ============
+  dcn01-db-replica:
+    <<: *mysql-common
+    container_name: dcn01-db-replica
+    # Starts read-only; DBKeeper runs CHANGE REPLICATION SOURCE and flips
+    # read-only on promote. No init SQL: data arrives via replication.
+    command:
+      - --server-id=11
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --log-bin=binlog
+      - --read-only=ON
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dcn123}
+      MYSQL_ROOT_HOST: "%"
+    volumes:
+      - dcn01-db-replica-data:/var/lib/mysql
+    networks: [idc1]
+
+  db-keeper-1:
+    restart: unless-stopped
+    container_name: db-keeper-1
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:18110/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    build:
+      context: .
+      dockerfile: db-keeper/Dockerfile
+    environment: &keeper-env
+      NODE_ID: db-keeper-1
+      RAFT_ADDR: db-keeper-1:18111
+      PEERS: db-keeper-1:18111,db-keeper-2:18111,db-keeper-3:18111
+      SETS: "dcn01:23301:dcn01-db:3306,dcn01-db-replica:3306"
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dcn123}
+      PROXIES: http://db-proxy:18120,http://db-proxy-2:18122
+    ports: ["18110:18110"]
+    networks: [mgmt, idc1]
+    labels:
+      prometheus.scrape: "true"
+      prometheus.port: "18110"
+
+  db-keeper-2:
+    restart: unless-stopped
+    container_name: db-keeper-2
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:18110/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    build:
+      context: .
+      dockerfile: db-keeper/Dockerfile
+    environment:
+      <<: *keeper-env
+      NODE_ID: db-keeper-2
+      RAFT_ADDR: db-keeper-2:18111
+    networks: [mgmt, idc1]
+    labels:
+      prometheus.scrape: "true"
+      prometheus.port: "18110"
+
+  db-keeper-3:
+    restart: unless-stopped
+    container_name: db-keeper-3
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:18110/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    build:
+      context: .
+      dockerfile: db-keeper/Dockerfile
+    environment:
+      <<: *keeper-env
+      NODE_ID: db-keeper-3
+      RAFT_ADDR: db-keeper-3:18111
+    networks: [mgmt, idc1]
+    labels:
+      prometheus.scrape: "true"
+      prometheus.port: "18110"
+
+  db-proxy:
+    restart: unless-stopped
+    container_name: db-proxy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:18120/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    build:
+      context: .
+      dockerfile: db-proxy/Dockerfile
+    environment:
+      PROXY_ADMIN_ADDR: ":18120"
+    ports: ["18120:18120"]
+    networks: [sf, idc1, mgmt]
+    labels:
+      prometheus.scrape: "true"
+      prometheus.port: "18120"
+
+  # Second proxy instance receives the same routing pushes (stateless L4);
+  # a production HA pair also needs a VIP/DNS fronting both.
+  db-proxy-2:
+    restart: unless-stopped
+    container_name: db-proxy-2
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:18122/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    build:
+      context: .
+      dockerfile: db-proxy/Dockerfile
+    environment:
+      PROXY_ADMIN_ADDR: ":18122"
+    ports: ["18122:18122"]
+    networks: [sf, idc1, mgmt]
+
+  db-admin:
+    container_name: db-admin
+    build:
+      context: .
+      dockerfile: db-admin/Dockerfile
+    restart: unless-stopped
+    ports: ["18130:80"]
+    networks: [mgmt]
+    depends_on:
+      db-keeper-1:
         condition: service_started
 
   # ============ Expansion unit (profile: expansion, not started by default) ============
@@ -533,6 +675,7 @@ volumes:
   batch-db-data:
   rabbitmq-data:
   dcn01-db-data:
+  dcn01-db-replica-data:
   dcn02-db-data:
   dcn03-db-data:
   dcn04-db-data:

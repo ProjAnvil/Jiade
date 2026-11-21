@@ -42,10 +42,26 @@ terraform/
 
 ## Usage
 
+Two ready-made plans:
+
+- **Plan A — same-city active-active** (`terraform.tfvars.example`): two AZs
+  standing for idc1/idc2, Multi-AZ unit DBs, no remote DR.
+- **Plan B — same-city + remote DR** (`terraform.dr.tfvars.example`): Plan A
+  plus a second-city region with one async cross-region **read replica per
+  database** (unit DBs and the global-zone gns/rmb/adm/batch DBs).
+
+DR semantics: the replicas are read-only (writes rejected) and carry no app
+tier — data keeps syncing, nothing serves traffic. RPO = replication lag
+(seconds to minutes). Failover is a deployment-stage runbook: promote the
+replicas, then deploy the app tier in the DR region. Switching plans on an
+existing state is incremental (applying the DR plan only adds the DR
+resources).
+
 ```bash
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
-cp terraform.tfvars.example terraform.tfvars  # then edit image_id / db_master_password / admin_cidr
+cp terraform.tfvars.example terraform.tfvars  # plan A; or terraform.dr.tfvars.example for plan B
+# then edit image_id / db_master_password / admin_cidr
 terraform init
 terraform plan
 terraform apply

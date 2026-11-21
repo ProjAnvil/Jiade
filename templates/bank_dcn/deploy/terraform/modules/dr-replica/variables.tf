@@ -18,8 +18,8 @@ variable "db_instance_class" {
   type        = string
 }
 
-variable "unit_dbs" {
-  description = "Map of unit name -> primary DB ARN to replicate."
+variable "source_dbs" {
+  description = "Map of DB name -> source ARN to replicate (units + global zone)."
   type        = map(string)
 }
 

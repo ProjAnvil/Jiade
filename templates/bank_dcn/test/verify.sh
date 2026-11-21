@@ -8,6 +8,7 @@
 # gate 6  online expansion (dcn04)
 # gate 7  ADM global aggregation and reconciliation
 # gate 8  end-of-day batch (interest accrual + idempotent rerun + ADM reconciliation)
+# gate 9  DB-layer primary switch (DBKeeper raft arbitration + DBProxy repoint)
 set -u
 cd "$(dirname "$0")/.."
 
@@ -210,3 +211,35 @@ if [ "$FAILED" -ne 0 ]; then
   exit 1
 fi
 echo "VERIFY OK"
+
+
+# ===== Gate 9: DB-layer primary switch via DBKeeper =====
+echo "== Gate 9: DB-layer primary switch via DBKeeper =="
+KEEPER=${KEEPER:-http://localhost:18110}
+PROXYA=${PROXY:-http://localhost:18120}
+prim() { curl -sf "$PROXYA/admin/routing" | jq -r '.sets[] | select(.name=="dcn01") | .primary'; }
+wait_prim() { # <expected> <seconds>
+  for _ in $(seq 1 "$2"); do
+    [ "$(prim)" = "$1" ] && return 0
+    sleep 2
+  done
+  return 1
+}
+if wait_prim "dcn01-db:3306" 90; then
+  pass "DBProxy routes dcn01 set to dcn01-db (keeper bootstrapped replication)"
+else
+  fail "DBProxy routing not bootstrapped (got: $(prim))"
+fi
+b1=$(balance "$DCN01" 1001)
+curl -sf -X POST "$KEEPER/sets/dcn01/switch" -H 'Content-Type: application/json'   -d '{"to":"dcn01-db-replica:3306","reason":"verify gate 9"}' >/dev/null   && pass "switch command accepted (raft committed)" || fail "switch command rejected"
+if wait_prim "dcn01-db-replica:3306" 120; then
+  pass "DBProxy repointed to promoted replica"
+else
+  fail "routing did not switch (got: $(prim))"
+fi
+curl -sf -X POST "$GATEWAY/dcn/transfer" -H 'Content-Type: application/json'   -d '{"fromId":1001,"toId":1002,"amount":"5.00"}' >/dev/null   && pass "intra-DCN transfer through DBProxy against NEW primary"   || fail "transfer failed after switch"
+b1_after=$(balance "$DCN01" 1001)
+[ "$(python3 -c "print(1 if float('$b1_after')==float('$b1')-5.0 else 0)")" = "1" ]   && pass "balance exact through switched path ($b1 -> $b1_after)"   || fail "balance mismatch after switch ($b1 -> $b1_after)"
+curl -sf -X POST "$KEEPER/sets/dcn01/switch" -H 'Content-Type: application/json'   -d '{"to":"dcn01-db:3306","reason":"verify gate 9 rollback"}' >/dev/null   && wait_prim "dcn01-db:3306" 120   && pass "switched back to original primary" || fail "rollback switch failed"
+curl -sf -X POST "$GATEWAY/dcn/transfer" -H 'Content-Type: application/json'   -d '{"fromId":1001,"toId":1002,"amount":"1.00"}' >/dev/null   && pass "transfer works after switching back" || fail "transfer failed after rollback"
+

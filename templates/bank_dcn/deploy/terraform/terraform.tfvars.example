@@ -1,7 +1,8 @@
-# Minimal planning data mirroring the compose topology: 3 base units +
-# expansion dcn04 (disabled by default, mirrors `docker compose --profile
-# expansion`), unit app tiers alternating across idc1/idc2, one global-zone
-# service node. Specs are simulation-minimal (t3.micro / db.t3.micro).
+# Plan A — same-city active-active (no remote DR): 3 base units + expansion
+# dcn04 (disabled by default, mirrors `docker compose --profile expansion`),
+# unit app tiers alternating across idc1/idc2, one global-zone service node.
+# Specs are simulation-minimal (t3.micro / db.t3.micro). For the second-city
+# DR plan see terraform.dr.tfvars.example.
 
 resource_plan = {
   region = "us-east-1"

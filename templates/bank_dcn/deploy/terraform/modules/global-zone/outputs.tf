@@ -8,3 +8,8 @@ output "summary" {
     ingress_lb_dns   = aws_lb.ingress.dns_name
   }
 }
+
+output "db_arns" {
+  description = "Global-zone DB ARNs per service (replication sources for the DR region)."
+  value       = { for k, db in aws_db_instance.svc_db : k => db.arn }
+}

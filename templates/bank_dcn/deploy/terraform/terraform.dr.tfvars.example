@@ -1,0 +1,46 @@
+# Plan B — same-city active-active + remote disaster recovery: everything in
+# terraform.tfvars.example plus the second city. The DR region holds one
+# asynchronous cross-region read replica per database (unit DBs and the
+# global-zone gns/rmb/adm/batch DBs).
+#
+# DR semantics: replicas are READ-ONLY (writes are rejected) and carry no app
+# tier — data keeps syncing, nothing runs. RPO = replication lag (seconds to
+# minutes); failover = promote replicas + deploy the app tier in the DR
+# region (a deployment-stage runbook, not automatic).
+
+resource_plan = {
+  region = "ap-southeast-2"
+  zones  = ["ap-southeast-2a", "ap-southeast-2b"]
+  cidr   = "10.60.0.0/16"
+
+  dcns = [
+    { name = "dcn01", idc = 1, app_nodes = 1 },
+    { name = "dcn02", idc = 2, app_nodes = 1 },
+    { name = "dcn03", idc = 1, app_nodes = 1 },
+  ]
+
+  expansion = {
+    enabled   = false
+    name      = "dcn04"
+    idc       = 2
+    app_nodes = 1
+  }
+
+  global_zone = {
+    service_nodes = 1
+    mgmt_nodes    = 0
+  }
+
+  dr = {
+    enabled = true
+    region  = "ap-southeast-1"
+  }
+}
+
+image_id = "img-xxxxxxxxxxxx"
+
+# db_master_password = "change-me-123456"
+
+# Cross-region replicas require source backups; enabling dr already forces
+# >= 1 day on unit DBs. 7 days is a sane production floor.
+db_backup_retention_days = 7

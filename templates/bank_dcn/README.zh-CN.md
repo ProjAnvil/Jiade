@@ -216,6 +216,8 @@ curl -sf -X POST localhost:18084/transfer \
 | 18091 | adm | 16379 | gns-redis |
 | 18092 | batch-scheduler | 15672 | rabbitmq 管理台 |
 | 18099 | console 观测台 | 19090 | prometheus |
+| 18110 | db-keeper API（raft leader） | 18130 | db-admin 管理台（Vue） |
+| 18120 | db-proxy admin API | 18122 | db-proxy-2 admin API |
 | 13000 | grafana（RED 仪表盘） | | |
 
 ## 与生产架构的差异

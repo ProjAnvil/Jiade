@@ -107,6 +107,9 @@ module "dr_replica" {
   vpc_cidr          = cidrsubnet(var.resource_plan.cidr, 8, 240) # 10.60.240.0/24-style slice of a /16 plan
   zones             = ["${var.resource_plan.dr.region}a", "${var.resource_plan.dr.region}b"]
   db_instance_class = var.db_instance_class
-  unit_dbs          = { for name, u in module.dcn_unit : name => u.db_arn }
-  resource_tags     = var.resource_tags
+  source_dbs = merge(
+    { for name, u in module.dcn_unit : name => u.db_arn },
+    { for name, arn in module.global_zone.db_arns : "global-${name}" => arn },
+  )
+  resource_tags = var.resource_tags
 }

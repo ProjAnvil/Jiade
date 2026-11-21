@@ -2,7 +2,7 @@
 # independent Go project (own go.mod); go.work wires them together for
 # root-level commands. test/integration is built only by `make integration-test`
 # (build tag `integration`).
-MODULES := lib gns rmb dcn-app adm batch-scheduler console seed
+MODULES := lib gns rmb dcn-app adm batch-scheduler console seed db-proxy db-keeper
 
 .PHONY: build test cover up down seed seed-full verify smoke topology-test integration-test
 

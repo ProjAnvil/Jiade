@@ -216,6 +216,8 @@ curl -sf -X POST localhost:18084/transfer \
 | 18091 | adm | 16379 | gns-redis |
 | 18092 | batch-scheduler | 15672 | rabbitmq management console |
 | 18099 | console (observability wall) | 19090 | prometheus |
+| 18110 | db-keeper API (raft leader) | 18130 | db-admin UI (Vue) |
+| 18120 | db-proxy admin API | 18122 | db-proxy-2 admin API |
 | 13000 | grafana (RED dashboard) | | |
 
 ## Differences from a production DCN architecture
