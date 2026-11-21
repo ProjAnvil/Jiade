@@ -19,11 +19,10 @@ resource "aws_instance" "svc" {
   root_block_device {
     volume_type = "gp3"
     volume_size = 8
+    encrypted   = true
   }
 
-  tags = {
-    Name = "${var.prefix}-svc-${count.index + 1}"
-  }
+  tags = merge(var.resource_tags, { Name = "${var.prefix}-svc-${count.index + 1}" })
 }
 
 # RabbitMQ and Redis live together on one node in the simulation; split them
@@ -37,11 +36,10 @@ resource "aws_instance" "mq" {
   root_block_device {
     volume_type = "gp3"
     volume_size = 8
+    encrypted   = true
   }
 
-  tags = {
-    Name = "${var.prefix}-mq-1"
-  }
+  tags = merge(var.resource_tags, { Name = "${var.prefix}-mq-1" })
 }
 
 # ============ CORE ============
@@ -50,6 +48,8 @@ resource "aws_instance" "mq" {
 resource "aws_db_subnet_group" "svc" {
   name       = "${replace(var.prefix, "-", "_")}_db"
   subnet_ids = var.db_subnet_ids
+
+  tags = var.resource_tags
 }
 
 resource "aws_db_instance" "svc_db" {
@@ -59,20 +59,20 @@ resource "aws_db_instance" "svc_db" {
   engine         = "mysql"
   engine_version = "8.0"
 
-  instance_class      = var.db_instance_class
-  allocated_storage   = var.db_allocated_gb
-  storage_type        = "gp3"
-  publicly_accessible = false
-  skip_final_snapshot = true
-  username            = "dcnadmin"
-  password            = var.db_master_password
+  instance_class          = var.db_instance_class
+  allocated_storage       = var.db_allocated_gb
+  storage_type            = "gp3"
+  storage_encrypted       = true
+  backup_retention_period = var.db_backup_retention_days
+  publicly_accessible     = false
+  skip_final_snapshot     = true
+  username                = "dcnadmin"
+  password                = var.db_master_password
 
   db_subnet_group_name   = aws_db_subnet_group.svc.name
   vpc_security_group_ids = [var.sg_core_id]
 
-  tags = {
-    Name = "${var.prefix}-${each.key}-db"
-  }
+  tags = merge(var.resource_tags, { Name = "${var.prefix}-${each.key}-db" })
 }
 
 # ============ MGMT ============
@@ -88,11 +88,10 @@ resource "aws_instance" "mgmt" {
   root_block_device {
     volume_type = "gp3"
     volume_size = 8
+    encrypted   = true
   }
 
-  tags = {
-    Name = "${var.prefix}-mgmt-${count.index + 1}"
-  }
+  tags = merge(var.resource_tags, { Name = "${var.prefix}-mgmt-${count.index + 1}" })
 }
 
 # ============ DMZ ============

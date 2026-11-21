@@ -40,9 +40,7 @@ locals {
 resource "aws_vpc" "main" {
   cidr_block = var.vpc_cidr
 
-  tags = {
-    Name = "${var.prefix}-vpc"
-  }
+  tags = merge(var.resource_tags, { Name = "${var.prefix}-vpc" })
 }
 
 resource "aws_subnet" "main" {
@@ -52,9 +50,7 @@ resource "aws_subnet" "main" {
   availability_zone = each.value.zone
   cidr_block        = each.value.cidr
 
-  tags = {
-    Name = "${var.prefix}-${each.key}"
-  }
+  tags = merge(var.resource_tags, { Name = "${var.prefix}-${each.key}" })
 }
 
 # ============ Security groups per zone ============

@@ -43,6 +43,17 @@ variable "image_id" {
   type        = string
 }
 
+variable "db_backup_retention_days" {
+  description = "Automated backup retention in days (0 disables; set 7+ for production)."
+  type        = number
+}
+
+variable "resource_tags" {
+  description = "Extra tags applied to all global-zone resources."
+  type        = map(string)
+  default     = {}
+}
+
 variable "db_master_password" {
   description = "RDS master password."
   type        = string

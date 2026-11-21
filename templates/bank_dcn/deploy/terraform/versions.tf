@@ -26,3 +26,24 @@ provider "aws" {
   skip_requesting_account_id  = true
   skip_metadata_api_check     = true
 }
+
+# Second-city provider for the DR read replicas (modules/dr-replica).
+provider "aws" {
+  alias  = "dr"
+  region = var.resource_plan.dr.region
+
+  skip_credentials_validation = true
+  skip_requesting_account_id  = true
+  skip_metadata_api_check     = true
+}
+
+# Remote state: local by default for the simulation. For production use an
+# S3 backend with locking (create the bucket and DynamoDB table first):
+#
+# backend "s3" {
+#   bucket       = "bank-dcn-tfstate"
+#   key          = "dcn/terraform.tfstate"
+#   region       = "ap-southeast-2"
+#   dynamodb_table = "bank-dcn-tflock"
+#   encrypt      = true
+# }

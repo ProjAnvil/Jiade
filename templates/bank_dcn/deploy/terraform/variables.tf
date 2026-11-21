@@ -27,6 +27,16 @@ variable "resource_plan" {
       service_nodes = number # SF VMs (gns/rmb/adm/batch/console)
       mgmt_nodes    = number # MGMT VMs (observability/ops); 0 = subnet only
     })
+
+    # Remote disaster recovery: cross-region async read replicas of the unit
+    # DBs in a second region (the "two cities" leg of two-city multi-DC).
+    dr = optional(object({
+      enabled = bool
+      region  = string
+      }), {
+      enabled = false
+      region  = "ap-southeast-1"
+    })
   })
 
   validation {
@@ -76,6 +86,24 @@ variable "db_multi_az" {
   description = "Run unit DBs Multi-AZ (primary + standby). AWS chooses the standby AZ itself."
   type        = bool
   default     = true
+}
+
+variable "db_read_replica" {
+  description = "Add one in-region read replica per unit DB (one primary, one standby, one replica)."
+  type        = bool
+  default     = false
+}
+
+variable "db_backup_retention_days" {
+  description = "Automated backup retention in days (0 disables; set 7+ for production)."
+  type        = number
+  default     = 0
+}
+
+variable "resource_tags" {
+  description = "Extra tags applied to all resources (cost allocation, env)."
+  type        = map(string)
+  default     = {}
 }
 
 variable "db_master_password" {

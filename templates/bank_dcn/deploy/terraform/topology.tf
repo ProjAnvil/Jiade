@@ -12,6 +12,7 @@ resource "local_file" "dcn_topology" {
   # matches the current state.
   content = jsonencode({
     generated_at = timestamp()
+    region       = var.resource_plan.region
     zones        = local.idc_zones
     units = {
       for name, u in merge(local.base_units, local.expansion_units) : name => {

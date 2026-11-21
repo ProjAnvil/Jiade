@@ -67,6 +67,35 @@ It covers the cloud counterpart of compose verify gates 1/2/7: route table,
 gateway healthz, intra/cross-DCN transfers (auto-skipped on rerun), ADM
 reconciliation, and Prometheus target health.
 
+## Deployment stage
+
+`scripts/deploy-aws.sh` is the full third stage — image build/push (ECR),
+SSM role + instance profiles, internet egress (IGW/EIP), node bootstrap
+over SSM, SQL init with GNS routes derived from the live topology, the
+traefik gateway, per-unit app containers, the MGMT observability stack, and
+the ALB listener. Everything is rendered from `generated/dcn-topology.json`
+(no hardcoded IPs); rerun it after adding a unit to refresh routes, gateway
+targets, and scrape configs:
+
+```bash
+scripts/deploy-aws.sh --push-images --verify
+```
+
+## Production hardening knobs
+
+- `db_backup_retention_days` (default 0 for the simulation; set 7+ for real
+  use). Automated backups are required for the DR replicas below.
+- `db_read_replica` (default false): one in-region read replica per unit DB,
+  giving the one-primary-one-standby-one-replica topology WeBank documents.
+- `resource_plan.dr = { enabled, region }`: second-city disaster recovery —
+  a small VPC in the DR region with one asynchronous cross-region read
+  replica per unit DB (RPO > 0; promotion/failover is a deployment-stage
+  concern). Enabling it auto-raises unit backup retention to >= 1 day.
+- `resource_tags`: cost-allocation / environment tags on every resource.
+- Storage is encrypted at rest (RDS + EBS root volumes) via AWS-managed keys.
+- State: local by default; see the commented S3 backend block in
+  `versions.tf` for production setup with locking.
+
 Adding a unit = appending one entry to `resource_plan.dcns` (or flipping
 `expansion.enabled`) and applying again — the same online-expansion story as
 the compose `expansion` profile, at the infrastructure layer. A one-unit base

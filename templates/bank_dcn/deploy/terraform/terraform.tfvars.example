@@ -25,6 +25,13 @@ resource_plan = {
     service_nodes = 1
     mgmt_nodes    = 0
   }
+
+  # Second city: cross-region async replicas of the unit DBs.
+  # Requires backup_retention (auto-raised to >=1 day on unit DBs when on).
+  dr = {
+    enabled = false
+    region  = "ap-southeast-1"
+  }
 }
 
 # Replace with an AL2023 / Ubuntu x86_64 AMI id for the chosen region.

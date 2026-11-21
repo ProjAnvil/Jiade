@@ -27,3 +27,8 @@ output "topology_file" {
   description = "Absolute path of the rendered topology artifact (see topology.tf)."
   value       = abspath(local_file.dcn_topology.filename)
 }
+
+output "dr_replicas" {
+  description = "Cross-region DR replica endpoints per unit (empty when DR disabled)."
+  value       = var.resource_plan.dr.enabled ? module.dr_replica[0].replica_endpoints : {}
+}

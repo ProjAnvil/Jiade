@@ -17,3 +17,9 @@ variable "admin_cidr" {
   description = "CIDR allowed for SSH and management console ingress."
   type        = string
 }
+
+variable "resource_tags" {
+  description = "Extra tags applied to all network resources."
+  type        = map(string)
+  default     = {}
+}

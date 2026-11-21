@@ -38,10 +38,26 @@ variable "db_multi_az" {
   type        = bool
 }
 
+variable "db_read_replica" {
+  description = "Add one in-region read replica (one primary, one standby, one read replica)."
+  type        = bool
+}
+
+variable "db_backup_retention_days" {
+  description = "Automated backup retention in days (0 disables; set 7+ for production)."
+  type        = number
+}
+
 variable "db_master_password" {
   description = "RDS master password."
   type        = string
   sensitive   = true
+}
+
+variable "resource_tags" {
+  description = "Extra tags applied to all unit resources."
+  type        = map(string)
+  default     = {}
 }
 
 variable "vpc_id" {
@@ -59,11 +75,16 @@ variable "db_subnet_ids" {
 }
 
 variable "sg_sf_id" {
-  description = "ServerFarm security group id for app nodes."
+  description = "Shared-zone (ServerFarm) security group id; allowed to reach this unit."
   type        = string
 }
 
 variable "sg_core_id" {
   description = "Core security group id for the unit DB."
+  type        = string
+}
+
+variable "sg_mgmt_id" {
+  description = "MGMT security group id; allowed to scrape this unit."
   type        = string
 }
