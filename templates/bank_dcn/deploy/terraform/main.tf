@@ -64,6 +64,7 @@ module "dcn_unit" {
   sg_sf_id      = module.network.security_group_ids["sf"]
   sg_core_id    = module.network.security_group_ids["core"]
   sg_mgmt_id    = module.network.security_group_ids["mgmt"]
+  sg_dbproxy_id = module.network.security_group_ids["dbproxy"]
 }
 
 module "global_zone" {
@@ -112,4 +113,23 @@ module "dr_replica" {
     { for name, arn in module.global_zone.db_arns : "global-${name}" => arn },
   )
   resource_tags = var.resource_tags
+}
+
+# DB middleware layer: keeper quorum (MGMT) + connection proxies (SF).
+# Applications reach MySQL only through the proxies; keepers are the only
+# other principals allowed to touch port 3306 (see the network SG chain).
+module "db_layer" {
+  source = "./modules/db-layer"
+
+  prefix            = "${var.prefix}-db"
+  keeper_nodes      = var.resource_plan.global_zone.keeper_nodes
+  proxy_nodes       = var.resource_plan.global_zone.proxy_nodes
+  app_instance_type = var.app_instance_type
+  image_id          = var.image_id
+  resource_tags     = var.resource_tags
+
+  mgmt_subnet_id = module.network.subnet_ids["mgmt"]
+  sf_subnet_id   = module.network.subnet_ids["sf"]
+  sg_dbkeeper_id = module.network.security_group_ids["dbkeeper"]
+  sg_dbproxy_id  = module.network.security_group_ids["dbproxy"]
 }

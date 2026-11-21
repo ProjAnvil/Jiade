@@ -8,7 +8,7 @@
 
 ## 拓扑
 
-六个 docker network 建模两个正交维度：安全分区（`dmz` / `sf` / `core` / `mgmt`，微众式）与 IDC 故障域（`idc1` / `idc2`）。traefik 是纯 DMZ 代理（双挂 `dmz`+`sf`）；公共服务跑在 SF、经 `sf`+`core` 触达 CORE 区数据库；DCN 应用为双网卡（本 IDC 网络 + `sf`），DCN 数据库只接入所属 IDC 网络；观测栈位于 MGMT。**DCN 之间没有直连边**——跨单元流量一律经过 RMB。
+八个 docker network 建模两个正交维度：安全分区（`dmz` / `sf` / `core` / `mgmt`，微众式）与 IDC 故障域（应用层 `idc1` / `idc2`，数据库层 `idc1-db` / `idc2-db`）。traefik 是纯 DMZ 代理；公共服务与 DCN 应用位于 `sf`（+各自 IDC 应用网），**绝不加入任何数据库网络**——所有 MySQL 连接一律经 db-proxy 连接层（port-per-set：单元 23301-23304、全局 23310-23313），db-keeper（raft 三节点）仲裁主备切换；观测栈位于 MGMT。**DCN 之间没有直连边**——跨单元流量一律经过 RMB。
 
 ```mermaid
 flowchart TB

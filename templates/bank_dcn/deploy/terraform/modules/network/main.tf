@@ -79,6 +79,18 @@ resource "aws_security_group" "mgmt" {
   vpc_id      = aws_vpc.main.id
 }
 
+resource "aws_security_group" "dbproxy" {
+  name        = "${var.prefix}-sg-dbproxy"
+  description = "DB connection layer (port-per-set 23300-23399); the only app-reachable path to MySQL"
+  vpc_id      = aws_vpc.main.id
+}
+
+resource "aws_security_group" "dbkeeper" {
+  name        = "${var.prefix}-sg-dbkeeper"
+  description = "DB arbitration service (raft + probes + switch execution)"
+  vpc_id      = aws_vpc.main.id
+}
+
 # DMZ: internal ALB accepts traffic from inside the VPC only (make it
 # internet-facing plus IGW when actually exposing traffic).
 resource "aws_vpc_security_group_ingress_rule" "dmz_vpc" {
@@ -124,10 +136,20 @@ resource "aws_vpc_security_group_ingress_rule" "sf_admin" {
   to_port           = each.value
 }
 
-# CORE: MySQL only from SF services and from MGMT exporters.
-resource "aws_vpc_security_group_ingress_rule" "core_from_sf" {
+# CORE: MySQL only from the DB connection layer, the arbitration service,
+# and MGMT exporters. Applications have no path to 3306 — they must go
+# through db-proxy, mirroring the compose network isolation.
+resource "aws_vpc_security_group_ingress_rule" "core_from_dbproxy" {
   security_group_id            = aws_security_group.core.id
-  referenced_security_group_id = aws_security_group.sf.id
+  referenced_security_group_id = aws_security_group.dbproxy.id
+  ip_protocol                  = "tcp"
+  from_port                    = 3306
+  to_port                      = 3306
+}
+
+resource "aws_vpc_security_group_ingress_rule" "core_from_dbkeeper" {
+  security_group_id            = aws_security_group.core.id
+  referenced_security_group_id = aws_security_group.dbkeeper.id
   ip_protocol                  = "tcp"
   from_port                    = 3306
   to_port                      = 3306
@@ -150,6 +172,25 @@ resource "aws_vpc_security_group_ingress_rule" "mgmt_admin" {
   ip_protocol       = "tcp"
   from_port         = each.value
   to_port           = each.value
+}
+
+# DB connection layer: applications reach the proxy port range from inside
+# the VPC; per-unit rules are added by the dcn-unit module.
+resource "aws_vpc_security_group_ingress_rule" "dbproxy_vpc" {
+  security_group_id = aws_security_group.dbproxy.id
+  cidr_ipv4         = var.vpc_cidr
+  ip_protocol       = "tcp"
+  from_port         = 23300
+  to_port           = 23399
+}
+
+# Keeper APIs (HTTP 18110, raft 18111) from inside the VPC.
+resource "aws_vpc_security_group_ingress_rule" "dbkeeper_vpc" {
+  security_group_id = aws_security_group.dbkeeper.id
+  cidr_ipv4         = var.vpc_cidr
+  ip_protocol       = "tcp"
+  from_port         = 18110
+  to_port           = 18111
 }
 
 resource "aws_vpc_security_group_egress_rule" "all" {

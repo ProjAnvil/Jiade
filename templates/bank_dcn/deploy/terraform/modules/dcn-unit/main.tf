@@ -33,6 +33,16 @@ resource "aws_vpc_security_group_ingress_rule" "unit_from_mgmt" {
   to_port                      = 8080
 }
 
+# Grant this unit's app security group access to the DB connection layer
+# (port-per-set range). Units reach MySQL ONLY through this path.
+resource "aws_vpc_security_group_ingress_rule" "dbproxy_from_unit" {
+  security_group_id            = var.sg_dbproxy_id
+  referenced_security_group_id = aws_security_group.unit.id
+  ip_protocol                  = "tcp"
+  from_port                    = 23300
+  to_port                      = 23399
+}
+
 resource "aws_vpc_security_group_egress_rule" "unit_all" {
   security_group_id = aws_security_group.unit.id
   cidr_ipv4         = "0.0.0.0/0"

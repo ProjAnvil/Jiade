@@ -36,6 +36,7 @@ terraform/
 | `dcnXX-app` | `aws_instance` x `app_nodes` |
 | `gns` / `rmb-coordinator` / `adm` / `batch-scheduler` / `console` / monitoring | `global-zone` service EC2s |
 | `gns-redis` + `dcn-rabbitmq` | self-hosted on the `mq` EC2 (ElastiCache / Amazon MQ are drop-ins) |
+| db-keeper x3 / db-proxy x2 / db-admin | `db-layer` module: keeper quorum on MGMT, proxies on SF, ports 23300+ |
 | `gns-db` / `rmb-db` / `adm-db` / `batch-db` | one single-AZ `aws_db_instance` each |
 | `traefik :18070` | internal `aws_lb` (listener wiring = deployment stage) |
 | `--profile expansion` (dcn04) | `resource_plan.expansion.enabled` flag |
@@ -108,6 +109,10 @@ scripts/deploy-aws.sh --push-images --verify
   replica per unit DB (RPO > 0; promotion/failover is a deployment-stage
   concern). Enabling it auto-raises unit backup retention to >= 1 day.
 - `resource_tags`: cost-allocation / environment tags on every resource.
+- **DB network isolation**: applications have NO route to port 3306 — the
+  core SG accepts MySQL only from the dbproxy/dbkeeper/mgmt SGs, and unit
+  app SGs are granted only the proxy port range 23300-23399. This mirrors
+  the compose model where no application joins a DB network.
 - Storage is encrypted at rest (RDS + EBS root volumes) via AWS-managed keys.
 - State: local by default; see the commented S3 backend block in
   `versions.tf` for production setup with locking.

@@ -84,6 +84,11 @@ variable "sg_core_id" {
   type        = string
 }
 
+variable "sg_dbproxy_id" {
+  description = "DB connection-layer security group id; this unit's apps route MySQL through it."
+  type        = string
+}
+
 variable "sg_mgmt_id" {
   description = "MGMT security group id; allowed to scrape this unit."
   type        = string

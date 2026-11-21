@@ -85,10 +85,10 @@ services:
       context: .
       dockerfile: gns/Dockerfile
     environment:
-      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(gns-db:3306)/gns_db?parseTime=true
+      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(db-proxy:23310)/gns_db?parseTime=true
       REDIS_ADDR: gns-redis:6379
     ports: ["18080:8080"]
-    networks: [sf, core]
+    networks: [sf]
     labels:
       traefik.enable: "true"
       traefik.http.routers.gns.rule: PathPrefix(`/gns`)
@@ -111,11 +111,11 @@ services:
       context: .
       dockerfile: rmb/Dockerfile
     environment:
-      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(rmb-db:3306)/rmb_db?parseTime=true
+      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(db-proxy:23311)/rmb_db?parseTime=true
       AMQP_URL: amqp://dcn:dcn123@dcn-rabbitmq:5672/
       TX_TIMEOUT_SECONDS: "5"
     ports: ["18090:8080"]
-    networks: [sf, core]
+    networks: [sf]
     labels:
       traefik.enable: "true"
       traefik.http.routers.rmb.rule: PathPrefix(`/rmb`)
@@ -126,7 +126,7 @@ services:
       prometheus.scrape: "true"
       prometheus.port: "8080"
     depends_on:
-      rmb-db:
+      db-proxy:
         condition: service_healthy
       dcn-rabbitmq:
         condition: service_healthy
@@ -138,11 +138,11 @@ services:
       context: .
       dockerfile: adm/Dockerfile
     environment:
-      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(adm-db:3306)/adm_db?parseTime=true
+      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(db-proxy:23312)/adm_db?parseTime=true
       AMQP_URL: amqp://dcn:dcn123@dcn-rabbitmq:5672/
       GNS_ENDPOINT: http://gns:8080
     ports: ["18091:8080"]
-    networks: [sf, core]
+    networks: [sf]
     labels:
       traefik.enable: "true"
       traefik.http.routers.adm.rule: PathPrefix(`/adm`)
@@ -153,7 +153,7 @@ services:
       prometheus.scrape: "true"
       prometheus.port: "8080"
     depends_on:
-      adm-db:
+      db-proxy:
         condition: service_healthy
       dcn-rabbitmq:
         condition: service_healthy
@@ -167,10 +167,10 @@ services:
       context: .
       dockerfile: batch-scheduler/Dockerfile
     environment:
-      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(batch-db:3306)/batch_db?parseTime=true
+      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(db-proxy:23313)/batch_db?parseTime=true
       GNS_ENDPOINT: http://gns:8080
     ports: ["18092:8080"]
-    networks: [sf, core]
+    networks: [sf]
     labels:
       traefik.enable: "true"
       traefik.http.routers.batch.rule: PathPrefix(`/batch`)
@@ -259,7 +259,7 @@ services:
       - ./dcn-app/db/init:/docker-entrypoint-initdb.d:ro
       - dcn01-db-data:/var/lib/mysql
     ports: ["13306:3306"]
-    networks: [idc1]
+    networks: [idc1-db]
 
   dcn03-db:
     <<: *mysql-common
@@ -272,7 +272,7 @@ services:
       - ./dcn-app/db/init:/docker-entrypoint-initdb.d:ro
       - dcn03-db-data:/var/lib/mysql
     ports: ["13308:3306"]
-    networks: [idc1]
+    networks: [idc1-db]
 
   dcn01-app:
     <<: *app-health
@@ -319,7 +319,7 @@ services:
       dockerfile: dcn-app/Dockerfile
     environment:
       DCN_ID: dcn03
-      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(dcn03-db:3306)/dcn03_db?parseTime=true
+      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(db-proxy:23303)/dcn03_db?parseTime=true
       GNS_ENDPOINT: http://gns:8080
       RMB_ENDPOINT: http://rmb-coordinator:8080
       AMQP_URL: amqp://dcn:dcn123@dcn-rabbitmq:5672/
@@ -337,7 +337,7 @@ services:
       prometheus.scrape: "true"
       prometheus.port: "8080"
     depends_on:
-      dcn03-db:
+      db-proxy:
         condition: service_healthy
       dcn-rabbitmq:
         condition: service_healthy
@@ -358,7 +358,7 @@ services:
       - ./dcn-app/db/init:/docker-entrypoint-initdb.d:ro
       - dcn02-db-data:/var/lib/mysql
     ports: ["13307:3306"]
-    networks: [idc2]
+    networks: [idc2-db]
 
   dcn02-app:
     <<: *app-health
@@ -368,7 +368,7 @@ services:
       dockerfile: dcn-app/Dockerfile
     environment:
       DCN_ID: dcn02
-      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(dcn02-db:3306)/dcn02_db?parseTime=true
+      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(db-proxy:23302)/dcn02_db?parseTime=true
       GNS_ENDPOINT: http://gns:8080
       RMB_ENDPOINT: http://rmb-coordinator:8080
       AMQP_URL: amqp://dcn:dcn123@dcn-rabbitmq:5672/
@@ -386,7 +386,7 @@ services:
       prometheus.scrape: "true"
       prometheus.port: "8080"
     depends_on:
-      dcn02-db:
+      db-proxy:
         condition: service_healthy
       dcn-rabbitmq:
         condition: service_healthy
@@ -412,7 +412,7 @@ services:
       MYSQL_ROOT_HOST: "%"
     volumes:
       - dcn01-db-replica-data:/var/lib/mysql
-    networks: [idc1]
+    networks: [idc1-db]
 
   db-keeper-1:
     restart: unless-stopped
@@ -429,11 +429,11 @@ services:
       NODE_ID: db-keeper-1
       RAFT_ADDR: db-keeper-1:18111
       PEERS: db-keeper-1:18111,db-keeper-2:18111,db-keeper-3:18111
-      SETS: "dcn01:23301:dcn01-db:3306,dcn01-db-replica:3306"
+      SETS: "dcn01:23301:dcn01-db:3306,dcn01-db-replica:3306;dcn02:23302:dcn02-db:3306;dcn03:23303:dcn03-db:3306;dcn04:23304:dcn04-db:3306;gns:23310:gns-db:3306;rmb:23311:rmb-db:3306;adm:23312:adm-db:3306;batch:23313:batch-db:3306"
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dcn123}
       PROXIES: http://db-proxy:18120,http://db-proxy-2:18122
     ports: ["18110:18110"]
-    networks: [mgmt, idc1]
+    networks: [mgmt, idc1-db, idc2-db, core]
     labels:
       prometheus.scrape: "true"
       prometheus.port: "18110"
@@ -453,7 +453,7 @@ services:
       <<: *keeper-env
       NODE_ID: db-keeper-2
       RAFT_ADDR: db-keeper-2:18111
-    networks: [mgmt, idc1]
+    networks: [mgmt, idc1-db, idc2-db, core]
     labels:
       prometheus.scrape: "true"
       prometheus.port: "18110"
@@ -473,7 +473,7 @@ services:
       <<: *keeper-env
       NODE_ID: db-keeper-3
       RAFT_ADDR: db-keeper-3:18111
-    networks: [mgmt, idc1]
+    networks: [mgmt, idc1-db, idc2-db, core]
     labels:
       prometheus.scrape: "true"
       prometheus.port: "18110"
@@ -492,7 +492,7 @@ services:
     environment:
       PROXY_ADMIN_ADDR: ":18120"
     ports: ["18120:18120"]
-    networks: [sf, idc1, mgmt]
+    networks: [sf, idc1-db, idc2-db, core, mgmt]
     labels:
       prometheus.scrape: "true"
       prometheus.port: "18120"
@@ -513,7 +513,7 @@ services:
     environment:
       PROXY_ADMIN_ADDR: ":18122"
     ports: ["18122:18122"]
-    networks: [sf, idc1, mgmt]
+    networks: [sf, idc1-db, idc2-db, core, mgmt]
 
   db-admin:
     container_name: db-admin
@@ -540,7 +540,7 @@ services:
       - ./dcn-app/db/init:/docker-entrypoint-initdb.d:ro
       - dcn04-db-data:/var/lib/mysql
     ports: ["13312:3306"]
-    networks: [idc2]
+    networks: [idc2-db]
 
   dcn04-app:
     <<: *app-health
@@ -551,7 +551,7 @@ services:
       dockerfile: dcn-app/Dockerfile
     environment:
       DCN_ID: dcn04
-      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(dcn04-db:3306)/dcn04_db?parseTime=true
+      DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(db-proxy:23304)/dcn04_db?parseTime=true
       GNS_ENDPOINT: http://gns:8080
       RMB_ENDPOINT: http://rmb-coordinator:8080
       AMQP_URL: amqp://dcn:dcn123@dcn-rabbitmq:5672/
@@ -569,7 +569,7 @@ services:
       prometheus.scrape: "true"
       prometheus.port: "8080"
     depends_on:
-      dcn04-db:
+      db-proxy:
         condition: service_healthy
       dcn-rabbitmq:
         condition: service_healthy
@@ -602,7 +602,7 @@ services:
       - ./deploy/mysql-exporter/my.cnf:/cfg/my.cnf:ro
     # Probes span every database location: dcn01/03-db on idc1, dcn02/04-db on
     # idc2, gns/rmb/adm/batch-db on core.
-    networks: [mgmt, idc1, idc2, core]
+    networks: [mgmt, idc1-db, idc2-db, core]
 
   redis-exporter:
     image: oliver006/redis_exporter:v1.63.0
@@ -653,7 +653,9 @@ services:
       prometheus.port: "8080"
 
 # Physical security zones (dmz/sf/core/mgmt, WeBank-style) x IDC fault
-# domains (idc1/idc2): zones govern security, IDCs govern blast radius.
+# domains (idc1/idc2 for the app tier, idc1-db/idc2-db for DB placement).
+# Zones govern security, IDCs govern blast radius. Applications NEVER join
+# a DB network: they reach MySQL only through db-proxy (port-per-set).
 networks:
   dmz:
     name: dcn-dmz
@@ -667,6 +669,10 @@ networks:
     name: dcn-idc1
   idc2:
     name: dcn-idc2
+  idc1-db:
+    name: dcn-idc1-db
+  idc2-db:
+    name: dcn-idc2-db
 
 volumes:
   gns-db-data:

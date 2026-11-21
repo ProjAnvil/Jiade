@@ -24,8 +24,10 @@ variable "resource_plan" {
     })
 
     global_zone = object({
-      service_nodes = number # SF VMs (gns/rmb/adm/batch/console)
-      mgmt_nodes    = number # MGMT VMs (observability/ops); 0 = subnet only
+      service_nodes = number              # SF VMs (gns/rmb/adm/batch/console)
+      mgmt_nodes    = optional(number, 0) # MGMT VMs (observability/ops)
+      keeper_nodes  = optional(number, 3) # DBKeeper raft quorum (odd)
+      proxy_nodes   = optional(number, 2) # DBProxy connection layer
     })
 
     # Remote disaster recovery: cross-region async read replicas of the unit

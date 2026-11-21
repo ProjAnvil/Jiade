@@ -86,7 +86,11 @@ func (k *Keeper) autoFailover() {
 		if k.failCnt[name] < 3 {
 			continue
 		}
-		log.Printf("primary %s of set %s unreachable (%d probes); failover window open", s.Primary, name, k.failCnt[name])
+		// log on entering the window and then sparsely (offline sets, e.g.
+		// compose expansion units not yet started, would otherwise spam)
+		if k.failCnt[name] == 3 || k.failCnt[name]%15 == 0 {
+			log.Printf("primary %s of set %s unreachable (%d probes); failover window open", s.Primary, name, k.failCnt[name])
+		}
 		// candidate: healthy replica with lag == 0
 		for _, addr := range s.Nodes {
 			if addr == s.Primary {
@@ -111,17 +115,21 @@ func (k *Keeper) autoFailover() {
 func (k *Keeper) reconcile() {
 	st := k.fsm.get()
 	for name, s := range st.Sets {
-		// bootstrap replication on any node that is not the desired primary
-		for _, addr := range s.Nodes {
-			if addr == s.Primary {
-				if err := k.dbs.ensureReplicationUser(addr); err != nil {
-					log.Printf("ensure repl user on %s: %v", addr, err)
+		// Managed single-node sets (e.g. RDS Multi-AZ backends): no
+		// replication to bootstrap, no switch to execute — probe and route
+		// only; failover belongs to the managed service.
+		if len(s.Nodes) > 1 {
+			for _, addr := range s.Nodes {
+				if addr == s.Primary {
+					if err := k.dbs.ensureReplicationUser(addr); err != nil {
+						log.Printf("ensure repl user on %s: %v", addr, err)
+					}
+					continue
 				}
-				continue
-			}
-			if _, running := k.dbs.replicaStatus(addr); !running {
-				if err := k.dbs.startReplica(addr, s.Primary); err != nil {
-					log.Printf("start replica %s -> %s: %v", addr, s.Primary, err)
+				if _, running := k.dbs.replicaStatus(addr); !running {
+					if err := k.dbs.startReplica(addr, s.Primary); err != nil {
+						log.Printf("start replica %s -> %s: %v", addr, s.Primary, err)
+					}
 				}
 			}
 		}

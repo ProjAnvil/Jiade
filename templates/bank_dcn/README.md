@@ -8,7 +8,7 @@ This template is part of the [jiade](../../README.md) project. For deep design d
 
 ## Topology
 
-Six docker networks model two orthogonal dimensions: security zones (`dmz` / `sf` / `core` / `mgmt`, WeBank-style) and IDC fault domains (`idc1` / `idc2`). traefik is the DMZ-only proxy (dual-homed `dmz`+`sf`); shared services run in SF and reach their CORE databases via `sf`+`core`; DCN applications are dual-homed (their own IDC network + `sf`); DCN databases live only in their IDC network; observability lives in MGMT. **There is no direct DCN-to-DCN edge** — cross-unit traffic always goes through RMB.
+Eight docker networks model two orthogonal dimensions: security zones (`dmz` / `sf` / `core` / `mgmt`, WeBank-style) and IDC fault domains (`idc1` / `idc2` for the app tier, `idc1-db` / `idc2-db` for DB placement). traefik is the DMZ-only proxy; shared services and DCN applications live on `sf` (+ their IDC app network) and **never join a DB network** — every MySQL connection goes through the db-proxy connection layer (port-per-set: units 23301-23304, globals 23310-23313), with db-keeper (raft x3) arbitrating primary switches. Observability lives in MGMT. **There is no direct DCN-to-DCN edge** — cross-unit traffic always goes through RMB.
 
 ```mermaid
 flowchart TB

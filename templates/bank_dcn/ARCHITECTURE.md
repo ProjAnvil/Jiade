@@ -187,7 +187,7 @@ RMB 子事务消息全链路 at-least-once，幂等由各端唯一键兜底；AD
 | 组件 | 角色 | 实现要点 |
 |---|---|---|
 | db-keeper ×3 | 仲裁 + 切换编排 + 探测 | hashicorp/raft 多数派选主；leader 运行调和循环：注册 SETS → 建复制（GTID，repl 账号）→ 探测（SELECT 1 / SHOW REPLICA STATUS）→ 连续 3 次主库失联且从库 lag=0 时自动切换 |
-| db-proxy ×2 | L4 连接层（port-per-set） | 纯 TCP 转发不解析 MySQL 协议；路由表由 keeper 经 admin API 下发；连接快照后端（改路由只影响新连接，模拟托管端点行为）；`/admin/drain` 作网络侧围栏 |
+| db-proxy ×2 | L4 连接层（port-per-set，全栈唯一 DB 入口） | 纯 TCP 转发不解析 MySQL 协议；单元集 23301-23304、全局集 23310-23313；路由表由 keeper 经 admin API 下发；连接快照后端（改路由只影响新连接，模拟托管端点行为）；`/admin/drain` 作网络侧围栏。**应用不加入任何数据库网络，3306 只有 proxy/keeper/exporter 可达** |
 | db-admin | 管理台（Vue3 + DaisyUI） | 拓扑/健康/延迟面板 + 手动切换（经 raft 提交）；nginx 反代 `/api/` 到 keeper，follower 307 重定向到 leader |
 
 切换时序（keeper 执行，顺序即安全性）：**等从库追平（lag=0）→ 围栏旧主（`SET GLOBAL super_read_only=ON`）→ 提升新主（`STOP REPLICA; RESET REPLICA ALL; read_only=OFF`）→ 旧主降级为新主的从库 → 重推 proxy 路由 → drain 旧连接**。应用侧无感：dcn01-app 的 DSN 恒为 `db-proxy:23301`。verify gate 9 断言完整往返（切到副本 → 经 proxy 转账精确对账 → 切回 → 再转账）。

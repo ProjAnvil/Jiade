@@ -32,3 +32,11 @@ output "dr_replicas" {
   description = "Cross-region DR replica endpoints per unit (empty when DR disabled)."
   value       = var.resource_plan.dr.enabled ? module.dr_replica[0].replica_endpoints : {}
 }
+
+output "db_layer" {
+  description = "DB middleware layer node inventory (keeper quorum + proxies)."
+  value = {
+    keeper_private_ips = module.db_layer.keeper_private_ips
+    proxy_private_ips  = module.db_layer.proxy_private_ips
+  }
+}

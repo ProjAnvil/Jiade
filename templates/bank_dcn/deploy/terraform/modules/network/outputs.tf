@@ -9,11 +9,13 @@ output "subnet_ids" {
 }
 
 output "security_group_ids" {
-  description = "Security group ids keyed by dmz / sf / core / mgmt."
+  description = "Security group ids keyed by dmz / sf / core / mgmt / dbproxy / dbkeeper."
   value = {
-    dmz  = aws_security_group.dmz.id
-    sf   = aws_security_group.sf.id
-    core = aws_security_group.core.id
-    mgmt = aws_security_group.mgmt.id
+    dmz      = aws_security_group.dmz.id
+    sf       = aws_security_group.sf.id
+    core     = aws_security_group.core.id
+    mgmt     = aws_security_group.mgmt.id
+    dbproxy  = aws_security_group.dbproxy.id
+    dbkeeper = aws_security_group.dbkeeper.id
   }
 }
