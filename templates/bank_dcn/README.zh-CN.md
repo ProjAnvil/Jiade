@@ -4,11 +4,11 @@
 
 这是 **DCN（Data Center Node）单元化架构**的仿真版：按客户号段把系统切成若干自包含单元，GNS 负责全局路由定位，RMB 是跨单元唯一合法通信通道并兼任分布式事务协调者，ADM 承接全局汇总报表。由 `jiade init --template bank_dcn` 生成，**自包含**：脱离 jiade 也能独立运行（仅需 Docker 与 Go）。
 
-本模板属于 [jiade](../../README.zh-CN.md) 项目。深度设计细节见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+本模板属于 [jiade](../../README.zh-CN.md) 项目。深度设计细节见 [ARCHITECTURE.md](ARCHITECTURE.md)。同一拓扑的 Terraform 云上交付层（AWS、同城双 AZ、仿真最小规格）见 [deploy/terraform](deploy/terraform)。
 
 ## 拓扑
 
-三个 docker network 仿真两个 IDC 与一个全局区。DCN 应用为双网卡（本 IDC 网络 + `global-net`），DCN 数据库只接入所属 IDC 网络。**DCN 之间没有直连边**——跨单元流量一律经过 RMB。
+六个 docker network 建模两个正交维度：安全分区（`dmz` / `sf` / `core` / `mgmt`，微众式）与 IDC 故障域（`idc1` / `idc2`）。traefik 是纯 DMZ 代理（双挂 `dmz`+`sf`）；公共服务跑在 SF、经 `sf`+`core` 触达 CORE 区数据库；DCN 应用为双网卡（本 IDC 网络 + `sf`），DCN 数据库只接入所属 IDC 网络；观测栈位于 MGMT。**DCN 之间没有直连边**——跨单元流量一律经过 RMB。
 
 ```mermaid
 flowchart TB
@@ -29,39 +29,43 @@ flowchart TB
         dcn02app --> dcn02db
         dcn04app --> dcn04db
     end
-    subgraph globalnet["global-net"]
+    subgraph dmz["dmz"]
         traefik["traefik（统一入口 :18070）"]
+    end
+    subgraph sf["sf（ServerFarm）"]
         gns["gns"]
-        gnsdb[("gns-db")]
         redis[("gns-redis")]
         mq["rabbitmq"]
         rmb["rmb-coordinator"]
-        rmbdb[("rmb-db")]
         adm["adm"]
-        admdb[("adm-db")]
         batch["batch-scheduler"]
-        batchdb[("batch-db")]
-        gns --> gnsdb
         gns --> redis
-        rmb --> rmbdb
         rmb <--> mq
-        adm --> admdb
         adm --> mq
-        batch --> batchdb
         batch --> gns
-        traefik -->|"/gns/*"| gns
-        traefik -->|"/rmb/*"| rmb
-        traefik -->|"/adm/*"| adm
-        traefik -->|"/batch/*"| batch
-        traefik -->|"/dcn/*"| dcn01app & dcn02app & dcn03app & dcn04app
     end
-    subgraph obs["观测栈"]
+    subgraph core["core"]
+        gnsdb[("gns-db")]
+        rmbdb[("rmb-db")]
+        admdb[("adm-db")]
+        batchdb[("batch-db")]
+    end
+    subgraph mgmt["mgmt"]
         prom["prometheus"]
         grafana["grafana（RED 仪表盘）"]
         console["console（观测台）"]
         prom --> grafana
         prom --> console
     end
+    gns --> gnsdb
+    rmb --> rmbdb
+    adm --> admdb
+    batch --> batchdb
+    traefik -->|"/gns/*"| gns
+    traefik -->|"/rmb/*"| rmb
+    traefik -->|"/adm/*"| adm
+    traefik -->|"/batch/*"| batch
+    traefik -->|"/dcn/*"| dcn01app & dcn02app & dcn03app & dcn04app
     client --> traefik
     client --> grafana
     client --> console
@@ -230,3 +234,7 @@ curl -sf -X POST localhost:18084/transfer \
 - **ADM 事件为 commit 后发布（at-most-once）。** 极端崩溃下（commit 与发布之间宕机）汇总可能与 DCN 短暂不一致，以 `/reconcile` 核对兜底。
 - **补偿重试有界。** 子事务补偿最多重试 3 次，之后总事务标记 `FAILED`，需人工介入。
 - **`seed --reset` 仅覆盖基础三单元拓扑。** 它清空 dcn01/02/03、GNS、RMB、ADM 各表及 GNS Redis 缓存；若已扩容 dcn04，重置前请自行拆除（`docker compose --profile expansion down`）。
+
+## 设计致谢
+
+DCN（Data Center Node）单元化架构——按号段切分自包含单元、以可靠消息通道作为跨单元唯一路径、主库跨 IDC 交叉部署、独立的全局汇总区——来自微众银行的公开工程实践（[腾讯云案例](https://www.tencentcloud.com/zh/customers/detail/2905)、[单元化架构解析](https://blog.csdn.net/shumeizwb/article/details/136980326)、[TiDB 案例](https://pingcap.com/case-cn/user-case-webank-2/)）。[deploy/terraform](deploy/terraform) 中「规划数据驱动」的 Terraform 分层（planning → provisioning → deployment）参考了 [WeBankPartners/delivery-by-terraform](https://github.com/WeBankPartners/delivery-by-terraform)（Apache-2.0）。本仓库全部代码为独立实现。

@@ -18,26 +18,39 @@ x-app-health: &app-health
     retries: 40
 
 services:
-  # ============ Global zone (global-net) ============
-  gns-db:
-    <<: *mysql-common
-    container_name: gns-db
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dcn123}
-      MYSQL_ROOT_HOST: "%"
-      MYSQL_DATABASE: gns_db
+  # ============ DMZ: internet-facing proxy only, no business logic ============
+  traefik:
+    # Since v3.6 the embedded Docker client supports API version auto-negotiation; v3.1 pins 1.24,
+    # which is rejected by Docker Engine >= 29 daemons (minimum API 1.40+).
+    image: traefik:v3.6
+    container_name: dcn-traefik
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=dcn-sf
+      - --entrypoints.web.address=:80
+      - --api.insecure=true
+      - --metrics.prometheus=true
+      - --entrypoints.metrics.address=:8082
+      - --metrics.prometheus.entrypoint=metrics
+    ports:
+      - "18070:80"    # unified entrypoint
+      - "18071:8080"  # dashboard
     volumes:
-      - ./gns/db/init:/docker-entrypoint-initdb.d:ro
-      - gns-db-data:/var/lib/mysql
-    ports: ["13309:3306"]
-    networks: [global-net]
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [dmz, sf]
+    labels:
+      prometheus.scrape: "true"
+      prometheus.port: "8082"
 
+  # ============ SF (ServerFarm): shared services + middleware ============
   gns-redis:
     image: redis:7-alpine
     container_name: gns-redis
     restart: unless-stopped
     ports: ["16379:6379"]
-    networks: [global-net]
+    networks: [sf]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -55,7 +68,7 @@ services:
       - rabbitmq-data:/var/lib/rabbitmq
       - ./deploy/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
     ports: ["15672:15672"]
-    networks: [global-net]
+    networks: [sf]
     labels:
       prometheus.scrape: "true"
       prometheus.port: "15692"
@@ -64,32 +77,6 @@ services:
       interval: 3s
       timeout: 5s
       retries: 30
-
-  rmb-db:
-    <<: *mysql-common
-    container_name: rmb-db
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dcn123}
-      MYSQL_ROOT_HOST: "%"
-      MYSQL_DATABASE: rmb_db
-    volumes:
-      - ./rmb/db/init:/docker-entrypoint-initdb.d:ro
-      - rmb-db-data:/var/lib/mysql
-    ports: ["13310:3306"]
-    networks: [global-net]
-
-  adm-db:
-    <<: *mysql-common
-    container_name: adm-db
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dcn123}
-      MYSQL_ROOT_HOST: "%"
-      MYSQL_DATABASE: adm_db
-    volumes:
-      - ./adm/db/init:/docker-entrypoint-initdb.d:ro
-      - adm-db-data:/var/lib/mysql
-    ports: ["13311:3306"]
-    networks: [global-net]
 
   gns:
     <<: *app-health
@@ -101,7 +88,7 @@ services:
       DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(gns-db:3306)/gns_db?parseTime=true
       REDIS_ADDR: gns-redis:6379
     ports: ["18080:8080"]
-    networks: [global-net]
+    networks: [sf, core]
     labels:
       traefik.enable: "true"
       traefik.http.routers.gns.rule: PathPrefix(`/gns`)
@@ -128,7 +115,7 @@ services:
       AMQP_URL: amqp://dcn:dcn123@dcn-rabbitmq:5672/
       TX_TIMEOUT_SECONDS: "5"
     ports: ["18090:8080"]
-    networks: [global-net]
+    networks: [sf, core]
     labels:
       traefik.enable: "true"
       traefik.http.routers.rmb.rule: PathPrefix(`/rmb`)
@@ -155,7 +142,7 @@ services:
       AMQP_URL: amqp://dcn:dcn123@dcn-rabbitmq:5672/
       GNS_ENDPOINT: http://gns:8080
     ports: ["18091:8080"]
-    networks: [global-net]
+    networks: [sf, core]
     labels:
       traefik.enable: "true"
       traefik.http.routers.adm.rule: PathPrefix(`/adm`)
@@ -173,19 +160,6 @@ services:
       gns:
         condition: service_started
 
-  batch-db:
-    <<: *mysql-common
-    container_name: batch-db
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dcn123}
-      MYSQL_ROOT_HOST: "%"
-      MYSQL_DATABASE: batch_db
-    volumes:
-      - ./batch-scheduler/db/init:/docker-entrypoint-initdb.d:ro
-      - batch-db-data:/var/lib/mysql
-    ports: ["13313:3306"]
-    networks: [global-net]
-
   batch-scheduler:
     <<: *app-health
     container_name: batch-scheduler
@@ -196,7 +170,7 @@ services:
       DB_DSN: root:${MYSQL_ROOT_PASSWORD:-dcn123}@tcp(batch-db:3306)/batch_db?parseTime=true
       GNS_ENDPOINT: http://gns:8080
     ports: ["18092:8080"]
-    networks: [global-net]
+    networks: [sf, core]
     labels:
       traefik.enable: "true"
       traefik.http.routers.batch.rule: PathPrefix(`/batch`)
@@ -212,30 +186,58 @@ services:
       gns:
         condition: service_started
 
-  traefik:
-    # Since v3.6 the embedded Docker client supports API version auto-negotiation; v3.1 pins 1.24,
-    # which is rejected by Docker Engine >= 29 daemons (minimum API 1.40+).
-    image: traefik:v3.6
-    container_name: dcn-traefik
-    restart: unless-stopped
-    command:
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --providers.docker.network=dcn-global
-      - --entrypoints.web.address=:80
-      - --api.insecure=true
-      - --metrics.prometheus=true
-      - --entrypoints.metrics.address=:8082
-      - --metrics.prometheus.entrypoint=metrics
-    ports:
-      - "18070:80"    # unified entrypoint
-      - "18071:8080"  # dashboard
+  # ============ CORE: databases only ============
+  gns-db:
+    <<: *mysql-common
+    container_name: gns-db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dcn123}
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: gns_db
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks: [global-net]
-    labels:
-      prometheus.scrape: "true"
-      prometheus.port: "8082"
+      - ./gns/db/init:/docker-entrypoint-initdb.d:ro
+      - gns-db-data:/var/lib/mysql
+    ports: ["13309:3306"]
+    networks: [core]
+
+  rmb-db:
+    <<: *mysql-common
+    container_name: rmb-db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dcn123}
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: rmb_db
+    volumes:
+      - ./rmb/db/init:/docker-entrypoint-initdb.d:ro
+      - rmb-db-data:/var/lib/mysql
+    ports: ["13310:3306"]
+    networks: [core]
+
+  adm-db:
+    <<: *mysql-common
+    container_name: adm-db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dcn123}
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: adm_db
+    volumes:
+      - ./adm/db/init:/docker-entrypoint-initdb.d:ro
+      - adm-db-data:/var/lib/mysql
+    ports: ["13311:3306"]
+    networks: [core]
+
+  batch-db:
+    <<: *mysql-common
+    container_name: batch-db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dcn123}
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: batch_db
+    volumes:
+      - ./batch-scheduler/db/init:/docker-entrypoint-initdb.d:ro
+      - batch-db-data:/var/lib/mysql
+    ports: ["13313:3306"]
+    networks: [core]
 
   # ============ IDC 1 (idc1): dcn01 + dcn03 primary databases ============
   dcn01-db:
@@ -279,7 +281,7 @@ services:
       RATE_LIMIT_RPS: "200"
       INTEREST_DAILY_RATE: ${INTEREST_DAILY_RATE:-0.0001}
     ports: ["18081:8080"]
-    networks: [idc1, global-net]
+    networks: [idc1, sf]
     labels:
       traefik.enable: "true"
       traefik.http.routers.dcn.rule: PathPrefix(`/dcn`)
@@ -314,7 +316,7 @@ services:
       RATE_LIMIT_RPS: "200"
       INTEREST_DAILY_RATE: ${INTEREST_DAILY_RATE:-0.0001}
     ports: ["18083:8080"]
-    networks: [idc1, global-net]
+    networks: [idc1, sf]
     labels:
       traefik.enable: "true"
       traefik.http.routers.dcn.rule: PathPrefix(`/dcn`)
@@ -363,7 +365,7 @@ services:
       RATE_LIMIT_RPS: "200"
       INTEREST_DAILY_RATE: ${INTEREST_DAILY_RATE:-0.0001}
     ports: ["18082:8080"]
-    networks: [idc2, global-net]
+    networks: [idc2, sf]
     labels:
       traefik.enable: "true"
       traefik.http.routers.dcn.rule: PathPrefix(`/dcn`)
@@ -414,7 +416,7 @@ services:
       RATE_LIMIT_RPS: "200"
       INTEREST_DAILY_RATE: ${INTEREST_DAILY_RATE:-0.0001}
     ports: ["18084:8080"]
-    networks: [idc2, global-net]
+    networks: [idc2, sf]
     labels:
       traefik.enable: "true"
       traefik.http.routers.dcn.rule: PathPrefix(`/dcn`)
@@ -434,7 +436,7 @@ services:
       rmb-coordinator:
         condition: service_started
 
-  # ============ Observability stack (Prometheus / exporters / Grafana) ============
+  # ============ MGMT: observability and ops ============
   prometheus:
     image: prom/prometheus:v2.54.1
     container_name: dcn-prometheus
@@ -444,7 +446,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - prometheus-data:/prometheus
     ports: ["19090:9090"]
-    networks: [global-net]
+    # Scrapes SF targets directly; per-IDC and CORE targets are reached through
+    # the exporters below (MGMT crosses zones, firewall-equivalent in production).
+    networks: [mgmt, sf]
 
   mysqld-exporter:
     image: prom/mysqld-exporter:v0.15.1
@@ -454,8 +458,9 @@ services:
       - --config.my-cnf=/cfg/my.cnf
     volumes:
       - ./deploy/mysql-exporter/my.cnf:/cfg/my.cnf:ro
-    # Scrape targets span three networks: dcn01/03-db are on idc1, dcn02-db is on idc2, the rest on global-net
-    networks: [global-net, idc1, idc2]
+    # Probes span every database location: dcn01/03-db on idc1, dcn02/04-db on
+    # idc2, gns/rmb/adm/batch-db on core.
+    networks: [mgmt, idc1, idc2, core]
 
   redis-exporter:
     image: oliver006/redis_exporter:v1.63.0
@@ -463,7 +468,7 @@ services:
     restart: unless-stopped
     environment:
       REDIS_ADDR: redis://gns-redis:6379
-    networks: [global-net]
+    networks: [mgmt, sf]
     labels:
       prometheus.scrape: "true"
       prometheus.port: "9121"
@@ -481,7 +486,7 @@ services:
       - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports: ["13000:3000"]
-    networks: [global-net]
+    networks: [mgmt]
     depends_on:
       - prometheus
 
@@ -497,7 +502,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports: ["18099:8080"]
-    networks: [global-net]
+    networks: [mgmt]
     depends_on:
       prometheus:
         condition: service_started
@@ -505,13 +510,21 @@ services:
       prometheus.scrape: "true"
       prometheus.port: "8080"
 
+# Physical security zones (dmz/sf/core/mgmt, WeBank-style) x IDC fault
+# domains (idc1/idc2): zones govern security, IDCs govern blast radius.
 networks:
+  dmz:
+    name: dcn-dmz
+  sf:
+    name: dcn-sf
+  core:
+    name: dcn-core
+  mgmt:
+    name: dcn-mgmt
   idc1:
     name: dcn-idc1
   idc2:
     name: dcn-idc2
-  global-net:
-    name: dcn-global
 
 volumes:
   gns-db-data:

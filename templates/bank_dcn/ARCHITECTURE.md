@@ -202,7 +202,7 @@ RMB 子事务消息全链路 at-least-once，幂等由各端唯一键兜底；AD
 仿真生产的「统一监控平台」，仅覆盖指标（metrics），不含告警、日志聚合与链路追踪：
 
 - **RED 埋点**：所有 Go 服务（dcn-app、gns、rmb-coordinator、adm、batch-scheduler、console）的业务路由经 `lib/metrics` 的 `metrics.Handle` 包装，输出 `http_requests_total`（labels: service/route/code）与 `http_request_duration_seconds` 直方图；`/metrics` 与 `/healthz` 一样不受限流约束。
-- **Prometheus 自动发现**：`docker_sd_configs` + 容器 label（`prometheus.scrape` / `prometheus.port`）驱动抓取，新增容器只需打 label 即自动纳入；MySQL 拓扑固定，经 mysqld-exporter `/probe` 静态枚举七库（dcn01/02/03、gns、rmb、adm、batch——mysqld-exporter 需同时挂三个网络才能触达各库）；另有 redis-exporter、rabbitmq prometheus 插件（:15692）、traefik `--metrics.prometheus`（:8082）。
+- **Prometheus 自动发现**：`docker_sd_configs` + 容器 label（`prometheus.scrape` / `prometheus.port`）驱动抓取，新增容器只需打 label 即自动纳入；MySQL 拓扑固定，经 mysqld-exporter `/probe` 静态枚举七库（dcn01/02/03、gns、rmb、adm、batch——mysqld-exporter 挂 `mgmt`+`idc1`+`idc2`+`core` 四网才能触达各库）；另有 redis-exporter、rabbitmq prometheus 插件（:15692）、traefik `--metrics.prometheus`（:8082）。
 - **Grafana**：provisioning 自动装配 Prometheus datasource 与 RED 仪表盘（uid `dcn-red`，「DCN Services (RED)」；`$service` 变量下钻单服务，面板含 RPS / 5xx 错误率 / P99 延迟 / RMB 事务终态）；匿名 Viewer 免登录，端口 13000。
 - **console 观测台**（18099）：内嵌单页——拓扑视图、容器状态墙（Docker Engine API，只读挂载 socket）、各服务 RPS 曲线（经 `/api/query` 代理 Prometheus HTTP API）。
 
@@ -221,7 +221,7 @@ RMB 子事务消息全链路 at-least-once，幂等由各端唯一键兜底；AD
 | 7 | ADM 汇总 | 等待 3s 汇总延迟 | `/report/summary` 账户数/总余额正确；`/reconcile` 返回 consistent=true |
 | 8 | 日终批量 | 经网关 `POST /batch/jobs/interest {bizDate: 当天}` | 任务 SUCCEEDED；分单元利息合计 = 调度器归集值；四单元（含 gate 6 扩容的 dcn04）余额合计增加 = 利息总额；同 bizDate 重复触发幂等（总额与余额均不变）；批量后 `/reconcile` 仍 consistent=true |
 
-辅助：`make topology-test`（`test/topology.sh`）用 `docker compose config --format json` + jq 静态断言三网络存在、各 DB 仅接入所属 IDC 网络、DCN 应用双网卡、dcn04 在 expansion profile。
+辅助：`make topology-test`（`test/topology.sh`）用 `docker compose config --format json` + jq 静态断言六网络存在（dmz/sf/core/mgmt/idc1/idc2 两正交维度）、traefik 仅 dmz+sf、公共服务 sf+core、各 DB 仅接入所属网络（全局库在 core、单元库在所属 idc）、观测栈仅 mgmt、dcn04 在 expansion profile。
 
 集成测试：`make integration-test`（`test/integration/`，Go，build tag `integration`）是与 verify.sh 互补的另一层验证——verify.sh 是编排式故障注入冒烟（停容器、重投消息、触发批量，断言端到端资金守恒），integration 包则不做故障编排，只按服务对运行中的栈发起 HTTP 外部行为契约测试（dcn-app 余额/转账语义、rmb 事务幂等注册、adm 汇总/对账、gns 开户/路由等）。栈不可达时用例自动 Skip，端点可用 `DCN_IT_*` 环境变量覆盖。
 

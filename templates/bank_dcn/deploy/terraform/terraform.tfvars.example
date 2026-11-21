@@ -1,0 +1,40 @@
+# Minimal planning data mirroring the compose topology: 3 base units +
+# expansion dcn04 (disabled by default, mirrors `docker compose --profile
+# expansion`), unit app tiers alternating across idc1/idc2, one global-zone
+# service node. Specs are simulation-minimal (t3.micro / db.t3.micro).
+
+resource_plan = {
+  region = "us-east-1"
+  zones  = ["us-east-1a", "us-east-1b"]
+  cidr   = "10.60.0.0/16"
+
+  dcns = [
+    { name = "dcn01", idc = 1, app_nodes = 1 },
+    { name = "dcn02", idc = 2, app_nodes = 1 },
+    { name = "dcn03", idc = 1, app_nodes = 1 },
+  ]
+
+  expansion = {
+    enabled   = false
+    name      = "dcn04"
+    idc       = 2
+    app_nodes = 1
+  }
+
+  global_zone = {
+    service_nodes = 1
+    mgmt_nodes    = 0
+  }
+}
+
+# Replace with an AL2023 / Ubuntu x86_64 AMI id for the chosen region.
+image_id = "ami-xxxxxxxxxxxx"
+
+# Required at apply time (8+ printable chars, no / @ " space):
+# db_master_password = "change-me-1234"
+
+# Recommended: tighten management access instead of the 0.0.0.0/0 default.
+# admin_cidr = "203.0.113.10/32"
+
+# Set to false for the cheapest unit DBs (single-AZ, no standby).
+# db_multi_az = false

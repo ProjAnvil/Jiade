@@ -1,0 +1,35 @@
+# Increment over terraform.tfvars.example: dcn04 appended to the dcns list.
+# Because the whole topology is data, adding a unit is additive —
+# `terraform plan -var-file=terraform.increment.tfvars.example` shows only
+# dcn04 resources plus the re-rendered topology artifact; existing units are
+# untouched. (The compose-parity alternative is flipping
+# resource_plan.expansion.enabled, which provisions the same unit.)
+
+resource_plan = {
+  region = "us-east-1"
+  zones  = ["us-east-1a", "us-east-1b"]
+  cidr   = "10.60.0.0/16"
+
+  dcns = [
+    { name = "dcn01", idc = 1, app_nodes = 1 },
+    { name = "dcn02", idc = 2, app_nodes = 1 },
+    { name = "dcn03", idc = 1, app_nodes = 1 },
+    { name = "dcn04", idc = 2, app_nodes = 1 }, # the increment
+  ]
+
+  expansion = {
+    enabled   = false
+    name      = "dcn05"
+    idc       = 1
+    app_nodes = 1
+  }
+
+  global_zone = {
+    service_nodes = 1
+    mgmt_nodes    = 0
+  }
+}
+
+image_id = "ami-xxxxxxxxxxxx"
+
+# db_master_password = "change-me-1234"
